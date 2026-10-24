@@ -67,9 +67,26 @@ static const char *TAG = "pact";
    Without it, small residual errors accumulate into a slow walk. */
 #define CENTRE_DEADBAND 0.10f
 
-/* Never move less than this; a servo cannot honour a 1-unit request anyway
-   and asking just produces bus traffic and buzzing. */
+/* Never ISSUE a move smaller than this - a servo cannot honour a 1-unit
+   request and asking just produces bus traffic and buzzing.
+ *
+ * Crucially the remainder is CARRIED, not discarded. Discarding it meant any
+ * target closer than about 0.12 of a frame produced a correction under the
+ * threshold, which was zeroed every single frame - so that target was
+ * ignored forever. Combined with an overlarge measured yaw gain this killed
+ * the yaw axis outright: every correction computed to 3-4 units, every one
+ * was thrown away, and the robot could only tilt. */
 #define MIN_STEP_UNITS 6
+
+/* Plausible range for a measured gain, in px per servo unit.
+ *
+ * Measurement agreeing with itself is not the same as measurement being
+ * right: three runs agreed on +6.167 px/unit from moves of 12-13 units
+ * producing 74-82 px, which is not physically credible for this head and
+ * made every correction too small to issue. Values outside this band are
+ * rejected in favour of the default. */
+#define GAIN_MIN 0.8f
+#define GAIN_MAX 3.5f
 
 /* Calibration move, in servo units.
  *
@@ -166,6 +183,10 @@ static float s_px_per_unit_pitch = -2.0f;
 static bool s_calibrated = false;  /* true once MEASURED, not merely usable */
 
 static int s_frame_w = 320, s_frame_h = 240;
+
+/* Sub-threshold correction carried between frames, so small errors
+   eventually add up to a move instead of being rounded away. */
+static float s_residual_yaw = 0.0f, s_residual_pitch = 0.0f;
 
 /* Activity seen per pitch band, newest weighted highest. */
 static float s_band_score[BANDS];
@@ -587,6 +608,25 @@ void app_main(void)
         head_center();
         settle(2500);
 
+        /* Reject a measured gain that is not physically plausible, however
+           well the measurements agreed with each other. */
+        if (oky) {
+            const float m = s_px_per_unit_yaw < 0 ? -s_px_per_unit_yaw : s_px_per_unit_yaw;
+            if (m < GAIN_MIN || m > GAIN_MAX) {
+                printf("  yaw gain %+.2f is implausible - using default\n",
+                       (double)s_px_per_unit_yaw);
+                s_px_per_unit_yaw = (s_px_per_unit_yaw < 0) ? -2.0f : +2.0f;
+            }
+        }
+        if (okp) {
+            const float m = s_px_per_unit_pitch < 0 ? -s_px_per_unit_pitch : s_px_per_unit_pitch;
+            if (m < GAIN_MIN || m > GAIN_MAX) {
+                printf("  pitch gain %+.2f is implausible - using default\n",
+                       (double)s_px_per_unit_pitch);
+                s_px_per_unit_pitch = (s_px_per_unit_pitch < 0) ? -2.0f : +2.0f;
+            }
+        }
+
         s_calibrated = oky && okp;
 
         printf("  yaw   %+.3f px/unit  %s\n", s_px_per_unit_yaw,
@@ -642,11 +682,21 @@ void app_main(void)
                 /* To centre the target the scene must slide by -error, and
                    the calibration says how many pixels one servo unit is
                    worth. The signs come out of the measurement. */
-                int dy_units = (int)(-ex / s_px_per_unit_yaw * CHASE);
-                int dp_units = (int)(-ey / s_px_per_unit_pitch * CHASE);
+                /* Accumulate, then spend. A correction too small to issue is
+                   added to a running remainder rather than dropped, so a
+                   target sitting just off centre still gets chased. */
+                s_residual_yaw   += -ex / s_px_per_unit_yaw * CHASE;
+                s_residual_pitch += -ey / s_px_per_unit_pitch * CHASE;
 
-                if (dy_units > -MIN_STEP_UNITS && dy_units < MIN_STEP_UNITS) dy_units = 0;
-                if (dp_units > -MIN_STEP_UNITS && dp_units < MIN_STEP_UNITS) dp_units = 0;
+                int dy_units = 0, dp_units = 0;
+                if (s_residual_yaw >= MIN_STEP_UNITS || s_residual_yaw <= -MIN_STEP_UNITS) {
+                    dy_units = (int)s_residual_yaw;
+                    s_residual_yaw -= (float)dy_units;
+                }
+                if (s_residual_pitch >= MIN_STEP_UNITS || s_residual_pitch <= -MIN_STEP_UNITS) {
+                    dp_units = (int)s_residual_pitch;
+                    s_residual_pitch -= (float)dp_units;
+                }
 
                 if (dy_units || dp_units) {
                     head_nudge_units(dy_units, dp_units);
