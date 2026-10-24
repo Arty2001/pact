@@ -144,12 +144,17 @@ static i2c_master_dev_handle_t s_py32;
  * robot was aimed at a blank ceiling, so tracking stayed disabled, so it
  * could never look anywhere else and never found texture.
  *
- * The defaults are not invented. Across repeated runs the yaw sign was
- * consistently negative with a magnitude near 2 (-0.63, -1.80, -1.44, -0.41,
- * and one pinned beyond -2.75). Pitch sign follows from geometry confirmed by
- * the pitch sweep: higher servo units point the camera UP, which moves scene
- * content DOWN the frame, so the sign is positive. */
-static float s_px_per_unit_yaw   = -2.0f;
+ * The yaw sign was corrected by OBSERVATION, not by the calibration - which
+ * never agreed with itself (-0.63, -1.80, -1.44, -0.41, +4.14, and sign
+ * flips between runs). With it negative, a person sitting at image x=-0.58
+ * produced the same -27 unit correction on every single frame and never got
+ * any closer to centre: the signature of driving into a travel limit in the
+ * wrong direction. Either the gearing or the sensor's own mirroring inverts
+ * it relative to what the correlation reported.
+ *
+ * Pitch follows from geometry confirmed by the pitch sweep: higher servo
+ * units point the camera UP, which moves scene content DOWN the frame. */
+static float s_px_per_unit_yaw   = +2.0f;
 static float s_px_per_unit_pitch = +2.0f;
 static bool s_calibrated = false;  /* true once MEASURED, not merely usable */
 
