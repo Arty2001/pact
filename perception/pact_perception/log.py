@@ -126,11 +126,13 @@ class Logger:
             self._stream.flush()
 
     def _enabled(self, level: Level, ev: Event, fields: dict[str, Any]) -> bool:
-        if _ORDER[level] < _ORDER[self.level]:
-            return False
+        # The firehose is opted into per skill, and that opt-in is the whole
+        # gate. Checking the level floor first would mean enabling one skill's
+        # scores also required dropping the global level to trace, which would
+        # bury the very lines you turned it on to read.
         if ev in _FIREHOSE:
             return str(fields.get("skill", "")) in self.trace_skills
-        return True
+        return _ORDER[level] >= _ORDER[self.level]
 
     # Thin wrappers so call sites read as the level they are, and so the
     # event name stays the first positional argument everywhere.
