@@ -105,6 +105,22 @@ static const char *TAG = "pact";
    something and can stop hunting. */
 #define LEARNED_SCORE 2.0f
 
+/* How long to keep watching where someone was after they stop moving.
+ *
+ * Frame differencing can only see CHANGE, so a person who holds still -
+ * or just turns to look away - vanishes from it entirely. Without a hold
+ * the robot would immediately go back to surveying and swing off them,
+ * which reads as losing interest the moment you stop waving.
+ *
+ * Holding the gaze is what makes it look like it is watching a person
+ * rather than reacting to movement. */
+#define LOCK_HOLD_US 25000000
+
+/* While locked onto someone, accept weaker evidence. Small movements - a
+   shift in a chair, a turn of the head - are enough to renew the lock even
+   though they would never start one. */
+#define LOCKED_CONFIDENCE 0.06f
+
 /* Where people are, learned rather than assumed.
  *
  * The robot cannot know how it has been placed. On a desk, people are
@@ -585,6 +601,7 @@ void app_main(void)
     printf("\n--- running ---\n\n");
 
     int64_t next_survey = esp_timer_get_time() + SURVEY_MIN_US;
+    int64_t locked_until = 0;   /* keep watching here until this time */
     int64_t next_report = 0;
     int64_t next_decay  = esp_timer_get_time() + BAND_DECAY_EVERY_US;
     int64_t next_grid   = esp_timer_get_time() + 3000000;
@@ -597,8 +614,12 @@ void app_main(void)
         activity_t act;
         bool chased = false;
 
+        /* Weaker evidence is enough to KEEP a lock than to start one. */
+        const bool locked = now < locked_until;
+        const float need = locked ? LOCKED_CONFIDENCE : MIN_CONFIDENCE;
+
         if (have_eyes && eyes_read(&act) && act.valid &&
-            act.confidence >= MIN_CONFIDENCE) {
+            act.confidence >= need) {
 
             const float mag = act.x * act.x + act.y * act.y;
             if (mag > CENTRE_DEADBAND * CENTRE_DEADBAND) {
@@ -629,7 +650,10 @@ void app_main(void)
                     float hx = 0.0f, hy = 0.0f;
                     head_position(&hx, &hy);
                     remember_activity(hy, act.confidence);
-                    next_survey = now + SURVEY_MIN_US;  /* busy: do not survey */
+
+                    /* Stay on this person after they stop moving. */
+                    locked_until = now + LOCK_HOLD_US;
+                    next_survey  = locked_until;
 
                     if (now >= next_report) {
                         next_report = now + 500000;
@@ -640,7 +664,12 @@ void app_main(void)
             }
         }
 
-        if (!chased) survey(now, &next_survey);
+        /* Only look elsewhere once the lock has expired. Surveying while
+           someone is still there is what made it seem to lose interest. */
+        /* Never look away from someone we are actively following. Motion
+           only sees change, so a still person produces no activity at all -
+           surveying then is exactly what made it seem to lose interest. */
+        if (!chased && !locked && !eyes_has_lock()) survey(now, &next_survey);
 
         if (now >= next_decay) {
             next_decay = now + BAND_DECAY_EVERY_US;

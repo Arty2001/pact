@@ -84,6 +84,28 @@ static bool s_cell_valid[GW * GH];
 /* Smoothed output. Vision is noisy frame to frame; the head should not be. */
 static float s_sx = 0.0f, s_sy = 0.0f;
 
+/* --- template tracking ---------------------------------------------------
+ *
+ * Motion finds a person; a remembered patch of their appearance KEEPS them.
+ * Frame differencing can only see change, so someone who holds still or
+ * turns away vanishes from it entirely - which is why a motion-only tracker
+ * feels like it loses interest the moment you stop waving.
+ *
+ * The template is held at grid resolution, so each cell is 16x16 px and a
+ * 5x5 template covers roughly 80x80 px - about a person at conversational
+ * distance. Matching is zero-mean sum-of-absolute-differences so a change in
+ * room brightness does not break the lock. */
+#define TPL 5                  /* template is TPL x TPL grid cells */
+#define TPL_SEARCH 4           /* cells to search either way each frame */
+#define TPL_ACQUIRE_CONF 0.30f /* motion must be this strong to grab one */
+#define TPL_LOST_SCORE 46      /* mean abs error above which the lock drops */
+#define TPL_BLEND 6            /* 1/N of the new patch blended in per frame */
+
+static uint8_t s_tpl[TPL * TPL];
+static bool s_has_tpl = false;
+static int s_tpl_gx = 0, s_tpl_gy = 0;   /* last known centre, in cells */
+static int s_tpl_miss = 0;
+
 /* Kept purely so the debug dump shows what the tracker actually saw on its
    last pass, rather than a fresh frame that may look nothing like it. */
 static int16_t s_last_diff[GW * GH];
@@ -232,7 +254,116 @@ static void sample_grid(const camera_fb_t *fb, uint8_t *grid)
     }
 }
 
+/* ---------------------------------------------------- template tracking -- */
+
+/** Mean brightness of a TPL x TPL patch of the grid, centred on (gx, gy). */
+static int patch_mean(const uint8_t *grid, int gx, int gy)
+{
+    int sum = 0, n = 0;
+    for (int dy = -TPL / 2; dy <= TPL / 2; dy++) {
+        for (int dx = -TPL / 2; dx <= TPL / 2; dx++) {
+            const int x = gx + dx, y = gy + dy;
+            if (x < 0 || x >= GW || y < 0 || y >= GH) continue;
+            sum += grid[y * GW + x];
+            n++;
+        }
+    }
+    return n ? sum / n : 0;
+}
+
+/** Remember what is at (gx, gy) so it can be followed when it stops moving. */
+static void capture_template(const uint8_t *grid, int gx, int gy)
+{
+    const int mean = patch_mean(grid, gx, gy);
+    for (int dy = 0; dy < TPL; dy++) {
+        for (int dx = 0; dx < TPL; dx++) {
+            const int x = gx + dx - TPL / 2;
+            const int y = gy + dy - TPL / 2;
+            const int v = (x >= 0 && x < GW && y >= 0 && y < GH)
+                              ? (int)grid[y * GW + x] - mean
+                              : 0;
+            /* Store zero-mean, offset to fit unsigned. */
+            s_tpl[dy * TPL + dx] = (uint8_t)(v + 128 < 0 ? 0 : (v + 128 > 255 ? 255 : v + 128));
+        }
+    }
+    s_tpl_gx = gx;
+    s_tpl_gy = gy;
+    s_has_tpl = true;
+    s_tpl_miss = 0;
+}
+
+/**
+ * Find the template near where it was last seen.
+ *
+ * Zero-mean matching: the patch mean is removed from both sides, so the lock
+ * survives the lights changing or the camera's auto-exposure drifting, which
+ * would otherwise look like the person had been replaced.
+ */
+static bool find_template(const uint8_t *grid, int *best_gx, int *best_gy, int *best_err)
+{
+    int bx = s_tpl_gx, by = s_tpl_gy, berr = 1 << 30;
+
+    for (int oy = -TPL_SEARCH; oy <= TPL_SEARCH; oy++) {
+        for (int ox = -TPL_SEARCH; ox <= TPL_SEARCH; ox++) {
+            const int cx = s_tpl_gx + ox;
+            const int cy = s_tpl_gy + oy;
+            if (cx < TPL / 2 || cx >= GW - TPL / 2) continue;
+            if (cy < TPL / 2 || cy >= GH - TPL / 2) continue;
+
+            const int mean = patch_mean(grid, cx, cy);
+            int err = 0;
+            for (int dy = 0; dy < TPL; dy++) {
+                for (int dx = 0; dx < TPL; dx++) {
+                    const int x = cx + dx - TPL / 2;
+                    const int y = cy + dy - TPL / 2;
+                    const int got = (int)grid[y * GW + x] - mean;
+                    const int want = (int)s_tpl[dy * TPL + dx] - 128;
+                    err += got > want ? got - want : want - got;
+                }
+            }
+            err /= (TPL * TPL);
+            if (err < berr) { berr = err; bx = cx; by = cy; }
+        }
+    }
+
+    *best_gx = bx;
+    *best_gy = by;
+    *best_err = berr;
+    return berr <= TPL_LOST_SCORE;
+}
+
+/** Blend the current view into the template so it survives slow changes. */
+static void refresh_template(const uint8_t *grid, int gx, int gy)
+{
+    const int mean = patch_mean(grid, gx, gy);
+    for (int dy = 0; dy < TPL; dy++) {
+        for (int dx = 0; dx < TPL; dx++) {
+            const int x = gx + dx - TPL / 2;
+            const int y = gy + dy - TPL / 2;
+            if (x < 0 || x >= GW || y < 0 || y >= GH) continue;
+            const int now = (int)grid[y * GW + x] - mean + 128;
+            const int old = s_tpl[dy * TPL + dx];
+            s_tpl[dy * TPL + dx] = (uint8_t)(old + (now - old) / TPL_BLEND);
+        }
+    }
+    s_tpl_gx = gx;
+    s_tpl_gy = gy;
+}
+
+void eyes_drop_lock(void)
+{
+    s_has_tpl = false;
+    s_tpl_miss = 0;
+}
+
+bool eyes_has_lock(void)
+{
+    return s_has_tpl;
+}
+
 /* ------------------------------------------------------------------ read -- */
+
+static bool follow_template(const uint8_t *grid, activity_t *out);
 
 bool eyes_read(activity_t *out)
 {
@@ -240,6 +371,7 @@ bool eyes_read(activity_t *out)
     out->valid = false;
     out->x = out->y = 0.0f;
     out->confidence = 0.0f;
+    out->from_template = false;
 
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) return false;
@@ -314,10 +446,17 @@ bool eyes_read(activity_t *out)
     s_last_active = active;
     s_last_valid  = false;
 
-    if (active < MIN_ACTIVE_BLOCKS || total == 0) return true;
+    /* Nothing moved - but someone standing still is still there. */
+    if (active < MIN_ACTIVE_BLOCKS || total == 0) {
+        follow_template(grid, out);
+        return true;
+    }
 
     /* Too much of the frame changed to be one thing happening in it. */
-    if ((float)active > MAX_ACTIVE_FRACTION * (GW * GH)) return true;
+    if ((float)active > MAX_ACTIVE_FRACTION * (GW * GH)) {
+        follow_template(grid, out);
+        return true;
+    }
 
     const float cx = (float)wx / (float)total;  /* grid units */
     const float cy = (float)wy / (float)total;
@@ -336,7 +475,10 @@ bool eyes_read(activity_t *out)
        and acting on it makes the head integrate a small bias into a slow
        walk off target. */
     const float mag = (s_sx * s_sx + s_sy * s_sy);
-    if (mag < CENTRE_DEADBAND * CENTRE_DEADBAND) return true;
+    if (mag < CENTRE_DEADBAND * CENTRE_DEADBAND) {
+        follow_template(grid, out);
+        return true;
+    }
 
     /* Confidence from how much of the frame changed, scaled so a handful of
        blocks is tentative and a solid cluster is convincing. */
@@ -349,9 +491,53 @@ bool eyes_read(activity_t *out)
     out->confidence = conf;
     out->valid = true;
 
+    /* Strong motion is how a person gets found. Remember what is there so
+       they can be followed once they stop moving. */
+    if (conf >= TPL_ACQUIRE_CONF) {
+        const int gx = (int)((s_sx * 0.5f + 0.5f) * (GW - 1) + 0.5f);
+        const int gy = (int)((s_sy * 0.5f + 0.5f) * (GH - 1) + 0.5f);
+        capture_template(grid, gx, gy);
+    }
+
     s_last_cx    = s_sx;
     s_last_cy    = s_sy;
     s_last_valid = true;
+    return true;
+}
+
+/**
+ * Follow a remembered appearance when nothing is moving.
+ *
+ * Called when motion found nothing. This is what makes the robot stay on a
+ * person who is standing still or looking away, rather than treating them as
+ * gone the moment they stop waving.
+ */
+static bool follow_template(const uint8_t *grid, activity_t *out)
+{
+    if (!s_has_tpl) return false;
+
+    int gx = 0, gy = 0, err = 0;
+    const bool found = find_template(grid, &gx, &gy, &err);
+
+    if (!found) {
+        /* Tolerate a few bad frames - someone turning, or a hand passing in
+           front - before concluding they have actually gone. */
+        if (++s_tpl_miss > 12) {
+            s_has_tpl = false;
+        }
+        return false;
+    }
+    s_tpl_miss = 0;
+    refresh_template(grid, gx, gy);
+
+    out->x = ((float)gx / (float)(GW - 1)) * 2.0f - 1.0f;
+    out->y = ((float)gy / (float)(GH - 1)) * 2.0f - 1.0f;
+    /* Confidence from match quality: a perfect match is 1.0, and the lost
+       threshold is 0. */
+    out->confidence = 1.0f - ((float)err / (float)TPL_LOST_SCORE);
+    if (out->confidence < 0.0f) out->confidence = 0.0f;
+    out->valid = true;
+    out->from_template = true;
     return true;
 }
 

@@ -26,12 +26,23 @@ extern "C" {
 #endif
 
 typedef struct {
-    /** Where the activity is, -1..1, relative to frame centre. */
+    /** Where the target is, -1..1, relative to frame centre. */
     float x, y;
-    /** 0..1. How much changed. Low means "nothing is happening". */
+    /** 0..1. How sure we are. */
     float confidence;
     /** False when there is nothing worth looking at. */
     bool valid;
+    /**
+     * True when this came from following a remembered appearance rather
+     * than from motion.
+     *
+     * Motion can only see CHANGE, so someone who holds still or turns away
+     * disappears from it completely. Once motion has located a person, the
+     * patch of image where they are gets remembered and followed directly -
+     * a still person still LOOKS like themselves, so the lock survives them
+     * standing perfectly still.
+     */
+    bool from_template;
 } activity_t;
 
 /** Start the camera. Takes over I2C pins 12/11, so release them first. */
@@ -92,6 +103,12 @@ bool eyes_snapshot(void);
  * negative. Callers convert that into a direction themselves.
  */
 bool eyes_shift_since_snapshot(int *dx, int *dy, double *quality);
+
+/** True while a person's appearance is being followed. */
+bool eyes_has_lock(void);
+
+/** Forget the tracked appearance, e.g. when deliberately looking elsewhere. */
+void eyes_drop_lock(void);
 
 /** Frame dimensions, once the camera is up. */
 void eyes_frame_size(int *w, int *h);
