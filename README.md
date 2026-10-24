@@ -189,9 +189,25 @@ Nothing is decoded in Node — ffmpeg's bytes are forwarded packet by packet int
 a WebRTC track. See [bridge/README.md](bridge/README.md) for the copy-vs-transcode
 decision, the supervision model, and `--dry-run`.
 
-For ESP32 specifically, [`esp-webrtc-solution`](https://github.com/espressif/esp-webrtc-solution)
-can publish WebRTC from an S3 or P4 directly, making a camera node a
-first-class publisher with no bridge at all.
+### ESP32 notes
+
+Use the bridge, and prefer **RTSP firmware** such as
+[`esp32cam-rtsp`](https://github.com/rzeldent/esp32cam-rtsp) over the stock
+CameraWebServer MJPEG example. The stock MJPEG stream does not return a proper
+HTTP status code, so it plays in a browser but
+[chokes ffmpeg, VLC and OpenCV](https://github.com/espressif/arduino-esp32/issues/3597).
+RTSP avoids that entirely.
+
+An S3 has no hardware video encoder, so `--transcode` is mandatory (~1 core per
+stream). An ESP32-P4 has hardware H.264 at 1080p30, which lets the bridge run
+`-c:v copy` for near-zero CPU.
+
+Publishing WebRTC *directly* from the board is not currently possible against
+this hub. Espressif's [`esp-webrtc-solution`](https://github.com/espressif/esp-webrtc-solution)
+speaks WHIP, and Realtime SFU does not. Its signaling layer is pluggable
+(`esp_peer_signaling_impl_t` is three functions), so porting it to Cloudflare's
+sessions/tracks API is feasible firmware work — but it is firmware work, not a
+config change.
 
 ## What this deliberately is not
 

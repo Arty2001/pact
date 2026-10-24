@@ -68,6 +68,14 @@ Check your camera's settings before reaching for `--transcode`. Many cameras
 can be switched to H.264 in their own web UI, which moves the encoding onto the
 camera's ASIC and off your CPU entirely.
 
+**ESP32:** flash RTSP firmware such as
+[`esp32cam-rtsp`](https://github.com/rzeldent/esp32cam-rtsp) rather than using
+the stock CameraWebServer MJPEG example. That stream omits a proper HTTP status
+code, so it renders in a browser but
+[ffmpeg, VLC and OpenCV all struggle with it](https://github.com/espressif/arduino-esp32/issues/3597).
+An S3 always needs `--transcode`; an ESP32-P4 has hardware H.264 and can be
+passed through with no re-encode.
+
 When transcoding, the encoder is set to `-tune zerolatency` (no B-frames, no
 lookahead), `-profile:v baseline` (widest browser support) and `-g 30`
 (keyframe every second).
