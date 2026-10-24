@@ -1,25 +1,30 @@
 /* ===========================================================================
-   Pact x M5StackChan - STAGE B: motion, running for real
+   Pact x M5StackChan - STAGE C: look at whatever is happening
 
-   Stage A read the hardware. Stage A2 found which write actually moves a
-   servo (plain GOAL_POSITION; the combined write was rejected by a buffer
-   guard that was also one byte from overflowing).
+   The robot finds activity and points its head at it. Not face detection:
+   activity works with your back turned, far away, side-on and in poor light,
+   needs no model, and is the same kind of signal sound will later provide.
 
-   This stage puts that to work: a rate-limited position controller and a
-   lifelike idle behaviour, so the motion stack is proven before vision is
-   layered on top of it.
+   Boot sequence, all of it measured rather than assumed:
 
-   Watch the serial output and the head should: centre, sweep its full
-   measured travel on each axis, then drift around like something alive.
+     1. servo rail on via the PY32 expander, then release I2C - the camera
+        needs those same pins
+     2. read each servo's travel from its own EEPROM
+     3. probe the MECHANICAL limits, which are narrower than the electrical
+        ones (pitch meets the robot's own body)
+     4. start the camera
+     5. measure which way positive yaw actually points the lens, by nudging
+        the head and watching which way the world slides
+     6. track
    =========================================================================== */
 
 #include <stdio.h>
-#include <stdlib.h>
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "eyes.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "head.h"
@@ -43,8 +48,31 @@ static const char *TAG = "pact";
 
 #define TICK_HZ 50
 
+/* How hard to chase activity. The head only needs to get there smoothly, so
+   a fraction of the error per update beats a hard jump. */
+#define CHASE_GAIN 0.35f
+
+/* Ignore activity weaker than this; it is usually noise or a flickering
+   screen rather than a person. */
+#define MIN_CONFIDENCE 0.08f
+
+/* Nothing interesting for this long and the robot goes back to idling. */
+#define BORED_AFTER_US 6000000
+
+/* How far to turn while measuring the yaw sign.
+ *
+ * Deliberately tiny. 0.28 was tried first and failed: it rotates the head
+ * far enough that the two frames barely overlap, so cross-correlation finds
+ * no match and reports a shift of zero. The move has to be small enough that
+ * most of the scene is still in view afterwards. */
+#define YAW_NUDGE 0.05f
+
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_py32;
+
+/* Measured at boot, never assumed. +1 means positive yaw points right. */
+static int s_yaw_sign = +1;
+static bool s_yaw_sign_known = false;
 
 /* ------------------------------------------------------------------ i2c -- */
 
@@ -68,7 +96,15 @@ static esp_err_t py32_set_bit(uint8_t reg, uint8_t bit, bool on)
     return py32_write8(reg, v);
 }
 
-static bool i2c_init(void)
+/**
+ * Power the servo rail, then hand the I2C pins to the camera.
+ *
+ * The PY32 and the camera's SCCB share pins 12/11, and esp32-camera wants to
+ * own that bus. We only need the expander once at boot, so the bus is
+ * released afterwards - the Arduino driver does the same thing via
+ * M5.In_I2C.release().
+ */
+static bool servo_power_on_then_release_i2c(void)
 {
     const i2c_master_bus_config_t bus_cfg = {
         .i2c_port                     = I2C_NUM_0,
@@ -78,19 +114,18 @@ static bool i2c_init(void)
         .glitch_ignore_cnt            = 7,
         .flags.enable_internal_pullup = true,
     };
-    if (i2c_new_master_bus(&bus_cfg, &s_bus) != ESP_OK) return false;
-
+    if (i2c_new_master_bus(&bus_cfg, &s_bus) != ESP_OK) {
+        ESP_LOGE(TAG, "i2c bus init failed");
+        return false;
+    }
     const i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = PY32_ADDR,
         .scl_speed_hz    = 100000,
     };
-    return i2c_master_bus_add_device(s_bus, &dev_cfg, &s_py32) == ESP_OK;
-}
+    if (i2c_master_bus_add_device(s_bus, &dev_cfg, &s_py32) != ESP_OK) return false;
 
-/** The servo rail is gated behind the PY32, which boots slower than we do. */
-static bool servo_power_on(void)
-{
+    bool powered = false;
     uint8_t version = 0;
     for (int i = 0; i < 8; i++) {
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -103,79 +138,53 @@ static bool servo_power_on(void)
             ok &= py32_set_bit(PY32_REG_OUT_L, PY32_PIN_VM_EN, true) == ESP_OK;
             vTaskDelay(pdMS_TO_TICKS(400));
             ESP_LOGI(TAG, "servo rail %s", ok ? "ENABLED" : "FAILED");
-            return ok;
+            powered = ok;
+            break;
         }
     }
-    ESP_LOGE(TAG, "PY32 did not answer at 0x%02X", PY32_ADDR);
-    return false;
+    if (!powered) ESP_LOGE(TAG, "PY32 did not answer at 0x%02X", PY32_ADDR);
+
+    /* Hand the pins over. */
+    i2c_master_bus_rm_device(s_py32);
+    i2c_del_master_bus(s_bus);
+    s_py32 = NULL;
+    s_bus  = NULL;
+    ESP_LOGI(TAG, "i2c released for the camera");
+
+    return powered;
+}
+
+/* ------------------------------------------------- yaw sign measurement -- */
+
+/** Command a small positive yaw move and let it settle. */
+static void yaw_nudge(void)
+{
+    float x = 0, y = 0;
+    head_position(&x, &y);
+
+    eyes_set_head_moving(true);
+    head_look(x + YAW_NUDGE, y);
+    for (int i = 0; i < 60; i++) {   /* ~1.2 s of ticks */
+        head_tick();
+        vTaskDelay(pdMS_TO_TICKS(1000 / TICK_HZ));
+    }
+    vTaskDelay(pdMS_TO_TICKS(450));  /* let the servo physically arrive */
+    eyes_set_head_moving(false);
+    vTaskDelay(pdMS_TO_TICKS(250));
 }
 
 /* ------------------------------------------------------------- behaviour -- */
 
 static float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
 
-/** Random float in [-m, m]. */
-static float frand_sym(float m) { return (frand() * 2.0f - 1.0f) * m; }
-
-/**
- * Drive the head toward `x,y` and block until it arrives.
- *
- * Used by the self-test sweep. The tracker will not block like this - it
- * updates the target continuously and lets head_tick chase it.
- */
-static void goto_and_wait(float x, float y, int timeout_ms)
+static void idle_step(int64_t now, int64_t *next)
 {
+    if (now < *next) return;
+    const float x = (frand() * 2.0f - 1.0f) * 0.7f;
+    const float y = 0.1f + (frand() * 2.0f - 1.0f) * 0.3f;
     head_look(x, y);
-    const int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
-    while (head_is_moving() && esp_timer_get_time() < deadline) {
-        head_tick();
-        vTaskDelay(pdMS_TO_TICKS(1000 / TICK_HZ));
-    }
-    /* Let the servos physically catch up to the last commanded setpoint. */
-    vTaskDelay(pdMS_TO_TICKS(350));
-}
-
-/** Walk the full measured travel so the limits can be seen, not trusted. */
-static void sweep_self_test(void)
-{
-    printf("\n--- travel self-test ---\n");
-
-    const struct { const char *label; float x, y; } path[] = {
-        {"centre",      0.0f,  0.0f},
-        {"yaw left",   -1.0f,  0.0f},
-        {"yaw right",   1.0f,  0.0f},
-        {"centre",      0.0f,  0.0f},
-        {"pitch down",  0.0f, -1.0f},
-        {"pitch up",    0.0f,  1.0f},
-        {"centre",      0.0f,  0.0f},
-    };
-
-    for (size_t i = 0; i < sizeof(path) / sizeof(path[0]); i++) {
-        goto_and_wait(path[i].x, path[i].y, 3000);
-        printf("  %-11s commanded (%+.1f,%+.1f)  servo yaw=%4d pitch=%4d\n",
-               path[i].label, path[i].x, path[i].y,
-               scs_read_pos(SCS_ID_YAW), scs_read_pos(SCS_ID_PITCH));
-    }
-}
-
-/**
- * Idle behaviour.
- *
- * Glancing around with uneven pauses reads as alive; a metronome does not.
- * Pitch stays in the upper half of travel because a desk robot looking at
- * the ceiling or its own base looks broken rather than curious.
- */
-static void idle_step(int64_t now_us, int64_t *next_move_us)
-{
-    if (now_us < *next_move_us) return;
-
-    const float x = frand_sym(0.75f);
-    const float y = 0.15f + frand_sym(0.35f);
-    head_look(x, y);
-
-    /* 0.9 - 3.4 s, so the rhythm never settles into a pattern. */
-    *next_move_us = now_us + (int64_t)((0.9f + frand() * 2.5f) * 1000000.0f);
-    printf("  idle -> (%+.2f, %+.2f)\n", x, y);
+    *next = now + (int64_t)((1.2f + frand() * 2.6f) * 1000000.0f);
+    printf("  idle   -> (%+.2f, %+.2f)\n", x, y);
 }
 
 /* ------------------------------------------------------------------ main -- */
@@ -185,11 +194,12 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2500));
 
     printf("\n==================================================\n");
-    printf("  PACT x M5STACKCHAN - stage B: motion\n");
+    printf("  PACT x M5STACKCHAN - stage C: activity tracking\n");
     printf("==================================================\n");
 
-    if (!i2c_init()) { printf("i2c FAILED\n"); return; }
-    if (!servo_power_on()) printf("WARNING: servo rail unconfirmed\n");
+    if (!servo_power_on_then_release_i2c()) {
+        printf("WARNING: servo rail unconfirmed, continuing\n");
+    }
 
     if (!scs_begin(SERVO_TX, SERVO_RX, SERVO_BAUD)) {
         printf("servo bus FAILED - nothing answered\n");
@@ -197,36 +207,73 @@ void app_main(void)
     }
     if (!head_begin()) { printf("head init FAILED\n"); return; }
 
-    /* The servos' EEPROM limits are electrical, not mechanical. Find the real
-       ones before anything drives the head into its own body. */
-    printf("\n--- mechanical limit calibration ---\n");
+    printf("\n--- mechanical limits ---\n");
     head_calibrate();
 
-    sweep_self_test();
+    printf("\n--- camera ---\n");
+    const bool have_eyes = eyes_begin();
+    if (!have_eyes) {
+        printf("  camera FAILED - falling back to idle motion only\n");
+    } else {
+        int w = 0, h = 0;
+        eyes_frame_size(&w, &h);
+        printf("  %dx%d RGB565\n", w, h);
 
-    printf("\n--- idle behaviour (running) ---\n");
-    printf("  the head should drift around at uneven intervals\n\n");
+        printf("\n--- measuring yaw direction (not assuming it) ---\n");
+        int sign = 0;
+        if (eyes_measure_yaw_sign(yaw_nudge, &sign)) {
+            s_yaw_sign = sign;
+            s_yaw_sign_known = true;
+            printf("  MEASURED: positive yaw points %s\n",
+                   sign > 0 ? "RIGHT" : "LEFT");
+        } else {
+            printf("  could not measure - scene too flat.\n");
+            printf("  assuming positive = right; point the robot at something\n");
+            printf("  with vertical detail and reboot to measure properly.\n");
+        }
+        head_center();
+    }
 
-    int64_t next_move = 0;
+    printf("\n--- tracking ---\n");
+    printf("  move in front of it and the head should follow\n\n");
+
+    int64_t next_idle = 0;
+    int64_t last_seen = esp_timer_get_time();
     int64_t next_report = 0;
 
     while (1) {
         const int64_t now = esp_timer_get_time();
 
-        idle_step(now, &next_move);
-        head_tick();
+        /* Let the eyes know whether the scene is moving because WE are. */
+        eyes_set_head_moving(head_is_moving());
 
-        if (now >= next_report) {
-            next_report = now + 5000000;
-            float x = 0, y = 0;
-            head_position(&x, &y);
-            scs_status_t st;
-            if (scs_read_status(SCS_ID_YAW, &st)) {
-                printf("  [5s] at (%+.2f,%+.2f)  yaw %d  load %d  %.1fV  %dC\n",
-                       x, y, st.position, st.load, st.voltage, st.temperature);
+        activity_t act;
+        if (have_eyes && eyes_read(&act) && act.valid &&
+            act.confidence >= MIN_CONFIDENCE) {
+
+            float hx = 0, hy = 0;
+            head_position(&hx, &hy);
+
+            /* Activity is measured relative to the frame, so it is an ERROR
+               to be driven out, added to where the head already points.
+               The yaw sign came from measurement; the pitch sign is negated
+               because image y grows downward while pitch grows upward. */
+            const float tx = hx + (float)s_yaw_sign * act.x * CHASE_GAIN;
+            const float ty = hy - act.y * CHASE_GAIN;
+
+            head_look(tx, ty);
+            last_seen = now;
+
+            if (now >= next_report) {
+                next_report = now + 400000;
+                printf("  activity (%+.2f,%+.2f) conf %.2f -> head (%+.2f,%+.2f)\n",
+                       act.x, act.y, act.confidence, tx, ty);
             }
+        } else if (now - last_seen > BORED_AFTER_US) {
+            idle_step(now, &next_idle);
         }
 
+        head_tick();
         vTaskDelay(pdMS_TO_TICKS(1000 / TICK_HZ));
     }
 }
