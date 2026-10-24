@@ -56,6 +56,20 @@ bool eyes_read(activity_t *out);
 void eyes_set_head_moving(bool moving);
 
 /**
+ * Tell the eyes how far the head is about to swing the view, in pixels.
+ *
+ * This is what lets detection keep working WHILE the head moves. Discarding
+ * the reference frame on every move meant the robot went blind each time it
+ * tracked, producing a stop-start loop that feels like lag. Instead the
+ * reference grid is slid by the predicted amount, so self-motion cancels and
+ * only real movement in the room survives the difference.
+ *
+ * Call with the shift the commanded servo move will produce, derived from
+ * the measured pixels-per-servo-unit gain.
+ */
+void eyes_compensate(float dx_px, float dy_px);
+
+/**
  * Remember the current view, for comparison after the head moves.
  *
  * Stores a column and a row brightness profile. Used to calibrate how far

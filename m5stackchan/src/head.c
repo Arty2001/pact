@@ -14,9 +14,10 @@ static int s_pit_lo = 20, s_pit_hi = 1003;
 static int s_yaw_target, s_pit_target;  /* servo units */
 static int s_yaw_now, s_pit_now;
 
-/* 983 units over ~90 degrees of pitch means 1 unit is about a tenth of a
-   degree, so 12 units/tick at 50 Hz is a brisk-but-not-twitchy 60 deg/s. */
-static int s_rate = 12;
+/* Units of travel per 50 Hz tick. Raised from 12 after the head was
+   described as "delayed and restricted": 12 units/tick capped the head at
+   roughly half the speed the servos can actually deliver. */
+static int s_rate = 26;
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 

@@ -50,9 +50,18 @@ static const char *TAG = "eyes";
  * 80 px window is a clipped answer that reads as a real one. */
 #define MAX_LAG 110
 
-/* How long after the head stops before motion data is trusted again. The
-   scene is still settling - and so is the servo - for a moment after. */
-#define SETTLE_US 350000
+/* How long after the head stops before motion data is trusted again.
+ *
+ * Short now that self-motion is compensated rather than waited out. It used
+ * to be 350 ms, which meant the robot went blind after every tracking step -
+ * and tracking is nothing but steps, so it spent most of its time unable to
+ * see. That stop-start loop is what felt like lag. */
+#define SETTLE_US 60000
+
+/* Pixels per grid cell, used to convert a predicted image shift into a
+   whole-cell offset of the reference grid. */
+#define CELL_W (320 / GW)
+#define CELL_H (240 / GH)
 
 static uint8_t s_prev[GW * GH];
 static bool s_have_prev = false;
@@ -61,6 +70,16 @@ static int s_w = 0, s_h = 0;
 
 static bool s_head_moving = false;
 static int64_t s_still_since = 0;
+
+/* Predicted view shift since the reference grid was taken, in pixels. */
+static float s_comp_x = 0.0f, s_comp_y = 0.0f;
+
+/* Cells whose reference slid in from outside the frame. They have no history
+   to difference against, so they must be SKIPPED rather than compared
+   against zero - comparing against zero produced a huge false signal pinned
+   to whichever edge the head was moving away from, which read as activity
+   permanently off to one side. */
+static bool s_cell_valid[GW * GH];
 
 /* Smoothed output. Vision is noisy frame to frame; the head should not be. */
 static float s_sx = 0.0f, s_sy = 0.0f;
@@ -136,12 +155,45 @@ void eyes_frame_size(int *w, int *h)
 void eyes_set_head_moving(bool moving)
 {
     if (s_head_moving && !moving) s_still_since = esp_timer_get_time();
-    if (moving) {
-        /* Throw away the reference frame: it was taken from a different
-           direction and differencing against it is meaningless. */
-        s_have_prev = false;
-    }
     s_head_moving = moving;
+}
+
+void eyes_compensate(float dx_px, float dy_px)
+{
+    s_comp_x += dx_px;
+    s_comp_y += dy_px;
+}
+
+/**
+ * Slide the reference grid to cancel the head's own movement.
+ *
+ * Only whole cells are shifted; the sub-cell remainder is carried forward so
+ * a run of small moves still accumulates into a correction rather than being
+ * repeatedly rounded away.
+ */
+static void apply_compensation(void)
+{
+    const int cx = (int)(s_comp_x / CELL_W);
+    const int cy = (int)(s_comp_y / CELL_H);
+    if (cx == 0 && cy == 0) return;
+
+    static uint8_t shifted[GW * GH];
+    for (int gy = 0; gy < GH; gy++) {
+        for (int gx = 0; gx < GW; gx++) {
+            const int sx = gx + cx;
+            const int sy = gy + cy;
+            const int i = gy * GW + gx;
+            const bool inside = (sx >= 0 && sx < GW && sy >= 0 && sy < GH);
+            shifted[i] = inside ? s_prev[sy * GW + sx] : 0;
+            s_cell_valid[i] = inside;
+        }
+    }
+    memcpy(s_prev, shifted, sizeof(shifted));
+
+    /* Edges that slid in from outside have no history, so nothing can be
+       said about them this frame. Keeping the remainder avoids drift. */
+    s_comp_x -= (float)(cx * CELL_W);
+    s_comp_y -= (float)(cy * CELL_H);
 }
 
 /* -------------------------------------------------------------- sampling -- */
@@ -209,17 +261,25 @@ bool eyes_read(activity_t *out)
     if (!s_have_prev) {
         memcpy(s_prev, grid, sizeof(grid));
         s_have_prev = true;
+        s_comp_x = s_comp_y = 0.0f;
         return true;
     }
+
+    /* Cancel the head's own contribution before looking for the room's. */
+    for (int i = 0; i < GW * GH; i++) s_cell_valid[i] = true;
+    apply_compensation();
 
     /* Per-block signed change, and its mean across the frame. */
     static int16_t diff[GW * GH];
     int32_t sum = 0;
+    int counted = 0;
     for (int i = 0; i < GW * GH; i++) {
+        if (!s_cell_valid[i]) { diff[i] = 0; continue; }
         diff[i] = (int16_t)((int)grid[i] - (int)s_prev[i]);
         sum += diff[i];
+        counted++;
     }
-    const int mean = sum / (GW * GH);
+    const int mean = counted ? sum / counted : 0;
 
     memcpy(s_prev, grid, sizeof(grid));
 
@@ -237,6 +297,7 @@ bool eyes_read(activity_t *out)
     for (int gy = 0; gy < GH; gy++) {
         for (int gx = 0; gx < GW; gx++) {
             const int i = gy * GW + gx;
+            if (!s_cell_valid[i]) continue;
             const int d = diff[i] - mean;
             const uint32_t mag = (uint32_t)(d < 0 ? -d : d);
             if (mag < BLOCK_THRESHOLD) continue;
