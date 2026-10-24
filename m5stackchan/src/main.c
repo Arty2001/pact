@@ -52,160 +52,86 @@ static const char *TAG = "pact";
 
 #define TICK_HZ 50
 
-/* Fraction of the computed correction applied per update.
- *
- * Raised from 0.30: with self-motion now compensated the loop sees
- * continuously instead of going blind after each step, so it can afford to
- * commit more of the correction per update without oscillating. */
-#define CHASE 0.60f
+/* ---------------------------------------------------------------------------
+   Tracking, in DEGREES.
 
-/* Detections weaker than this do not steer. Raised after watching the head
-   creep on marginal readings. */
+   Rewritten after studying 7H3-CH053N/StackChan-CustomFW, custom firmware
+   for this exact robot. The approach there is simpler than what was here
+   and does not need any camera calibration at all.
+
+   A target sitting at normalized offset d from the frame centre is
+   d * HALF_FOV degrees off axis, because that is what field of view MEANS.
+   Turn that far, times a gain. The lens FOV is a fixed property of the
+   optics, so there is nothing to measure at runtime.
+
+   This replaces a whole subsystem that measured pixels of image shift per
+   servo unit. That measurement never once reproduced across six attempts -
+   magnitudes spread fourfold and the sign flipped between runs - and one
+   bad result silently killed the yaw axis entirely. The constant worth
+   having was the one that never needed measuring.
+   --------------------------------------------------------------------------- */
+
+/* GC0308 on the CoreS3: roughly 50 x 38 degrees, so half is 25 x 19. */
+#define HALF_FOV_X 25.0f
+#define HALF_FOV_Y 19.0f
+
+/* SCS0009 covers about 300 degrees over its 1023 counts. Cross-checks
+   against the measured travel: 285 counts of pitch is 83 degrees, and M5
+   document the tilt axis as 90. */
+#define DEG_PER_UNIT 0.293f
+
+/* Fraction of the angular error corrected per update. */
+#define TRACK_GAIN 0.6f
+
+/* The CoreS3 camera image is MIRRORED horizontally - which is why the yaw
+   direction kept coming out inverted from image correlation, and why it was
+   finally only fixable by watching the robot rather than the numbers. The
+   two axes legitimately have different signs. */
+#define TRACK_SIGN_X (-1.0f)
+#define TRACK_SIGN_Y (+1.0f)
+
+/* Deadbands, per axis. A target this close to centre is already being
+   looked at, and chasing it is the nervous twitching we do not want. */
+#define DEADBAND_X 0.12f
+#define DEADBAND_Y 0.15f
+
+/* Detections weaker than this do not steer. */
 #define MIN_CONFIDENCE 0.18f
 
-/* Ignore targets already this close to centre, as a fraction of half-frame.
-   Without it, small residual errors accumulate into a slow walk. */
-#define CENTRE_DEADBAND 0.10f
+/* How long a lost target is held before searching. Bridges detector misses
+   without freezing the head on something that has gone. */
+#define MEMORY_US 4000000
 
-/* Never ISSUE a move smaller than this - a servo cannot honour a 1-unit
-   request and asking just produces bus traffic and buzzing.
- *
- * Crucially the remainder is CARRIED, not discarded. Discarding it meant any
- * target closer than about 0.12 of a frame produced a correction under the
- * threshold, which was zeroed every single frame - so that target was
- * ignored forever. Combined with an overlarge measured yaw gain this killed
- * the yaw axis outright: every correction computed to 3-4 units, every one
- * was thrown away, and the robot could only tilt. */
-#define MIN_STEP_UNITS 6
+/* Search: yaw offsets in degrees around where the target was last seen,
+   nearest first then outwards, with a still pause at each. One pass, then
+   rest - a robot that searches all night reads as broken. */
+#define SEARCH_DWELL_US 2000000
+static const float kSearchDeg[] = {0, -20, 20, -40, 40, -60, 60};
+#define SEARCH_STEPS ((int)(sizeof(kSearchDeg) / sizeof(kSearchDeg[0])))
 
-/* Plausible range for a measured gain, in px per servo unit.
- *
- * Measurement agreeing with itself is not the same as measurement being
- * right: three runs agreed on +6.167 px/unit from moves of 12-13 units
- * producing 74-82 px, which is not physically credible for this head and
- * made every correction too small to issue. Values outside this band are
- * rejected in favour of the default. */
-#define GAIN_MIN 0.8f
-#define GAIN_MAX 3.5f
-
-/* Calibration move, in servo units.
- *
- * Bounded from both sides. Too small and the servo deadband swallows part of
- * it (a 24-unit nudge produced a misleadingly tiny 5 px). Too large and the
- * two frames stop overlapping, leaving correlation nothing to match. At the
- * measured gain of roughly 2 px per unit, 20 units is about 40 px of slide -
- * comfortably inside the search window. 40 units pinned yaw at the 110 px
- * limit, which the pinned-result check correctly rejected. */
-#define CAL_UNITS 20
-
-/* Debug telemetry over the USB cable.
- *
- * Debugging a vision system from numbers alone is guesswork; this pushes the
- * motion grid and a JPEG down the same cable carrying the logs, so what the
- * robot sees can actually be looked at. No WiFi needed. */
+/* Debug telemetry over the USB cable. */
 #define DEBUG_GRID_EVERY_US  2000000
 #define DEBUG_JPEG_EVERY_US 10000000
-
-/* Idle: hold still, then occasionally look around.
- *
- * Two speeds. While the robot still knows nothing about where people are it
- * explores briskly, because at 22-55 s per look it would take many minutes
- * to discover that everyone is below where it happens to be pointed. Once a
- * band has earned a score it settles into the slower, calmer rhythm - a
- * robot that keeps pacing reads as broken. */
-#define SURVEY_FAST_MIN_US  6000000
-#define SURVEY_FAST_MAX_US 12000000
-#define SURVEY_MIN_US      22000000
-#define SURVEY_MAX_US      55000000
-
-/* Total band score above which the robot is considered to have learned
-   something and can stop hunting. */
-#define LEARNED_SCORE 2.0f
-
-/* How long to keep watching where someone was after they stop moving.
- *
- * Frame differencing can only see CHANGE, so a person who holds still -
- * or just turns to look away - vanishes from it entirely. Without a hold
- * the robot would immediately go back to surveying and swing off them,
- * which reads as losing interest the moment you stop waving.
- *
- * Holding the gaze is what makes it look like it is watching a person
- * rather than reacting to movement. */
-#define LOCK_HOLD_US 25000000
-
-/* While locked onto someone, accept weaker evidence. Small movements - a
-   shift in a chair, a turn of the head - are enough to renew the lock even
-   though they would never start one. */
-#define LOCKED_CONFIDENCE 0.06f
-
-/* Where people are, learned rather than assumed.
- *
- * The robot cannot know how it has been placed. On a desk, people are
- * straight ahead; on the floor it must look up; on a shelf, down. Rather
- * than hard-coding a neutral - which produced a robot staring at the ceiling
- * - pitch is split into bands and the robot remembers which ones actually
- * produce activity. Surveying favours those bands, and the resting position
- * drifts toward the best one. */
-#define BANDS 7
-#define BAND_DECAY_EVERY_US 120000000  /* forget slowly, so it can be moved */
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_py32;
 
-/* Control gain per axis: pixels of image shift per servo unit. Signed, so
- * the magnitude is the gain and the sign is the direction.
- *
- * These start at defaults and are REPLACED by measurement when a clean one
- * is available. Starting from a default matters: requiring calibration to
- * succeed first produced a deadlock - calibration needs visual texture, the
- * robot was aimed at a blank ceiling, so tracking stayed disabled, so it
- * could never look anywhere else and never found texture.
- *
- * The yaw sign was corrected by OBSERVATION, not by the calibration - which
- * never agreed with itself (-0.63, -1.80, -1.44, -0.41, +4.14, and sign
- * flips between runs). With it negative, a person sitting at image x=-0.58
- * produced the same -27 unit correction on every single frame and never got
- * any closer to centre: the signature of driving into a travel limit in the
- * wrong direction. Either the gearing or the sensor's own mirroring inverts
- * it relative to what the correlation reported.
- *
- * Pitch is inverted for the same reason, and was caught the same way. With
- * it positive the image error stayed negative frame after frame while the
- * correction stayed positive - the head drove upward, never closed the
- * error, and ended up staring at the ceiling. An error that does not shrink
- * under a steady correction means the correction points the wrong way.
- *
- * Geometry predicted positive here. Geometry was wrong, or rather it did not
- * account for whatever inverts yaw as well. Both axes are now set from
- * observed closed-loop behaviour instead. */
-static float s_px_per_unit_yaw   = +2.0f;
-static float s_px_per_unit_pitch = -2.0f;
-static bool s_calibrated = false;  /* true once MEASURED, not merely usable */
-
 static int s_frame_w = 320, s_frame_h = 240;
 
-/* Sub-threshold correction carried between frames, so small errors
-   eventually add up to a move instead of being rounded away. */
-static float s_residual_yaw = 0.0f, s_residual_pitch = 0.0f;
+/* Where a target was last actually seen, in servo units, and when. */
+static int s_seen_yaw = 0, s_seen_pitch = 0;
+static int64_t s_seen_us = -100000000;
 
-/* Activity seen per pitch band, newest weighted highest. */
-static float s_band_score[BANDS];
-static int s_band_visits[BANDS];
+/* A slow average of where targets turn up: the spot in the room people
+   usually occupy. Blended at 1% per detection, so roughly a 40 s memory.
+   This replaces the pitch-band histogram - same idea, a fraction of the
+   code, and it covers both axes instead of one. */
+static float s_home_yaw = 0.0f, s_home_pitch = 0.0f;
+static bool s_home_set = false;
 
-/** Pitch band for a normalized y, 0 = lowest band. */
-static int band_of(float y)
-{
-    int b = (int)((y + 1.0f) * 0.5f * BANDS);
-    if (b < 0) b = 0;
-    if (b >= BANDS) b = BANDS - 1;
-    return b;
-}
-
-/** Centre of a band, as normalized y. */
-static float band_centre(int b)
-{
-    return ((float)b + 0.5f) / (float)BANDS * 2.0f - 1.0f;
-}
+/* Search state. -1 means not searching. */
+static int s_search_step = -1;
+static int64_t s_search_until = 0;
 
 /* ------------------------------------------------------------------ i2c -- */
 
@@ -293,267 +219,66 @@ static void settle(int max_ms)
     vTaskDelay(pdMS_TO_TICKS(420));  /* let the servos physically arrive */
 }
 
-/* ----------------------------------------------------------- calibration -- */
-
-/**
- * Measure pixels of image shift per servo unit, for one axis.
- *
- * Both halves are measured: the servo's ACTUAL travel is read back rather
- * than assumed from the command (a request can be partly swallowed by the
- * servo's deadband), and the image shift comes from cross-correlating the
- * view before and after.
- *
- * The result is signed, which is the point: it encodes the direction as well
- * as the magnitude, so nothing downstream has to know how the servo horn was
- * seated or which way the gears run.
- */
-static bool calibrate_axis(bool vertical, float *out_px_per_unit)
-{
-    const uint8_t id = vertical ? SCS_ID_PITCH : SCS_ID_YAW;
-
-    /* Finish any journey already in progress before measuring one.
-     *
-     * Without this the head was still travelling to centre when calibration
-     * started, so the measured move was that leftover distance PLUS the
-     * nudge - 530 units instead of 70, which slid the image clear out of
-     * frame and produced a shift of zero. */
-    settle(3000);
-
-    eyes_set_head_moving(true);
-    if (!eyes_snapshot()) {
-        ESP_LOGE(TAG, "no frame for calibration snapshot");
-        return false;
-    }
-    const int before = scs_read_pos(id);
-    if (before < 0) return false;
-
-    /* Try one direction, and the other if the first runs into a limit. */
-    for (int dir = +1; dir >= -1; dir -= 2) {
-        head_nudge_units(vertical ? 0 : dir * CAL_UNITS,
-                         vertical ? dir * CAL_UNITS : 0);
-        settle(2500);
-
-        const int after = scs_read_pos(id);
-        if (after < 0) return false;
-
-        const int moved = after - before;
-        if (moved > -MIN_STEP_UNITS && moved < MIN_STEP_UNITS) {
-            ESP_LOGW(TAG, "%s barely moved (%+d units), trying the other way",
-                     vertical ? "pitch" : "yaw", moved);
-            continue;
-        }
-
-        int dx = 0, dy = 0;
-        double quality = 0.0;
-        eyes_set_head_moving(false);
-        vTaskDelay(pdMS_TO_TICKS(300));
-
-        /* Ask about one axis only, so the reported quality is that axis'
-           own match sharpness rather than the weaker of the two. A scene
-           can have strong vertical edges and no horizontal ones. */
-        const bool ok = vertical
-            ? eyes_shift_since_snapshot(NULL, &dy, &quality)
-            : eyes_shift_since_snapshot(&dx, NULL, &quality);
-        if (!ok) return false;
-
-        const int shift = vertical ? dy : dx;
-
-        ESP_LOGI(TAG, "%s: servo moved %+d units, image slid %+d px (sharpness %.2f)",
-                 vertical ? "pitch" : "yaw", moved, shift, quality);
-
-        /* Sharpness is how much the best lag beats the average lag. Near 1.0
-           means every offset fits equally well and the answer is noise -
-           which is what a smooth brightness ramp produces, and why profile
-           variance was the wrong thing to measure. */
-        if (quality < 2.0) {
-            ESP_LOGW(TAG, "match is not distinct (sharpness %.2f)", quality);
-            ESP_LOGW(TAG, "this axis needs %s edges in view",
-                     vertical ? "horizontal" : "vertical");
-            return false;
-        }
-        if (shift == 0) {
-            ESP_LOGW(TAG, "no image shift detected despite the servo moving");
-            ESP_LOGW(TAG, "the move was probably too large - frames no longer overlap");
-            return false;
-        }
-        /* A result sitting on the search limit is clipped, not measured, and
-           would understate the gain. */
-        if (shift >= 108 || shift <= -108) {
-            ESP_LOGW(TAG, "shift %+d px is pinned at the search limit - reduce CAL_UNITS",
-                     shift);
-            return false;
-        }
-
-        *out_px_per_unit = (float)shift / (float)moved;
-        ESP_LOGI(TAG, "%s gain: %.3f px per servo unit",
-                 vertical ? "pitch" : "yaw", *out_px_per_unit);
-        return true;
-    }
-
-    ESP_LOGW(TAG, "%s would not move in either direction",
-             vertical ? "pitch" : "yaw");
-    return false;
-}
-
-/**
- * Measure an axis several times and only believe a result they agree on.
- *
- * A single measurement is a sample, not a measurement. Repeated runs in a
- * room with people in it produced yaw gains of -0.63, -1.80, -1.44, -0.41
- * and +4.14: the magnitude varied fourfold and the SIGN flipped, which would
- * make the robot mirror whoever it is watching. The cause is that someone
- * walking between the two snapshots dominates the correlation.
- *
- * So: three measurements, and the result is only accepted if they all agree
- * on direction and cluster in magnitude. Otherwise the default stands, which
- * is better than a confident wrong sign.
- */
-static bool calibrate_axis_repeated(bool vertical, float *out_px_per_unit)
-{
-    const char *name = vertical ? "pitch" : "yaw";
-    float got[3];
-    int n = 0;
-
-    for (int attempt = 0; attempt < 3; attempt++) {
-        float v = 0.0f;
-        if (calibrate_axis(vertical, &v)) got[n++] = v;
-        head_center();
-        settle(2000);
-    }
-
-    if (n < 2) {
-        printf("  %s: only %d of 3 measurements succeeded - keeping default\n",
-               name, n);
-        return false;
-    }
-
-    /* All must point the same way. A split vote means the measurement is
-       being driven by something other than the head moving. */
-    bool all_neg = true, all_pos = true;
-    for (int i = 0; i < n; i++) {
-        if (got[i] >= 0.0f) all_neg = false;
-        if (got[i] <= 0.0f) all_pos = false;
-    }
-    if (!all_neg && !all_pos) {
-        printf("  %s: measurements disagree on direction (", name);
-        for (int i = 0; i < n; i++) printf("%+.2f ", (double)got[i]);
-        printf(") - keeping default\n");
-        return false;
-    }
-
-    /* Median of what we have, which is robust to one bad sample. */
-    for (int i = 0; i < n - 1; i++)
-        for (int j = i + 1; j < n; j++)
-            if (got[j] < got[i]) { const float t = got[i]; got[i] = got[j]; got[j] = t; }
-    const float median = got[n / 2];
-
-    /* Reject if the spread is wild even with agreeing signs.
-     *
-     * Compare MAGNITUDES. Sorting by signed value puts the largest magnitude
-     * first when the gains are negative, so comparing got[0] against
-     * got[n-1] directly never fires on a negative axis. */
-    float lo = 1e9f, hi = 0.0f;
-    for (int i = 0; i < n; i++) {
-        const float m = got[i] < 0 ? -got[i] : got[i];
-        if (m < lo) lo = m;
-        if (m > hi) hi = m;
-    }
-    if (lo < 0.05f || hi > lo * 3.0f) {
-        printf("  %s: spread too wide (%.2f..%.2f) - keeping default\n",
-               name, (double)lo, (double)hi);
-        return false;
-    }
-
-    printf("  %s: %d measurements agree, median %+.3f px/unit\n",
-           name, n, (double)median);
-    *out_px_per_unit = median;
-    return true;
-}
-
 /* ------------------------------------------------------------- behaviour -- */
 
-static float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
+/** Convert a normalized image offset into a servo-unit correction. */
+static int correction_units(float offset, float half_fov, float sign)
+{
+    const float degrees = sign * offset * half_fov * TRACK_GAIN;
+    return (int)(degrees / DEG_PER_UNIT);
+}
+
+/** Aim at a yaw/pitch given in servo units, clamped by the head limits. */
+static void look_at_units(int yaw_units, int pitch_units)
+{
+    int yt = 0, pt = 0;
+    head_travel_units(&yt, &pt);
+    float x = 0.0f, y = 0.0f;
+    head_position(&x, &y);
+
+    /* head_look takes -1..1, so convert through the current travel. */
+    const int cur_y = (int)(x * (float)(yt / 2));
+    const int cur_p = (int)(y * (float)(pt / 2));
+    head_nudge_units(yaw_units - cur_y, pitch_units - cur_p);
+}
 
 /**
- * Occasional survey.
+ * One outward search pass around where the target was last seen.
  *
- * Deliberately rare. The robot should look like it is waiting, not pacing -
- * continuous drift reads as broken, and an empty room should mostly produce
- * a still head.
+ * Nearest offsets first, then wider, pausing at each. After a full pass the
+ * head rests instead of sweeping indefinitely - a robot still searching an
+ * empty room an hour later reads as broken rather than attentive.
  */
-/**
- * Pick a pitch band to look at.
- *
- * Weighted by how much activity each band has produced, plus a bonus for
- * bands that have been visited least. Without the exploration term the robot
- * would settle into whichever band happened to pay off first and never
- * discover that it had been moved, or that people also appear elsewhere.
- */
-static int choose_band(void)
+static void search_step(int64_t now)
 {
-    float weight[BANDS];
-    float total = 0.0f;
+    if (s_search_step < 0) {
+        s_search_step = 0;
+        s_search_until = 0;
+        printf("  search: starting around last sighting\n");
+    }
+    if (now < s_search_until) return;
 
-    for (int b = 0; b < BANDS; b++) {
-        /* Curiosity falls off as a band gets explored, so an unvisited band
-           is always worth a look but a well-known empty one is not. */
-        const float curiosity = 1.0f / (1.0f + (float)s_band_visits[b]);
-        weight[b] = s_band_score[b] + 0.35f * curiosity + 0.02f;
-        total += weight[b];
+    if (s_search_step >= SEARCH_STEPS) {
+        /* Pass finished. Rest where people usually are, if that is known. */
+        s_search_step = -1;
+        s_search_until = now + 20000000;
+        if (s_home_set) {
+            look_at_units((int)s_home_yaw, (int)s_home_pitch);
+            printf("  search: done, resting at the usual spot\n");
+        } else {
+            head_center();
+            printf("  search: done, resting at centre\n");
+        }
+        return;
     }
 
-    float pick = frand() * total;
-    for (int b = 0; b < BANDS; b++) {
-        pick -= weight[b];
-        if (pick <= 0.0f) return b;
-    }
-    return BANDS / 2;
-}
+    const float deg = kSearchDeg[s_search_step];
+    const int units = (int)(deg / DEG_PER_UNIT);
+    look_at_units(s_seen_yaw + units, s_seen_pitch);
+    printf("  search: %+.0f deg from last sighting\n", (double)deg);
 
-static void survey(int64_t now, int64_t *next_survey)
-{
-    if (now < *next_survey) return;
-
-    const int b = choose_band();
-    s_band_visits[b]++;
-
-    /* Land somewhere inside the band rather than always dead centre, so
-       repeated visits sample it rather than staring at one point. */
-    const float y = band_centre(b) + (frand() - 0.5f) * (2.0f / BANDS);
-    const float x = (frand() * 2.0f - 1.0f) * 0.7f;
-    head_look(x, y);
-
-    /* Still exploring, or settled? */
-    float total = 0.0f;
-    for (int i = 0; i < BANDS; i++) total += s_band_score[i];
-    const bool learned = total >= LEARNED_SCORE;
-
-    const int64_t lo = learned ? SURVEY_MIN_US : SURVEY_FAST_MIN_US;
-    const int64_t hi = learned ? SURVEY_MAX_US : SURVEY_FAST_MAX_US;
-    *next_survey = now + lo + (int64_t)(frand() * (float)(hi - lo));
-
-    printf("  survey -> band %d (y %+.2f) score %.2f  %s  next %llds\n",
-           b, y, (double)s_band_score[b],
-           learned ? "settled" : "exploring",
-           (long long)((*next_survey - now) / 1000000));
-}
-
-/** Record that something happened while looking at this pitch. */
-static void remember_activity(float head_y, float confidence)
-{
-    const int b = band_of(head_y);
-    s_band_score[b] += confidence;
-    if (s_band_score[b] > 20.0f) s_band_score[b] = 20.0f;
-}
-
-/** Fade all bands, so a robot that gets moved can relearn. */
-static void decay_bands(void)
-{
-    for (int b = 0; b < BANDS; b++) {
-        s_band_score[b] *= 0.6f;
-        s_band_visits[b] = s_band_visits[b] / 2;
-    }
-    printf("  (band memory faded - the robot can relearn if it was moved)\n");
+    s_search_step++;
+    s_search_until = now + SEARCH_DWELL_US;
 }
 
 /* ------------------------------------------------------------------ main -- */
@@ -599,63 +324,19 @@ void app_main(void)
     if (have_eyes) {
         eyes_frame_size(&s_frame_w, &s_frame_h);
         printf("  %dx%d RGB565\n", s_frame_w, s_frame_h);
-
-        printf("\n--- calibrating gain per axis (measured, not tuned) ---\n");
-        const bool oky = calibrate_axis_repeated(false, &s_px_per_unit_yaw);
-        head_center();
-        settle(2500);
-        const bool okp = calibrate_axis_repeated(true, &s_px_per_unit_pitch);
-        head_center();
-        settle(2500);
-
-        /* Reject a measured gain that is not physically plausible, however
-           well the measurements agreed with each other. */
-        if (oky) {
-            const float m = s_px_per_unit_yaw < 0 ? -s_px_per_unit_yaw : s_px_per_unit_yaw;
-            if (m < GAIN_MIN || m > GAIN_MAX) {
-                printf("  yaw gain %+.2f is implausible - using default\n",
-                       (double)s_px_per_unit_yaw);
-                s_px_per_unit_yaw = (s_px_per_unit_yaw < 0) ? -2.0f : +2.0f;
-            }
-        }
-        if (okp) {
-            const float m = s_px_per_unit_pitch < 0 ? -s_px_per_unit_pitch : s_px_per_unit_pitch;
-            if (m < GAIN_MIN || m > GAIN_MAX) {
-                printf("  pitch gain %+.2f is implausible - using default\n",
-                       (double)s_px_per_unit_pitch);
-                s_px_per_unit_pitch = (s_px_per_unit_pitch < 0) ? -2.0f : +2.0f;
-            }
-        }
-
-        s_calibrated = oky && okp;
-
-        printf("  yaw   %+.3f px/unit  %s\n", s_px_per_unit_yaw,
-               oky ? "(measured)" : "(default - could not measure)");
-        printf("  pitch %+.3f px/unit  %s\n", s_px_per_unit_pitch,
-               okp ? "(measured)" : "(default - could not measure)");
-        printf("  %s turns the head RIGHT\n",
-               s_px_per_unit_yaw < 0 ? "positive yaw" : "negative yaw");
-
-        if (!s_calibrated) {
-            /* Deliberately NOT a reason to refuse to run.
-             *
-             * An earlier build disabled tracking when calibration failed,
-             * which deadlocked: measuring needs visual texture, the robot
-             * was aimed at a blank ceiling, so tracking never started, so it
-             * never looked anywhere that had texture. Defaults let it move,
-             * and moving is how it finds something worth measuring against. */
-            printf("  Running on defaults - tracking works, just less precise.\n");
-        }
+        printf("\n--- tracking ---\n");
+        printf("  corrections come from the lens field of view, so there\n");
+        printf("  is nothing to calibrate at runtime.\n");
+        printf("  fov %.0fx%.0f deg, %.3f deg/unit, gain %.2f\n",
+               (double)(HALF_FOV_X * 2), (double)(HALF_FOV_Y * 2),
+               (double)DEG_PER_UNIT, (double)TRACK_GAIN);
     } else {
-        printf("  camera FAILED\n");
+        printf("  camera FAILED - the head will still move, but blind\n");
     }
 
     printf("\n--- running ---\n\n");
 
-    int64_t next_survey = esp_timer_get_time() + SURVEY_MIN_US;
-    int64_t locked_until = 0;   /* keep watching here until this time */
     int64_t next_report = 0;
-    int64_t next_decay  = esp_timer_get_time() + BAND_DECAY_EVERY_US;
     int64_t next_grid   = esp_timer_get_time() + 3000000;
     int64_t next_jpeg   = esp_timer_get_time() + 6000000;
 
@@ -664,78 +345,62 @@ void app_main(void)
         eyes_set_head_moving(head_is_moving());
 
         activity_t act;
-        bool chased = false;
-
-        /* Weaker evidence is enough to KEEP a lock than to start one. */
-        const bool locked = now < locked_until;
-        const float need = locked ? LOCKED_CONFIDENCE : MIN_CONFIDENCE;
+        bool saw = false;
 
         if (have_eyes && eyes_read(&act) && act.valid &&
-            act.confidence >= need) {
+            act.confidence >= MIN_CONFIDENCE) {
 
-            const float mag = act.x * act.x + act.y * act.y;
-            if (mag > CENTRE_DEADBAND * CENTRE_DEADBAND) {
-                /* Image error in pixels, from the frame centre. */
-                const float ex = act.x * (float)(s_frame_w / 2);
-                const float ey = act.y * (float)(s_frame_h / 2);
+            /* Per-axis deadbands. A target this close to centre is already
+               being looked at, and chasing it is nervous twitching. */
+            const bool off_x = (act.x > DEADBAND_X || act.x < -DEADBAND_X);
+            const bool off_y = (act.y > DEADBAND_Y || act.y < -DEADBAND_Y);
 
-                /* To centre the target the scene must slide by -error, and
-                   the calibration says how many pixels one servo unit is
-                   worth. The signs come out of the measurement. */
-                /* Accumulate, then spend. A correction too small to issue is
-                   added to a running remainder rather than dropped, so a
-                   target sitting just off centre still gets chased. */
-                s_residual_yaw   += -ex / s_px_per_unit_yaw * CHASE;
-                s_residual_pitch += -ey / s_px_per_unit_pitch * CHASE;
+            const int dy = off_x ? correction_units(act.x, HALF_FOV_X, TRACK_SIGN_X) : 0;
+            const int dp = off_y ? correction_units(act.y, HALF_FOV_Y, -TRACK_SIGN_Y) : 0;
 
-                int dy_units = 0, dp_units = 0;
-                if (s_residual_yaw >= MIN_STEP_UNITS || s_residual_yaw <= -MIN_STEP_UNITS) {
-                    dy_units = (int)s_residual_yaw;
-                    s_residual_yaw -= (float)dy_units;
-                }
-                if (s_residual_pitch >= MIN_STEP_UNITS || s_residual_pitch <= -MIN_STEP_UNITS) {
-                    dp_units = (int)s_residual_pitch;
-                    s_residual_pitch -= (float)dp_units;
-                }
+            if (dy || dp) {
+                head_nudge_units(dy, dp);
+                /* Let the eyes subtract this move from the next frame
+                   instead of reading it as something in the room moving. */
+                eyes_compensate((float)dy * (DEG_PER_UNIT / HALF_FOV_X) * (float)(s_frame_w / 2),
+                                (float)dp * (DEG_PER_UNIT / HALF_FOV_Y) * (float)(s_frame_h / 2));
+            }
 
-                if (dy_units || dp_units) {
-                    head_nudge_units(dy_units, dp_units);
-                    chased = true;
+            saw = true;
+            s_search_step = -1;   /* someone is here; stop searching */
 
-                    /* Tell the eyes what this move will do to the view, so
-                       the next frame can subtract it instead of reading it
-                       as activity. */
-                    eyes_compensate((float)dy_units * s_px_per_unit_yaw,
-                                    (float)dp_units * s_px_per_unit_pitch);
+            /* Remember where this happened, and slowly average it into the
+               spot people usually occupy. */
+            float hx = 0.0f, hy = 0.0f;
+            head_position(&hx, &hy);
+            int yt = 0, pt = 0;
+            head_travel_units(&yt, &pt);
+            s_seen_yaw   = (int)(hx * (float)(yt / 2));
+            s_seen_pitch = (int)(hy * (float)(pt / 2));
+            s_seen_us    = now;
 
-                    /* Remember that this pitch band is worth watching. */
-                    float hx = 0.0f, hy = 0.0f;
-                    head_position(&hx, &hy);
-                    remember_activity(hy, act.confidence);
+            if (!s_home_set) {
+                s_home_yaw = (float)s_seen_yaw;
+                s_home_pitch = (float)s_seen_pitch;
+                s_home_set = true;
+            } else {
+                s_home_yaw   += 0.01f * ((float)s_seen_yaw - s_home_yaw);
+                s_home_pitch += 0.01f * ((float)s_seen_pitch - s_home_pitch);
+            }
 
-                    /* Stay on this person after they stop moving. */
-                    locked_until = now + LOCK_HOLD_US;
-                    next_survey  = locked_until;
-
-                    if (now >= next_report) {
-                        next_report = now + 500000;
-                        printf("  activity (%+.2f,%+.2f) conf %.2f -> %+d,%+d units\n",
-                               act.x, act.y, act.confidence, dy_units, dp_units);
-                    }
-                }
+            if (now >= next_report) {
+                next_report = now + 500000;
+                printf("  %s (%+.2f,%+.2f) conf %.2f -> %+d,%+d units\n",
+                       act.from_template ? "follow  " : "activity",
+                       act.x, act.y, act.confidence, dy, dp);
             }
         }
 
-        /* Only look elsewhere once the lock has expired. Surveying while
-           someone is still there is what made it seem to lose interest. */
-        /* Never look away from someone we are actively following. Motion
-           only sees change, so a still person produces no activity at all -
-           surveying then is exactly what made it seem to lose interest. */
-        if (!chased && !locked && !eyes_has_lock()) survey(now, &next_survey);
-
-        if (now >= next_decay) {
-            next_decay = now + BAND_DECAY_EVERY_US;
-            decay_bands();
+        /* Nothing seen for a while: search around the last sighting, one
+           outward pass, then rest. Short memory bridges detector misses
+           without freezing the head on somebody who has left. */
+        if (!saw && (now - s_seen_us) > MEMORY_US) {
+            search_step(now);
         }
 
         /* Telemetry, only while the head is still - a grid taken mid-move
