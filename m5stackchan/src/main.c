@@ -152,10 +152,17 @@ static i2c_master_dev_handle_t s_py32;
  * wrong direction. Either the gearing or the sensor's own mirroring inverts
  * it relative to what the correlation reported.
  *
- * Pitch follows from geometry confirmed by the pitch sweep: higher servo
- * units point the camera UP, which moves scene content DOWN the frame. */
+ * Pitch is inverted for the same reason, and was caught the same way. With
+ * it positive the image error stayed negative frame after frame while the
+ * correction stayed positive - the head drove upward, never closed the
+ * error, and ended up staring at the ceiling. An error that does not shrink
+ * under a steady correction means the correction points the wrong way.
+ *
+ * Geometry predicted positive here. Geometry was wrong, or rather it did not
+ * account for whatever inverts yaw as well. Both axes are now set from
+ * observed closed-loop behaviour instead. */
 static float s_px_per_unit_yaw   = +2.0f;
-static float s_px_per_unit_pitch = +2.0f;
+static float s_px_per_unit_pitch = -2.0f;
 static bool s_calibrated = false;  /* true once MEASURED, not merely usable */
 
 static int s_frame_w = 320, s_frame_h = 240;

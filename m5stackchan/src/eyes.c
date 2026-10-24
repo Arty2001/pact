@@ -105,6 +105,11 @@ static uint8_t s_tpl[TPL * TPL];
 static bool s_has_tpl = false;
 static int s_tpl_gx = 0, s_tpl_gy = 0;   /* last known centre, in cells */
 static int s_tpl_miss = 0;
+/* When motion last CORROBORATED the lock. A template will happily match a
+   ceiling light forever, so a lock that nothing has moved near is stale and
+   must die - otherwise it blocks surveying and the robot freezes on
+   whatever it happened to see first. */
+static int64_t s_tpl_confirmed_us = 0;
 
 /* Kept purely so the debug dump shows what the tracker actually saw on its
    last pass, rather than a fresh frame that may look nothing like it. */
@@ -290,6 +295,7 @@ static void capture_template(const uint8_t *grid, int gx, int gy)
     s_tpl_gy = gy;
     s_has_tpl = true;
     s_tpl_miss = 0;
+    s_tpl_confirmed_us = esp_timer_get_time();
 }
 
 /**
@@ -358,7 +364,16 @@ void eyes_drop_lock(void)
 
 bool eyes_has_lock(void)
 {
-    return s_has_tpl;
+    if (!s_has_tpl) return false;
+
+    /* A lock only counts while something has recently moved near it. A
+       static scene feature matches its own template indefinitely, which
+       would hold the robot's gaze on an empty wall for ever. */
+    if (esp_timer_get_time() - s_tpl_confirmed_us > 20000000) {
+        s_has_tpl = false;
+        return false;
+    }
+    return true;
 }
 
 /* ------------------------------------------------------------------ read -- */
