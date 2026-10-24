@@ -1,25 +1,40 @@
 /* ===========================================================================
-   Pact x M5StackChan - STAGE D: calibrated activity tracking
+   Pact x M5StackChan - look at whoever is moving.
 
-   Points the head at whatever is moving. Activity, not faces: it works with
-   your back turned, side-on, far away and in poor light, and needs no model.
+   Rewritten from scratch. The previous version accumulated motion
+   detection, mean subtraction, self-motion compensation, template matching,
+   sparse point tracking, pitch-band learning, gaze locks, residual
+   accumulation and runtime gain calibration - nine subsystems whose
+   interactions caused most of the bugs, none of which were in any one of
+   them.
 
-   What changed after watching it run:
+   The symptom was always identical: the head ended up staring at the
+   ceiling. It had four distinct root causes over the session, and each new
+   mechanism added a fifth way to produce it.
 
-     - Pitch tracked badly because both axes shared one gain, but yaw has
-       967 servo units of travel and pitch only 307. The same image error
-       produced roughly three times less correction in pitch.
+   This version is built on ONE idea.
 
-       Fixed by calibrating each axis against the camera: command a move,
-       read the ACTUAL servo delta, measure how far the image slid, and
-       divide. One signed number per axis - pixels per servo unit - carries
-       both the gain and the direction, so neither is ever guessed.
+       Only look while the head is physically still.
 
-     - It crept while nothing was happening. The deadband was too small and
-       weak detections were allowed to steer.
+   Every failure traced back to confusing scene motion with self motion.
+   When the head turns, the world sweeps across the sensor; every attempt to
+   subtract that predicted shift was wrong in a different way - predicted
+   from a command the rate limiter had not finished executing, or compared
+   against grid cells that had slid in from off-frame with no history.
 
-     - It wandered when the room was empty. Idle now holds still and only
-       surveys occasionally, rather than drifting continuously.
+   So we do not predict it. We read the servos, wait until they report the
+   head has actually arrived, and only then compare frames. If the camera is
+   not moving, anything moving in frame is really moving. The robot cannot
+   chase its own motion because it never sees its own motion.
+
+   The cost is a little responsiveness mid-turn. The gain is that an entire
+   class of bug is no longer expressible.
+
+   Control is in degrees, via the lens field of view - borrowed from
+   7H3-CH053N/StackChan-CustomFW, custom firmware for this exact robot. A
+   target at normalized offset d is d * HALF_FOV degrees off axis, because
+   that is what field of view means. The FOV is fixed by the optics, so
+   nothing needs calibrating at runtime.
    =========================================================================== */
 
 #include <stdio.h>
@@ -28,12 +43,11 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
-#include "eyes.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "head.h"
-#include "points.h"
 #include "scs.h"
+#include "vision.h"
 
 static const char *TAG = "pact";
 
@@ -53,90 +67,61 @@ static const char *TAG = "pact";
 
 #define TICK_HZ 50
 
-/* ---------------------------------------------------------------------------
-   Tracking, in DEGREES.
+/* --- control ------------------------------------------------------------ */
 
-   Rewritten after studying 7H3-CH053N/StackChan-CustomFW, custom firmware
-   for this exact robot. The approach there is simpler than what was here
-   and does not need any camera calibration at all.
-
-   A target sitting at normalized offset d from the frame centre is
-   d * HALF_FOV degrees off axis, because that is what field of view MEANS.
-   Turn that far, times a gain. The lens FOV is a fixed property of the
-   optics, so there is nothing to measure at runtime.
-
-   This replaces a whole subsystem that measured pixels of image shift per
-   servo unit. That measurement never once reproduced across six attempts -
-   magnitudes spread fourfold and the sign flipped between runs - and one
-   bad result silently killed the yaw axis entirely. The constant worth
-   having was the one that never needed measuring.
-   --------------------------------------------------------------------------- */
-
-/* GC0308 on the CoreS3: roughly 50 x 38 degrees, so half is 25 x 19. */
+/* GC0308 on the CoreS3: roughly 50 x 38 degrees of view. */
 #define HALF_FOV_X 25.0f
 #define HALF_FOV_Y 19.0f
 
-/* SCS0009 covers about 300 degrees over its 1023 counts. Cross-checks
-   against the measured travel: 285 counts of pitch is 83 degrees, and M5
+/* SCS0009 spans about 300 degrees over 1023 counts. Cross-checks against
+   the measured mechanical travel: 285 counts of pitch is 83 degrees, and M5
    document the tilt axis as 90. */
 #define DEG_PER_UNIT 0.293f
 
-/* Fraction of the angular error corrected per update. */
-#define TRACK_GAIN 0.6f
+/* Fraction of the angular error corrected per move. Below 1 so the head
+   converges smoothly rather than overshooting and hunting. */
+#define GAIN 0.55f
 
-/* The CoreS3 camera image is MIRRORED horizontally - which is why the yaw
-   direction kept coming out inverted from image correlation, and why it was
-   finally only fixable by watching the robot rather than the numbers. The
-   two axes legitimately have different signs. */
-#define TRACK_SIGN_X (-1.0f)
-#define TRACK_SIGN_Y (+1.0f)
+/* The CoreS3 camera image is MIRRORED horizontally, so the yaw correction
+   runs opposite to the image offset. The two axes have different signs. */
+#define SIGN_X (-1.0f)
+#define SIGN_Y (+1.0f)
 
-/* Deadbands, per axis. A target this close to centre is already being
-   looked at, and chasing it is the nervous twitching we do not want. */
+/* Offsets smaller than this are already being looked at. */
 #define DEADBAND_X 0.12f
 #define DEADBAND_Y 0.15f
 
-/* Detections weaker than this do not steer. */
-#define MIN_CONFIDENCE 0.18f
+/* Movement weaker than this does not steer. */
+#define MIN_STRENGTH 0.15f
 
-/* How long a lost target is held before searching. Bridges detector misses
-   without freezing the head on something that has gone. */
-#define MEMORY_US 4000000
+/* A servo cannot honour a move smaller than this. */
+#define MIN_STEP 6
 
-/* Search: yaw offsets in degrees around where the target was last seen,
-   nearest first then outwards, with a still pause at each. One pass, then
-   rest - a robot that searches all night reads as broken. */
-#define SEARCH_DWELL_US 2000000
-static const float kSearchDeg[] = {0, -20, 20, -40, 40, -60, 60};
-#define SEARCH_STEPS ((int)(sizeof(kSearchDeg) / sizeof(kSearchDeg[0])))
+/* --- timing ------------------------------------------------------------- */
 
-/* Debug telemetry over the USB cable. */
-#define DEBUG_GRID_EVERY_US  2000000
-#define DEBUG_JPEG_EVERY_US 10000000
+/* After the servos report arrival, the head is still ringing slightly and
+   auto-exposure is still settling. Short, because this is a real settle and
+   not a guess standing in for compensation. */
+#define SETTLE_MS 180
+
+/* Give up waiting for arrival after this, so a stalled axis cannot wedge
+   the loop. */
+#define ARRIVE_TIMEOUT_MS 1200
+
+/* Nothing seen for this long and it starts looking around. */
+#define BORED_US 5000000
+
+/* Search: yaw offsets in degrees from where movement was last seen, nearest
+   first then outwards, pausing at each. One pass, then rest. */
+#define SEARCH_DWELL_US 1800000
+static const float kSearch[] = {0, -22, 22, -45, 45, -70, 70};
+#define SEARCH_N ((int)(sizeof(kSearch) / sizeof(kSearch[0])))
+
+#define GRID_EVERY_US 3000000
+#define JPEG_EVERY_US 12000000
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_py32;
-
-static int s_frame_w = 320, s_frame_h = 240;
-
-/* View shift the last commanded move will produce, handed to the tracker on
-   the next frame so it can tell its own motion from the room's. */
-static float s_pending_shift_x = 0.0f, s_pending_shift_y = 0.0f;
-
-/* Where a target was last actually seen, in servo units, and when. */
-static int s_seen_yaw = 0, s_seen_pitch = 0;
-static int64_t s_seen_us = -100000000;
-
-/* A slow average of where targets turn up: the spot in the room people
-   usually occupy. Blended at 1% per detection, so roughly a 40 s memory.
-   This replaces the pitch-band histogram - same idea, a fraction of the
-   code, and it covers both axes instead of one. */
-static float s_home_yaw = 0.0f, s_home_pitch = 0.0f;
-static bool s_home_set = false;
-
-/* Search state. -1 means not searching. */
-static int s_search_step = -1;
-static int64_t s_search_until = 0;
 
 /* ------------------------------------------------------------------ i2c -- */
 
@@ -154,8 +139,7 @@ static esp_err_t py32_write8(uint8_t reg, uint8_t val)
 static esp_err_t py32_set_bit(uint8_t reg, uint8_t bit, bool on)
 {
     uint8_t v = 0;
-    const esp_err_t err = py32_read8(reg, &v);
-    if (err != ESP_OK) return err;
+    if (py32_read8(reg, &v) != ESP_OK) return ESP_FAIL;
     v = on ? (v | (1 << bit)) : (v & ~(1 << bit));
     return py32_write8(reg, v);
 }
@@ -163,12 +147,12 @@ static esp_err_t py32_set_bit(uint8_t reg, uint8_t bit, bool on)
 /**
  * Power the servo rail, then hand the I2C pins to the camera.
  *
- * The PY32 expander and the camera's SCCB share pins 12/11, and esp32-camera
- * wants to own that bus. The expander is only needed once at boot.
+ * The PY32 expander and the camera's SCCB share pins 12/11 and esp32-camera
+ * wants to own that bus. The expander is only needed once, at boot.
  */
-static bool servo_power_on_then_release_i2c(void)
+static bool power_servos_then_release_i2c(void)
 {
-    const i2c_master_bus_config_t bus_cfg = {
+    const i2c_master_bus_config_t bus = {
         .i2c_port                     = I2C_NUM_0,
         .sda_io_num                   = PIN_SDA,
         .scl_io_num                   = PIN_SCL,
@@ -176,114 +160,89 @@ static bool servo_power_on_then_release_i2c(void)
         .glitch_ignore_cnt            = 7,
         .flags.enable_internal_pullup = true,
     };
-    if (i2c_new_master_bus(&bus_cfg, &s_bus) != ESP_OK) return false;
+    if (i2c_new_master_bus(&bus, &s_bus) != ESP_OK) return false;
 
-    const i2c_device_config_t dev_cfg = {
+    const i2c_device_config_t dev = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = PY32_ADDR,
         .scl_speed_hz    = 100000,
     };
-    if (i2c_master_bus_add_device(s_bus, &dev_cfg, &s_py32) != ESP_OK) return false;
+    if (i2c_master_bus_add_device(s_bus, &dev, &s_py32) != ESP_OK) return false;
 
-    bool powered = false;
-    uint8_t version = 0;
+    bool ok = false;
+    uint8_t ver = 0;
+    /* The PY32 boots noticeably slower than the ESP32, so retry. */
     for (int i = 0; i < 8; i++) {
         vTaskDelay(pdMS_TO_TICKS(200));
-        if (py32_read8(PY32_REG_VERSION, &version) == ESP_OK &&
-            version != 0 && version != 0xFF) {
-            ESP_LOGI(TAG, "PY32 version 0x%02X", version);
-            bool ok = true;
-            ok &= py32_set_bit(PY32_REG_DIR_L, PY32_PIN_VM_EN, true) == ESP_OK;
-            ok &= py32_set_bit(PY32_REG_PU_L, PY32_PIN_VM_EN, true) == ESP_OK;
-            ok &= py32_set_bit(PY32_REG_OUT_L, PY32_PIN_VM_EN, true) == ESP_OK;
+        if (py32_read8(PY32_REG_VERSION, &ver) == ESP_OK && ver != 0 && ver != 0xFF) {
+            ok = py32_set_bit(PY32_REG_DIR_L, PY32_PIN_VM_EN, true) == ESP_OK &&
+                 py32_set_bit(PY32_REG_PU_L,  PY32_PIN_VM_EN, true) == ESP_OK &&
+                 py32_set_bit(PY32_REG_OUT_L, PY32_PIN_VM_EN, true) == ESP_OK;
             vTaskDelay(pdMS_TO_TICKS(400));
-            ESP_LOGI(TAG, "servo rail %s", ok ? "ENABLED" : "FAILED");
-            powered = ok;
+            ESP_LOGI(TAG, "PY32 0x%02X, servo rail %s", ver, ok ? "on" : "FAILED");
             break;
         }
     }
-    if (!powered) ESP_LOGE(TAG, "PY32 did not answer at 0x%02X", PY32_ADDR);
+    if (!ok) ESP_LOGE(TAG, "PY32 did not answer at 0x%02X", PY32_ADDR);
 
     i2c_master_bus_rm_device(s_py32);
     i2c_del_master_bus(s_bus);
     s_py32 = NULL;
-    s_bus  = NULL;
-    return powered;
+    s_bus = NULL;
+    return ok;
 }
 
-/* --------------------------------------------------------------- helpers -- */
-
-/** Run the motion loop until the head stops, or a deadline passes. */
-static void settle(int max_ms)
-{
-    const int64_t deadline = esp_timer_get_time() + (int64_t)max_ms * 1000;
-    while (head_is_moving() && esp_timer_get_time() < deadline) {
-        head_tick();
-        vTaskDelay(pdMS_TO_TICKS(1000 / TICK_HZ));
-    }
-    vTaskDelay(pdMS_TO_TICKS(420));  /* let the servos physically arrive */
-}
-
-/* ------------------------------------------------------------- behaviour -- */
-
-/** Convert a normalized image offset into a servo-unit correction. */
-static int correction_units(float offset, float half_fov, float sign)
-{
-    const float degrees = sign * offset * half_fov * TRACK_GAIN;
-    return (int)(degrees / DEG_PER_UNIT);
-}
-
-/** Aim at a yaw/pitch given in servo units, clamped by the head limits. */
-static void look_at_units(int yaw_units, int pitch_units)
-{
-    int yt = 0, pt = 0;
-    head_travel_units(&yt, &pt);
-    float x = 0.0f, y = 0.0f;
-    head_position(&x, &y);
-
-    /* head_look takes -1..1, so convert through the current travel. */
-    const int cur_y = (int)(x * (float)(yt / 2));
-    const int cur_p = (int)(y * (float)(pt / 2));
-    head_nudge_units(yaw_units - cur_y, pitch_units - cur_p);
-}
+/* ---------------------------------------------------------------- motion -- */
 
 /**
- * One outward search pass around where the target was last seen.
+ * Drive the head to its target and wait until the SERVOS say it arrived.
  *
- * Nearest offsets first, then wider, pausing at each. After a full pass the
- * head rests instead of sweeping indefinitely - a robot still searching an
- * empty room an hour later reads as broken rather than attentive.
+ * Reading the servos is the whole point. Earlier versions assumed a
+ * commanded move had completed, but head_tick rate-limits the setpoint
+ * across many ticks and the servo then takes its own time to follow. Acting
+ * on that assumption is what let the robot's own movement be mistaken for
+ * movement in the room.
  */
-static void search_step(int64_t now)
+static void move_and_settle(void)
 {
-    if (s_search_step < 0) {
-        s_search_step = 0;
-        s_search_until = 0;
-        printf("  search: starting around last sighting\n");
-    }
-    if (now < s_search_until) return;
+    vision_forget();   /* the reference frame is from a different direction */
 
-    if (s_search_step >= SEARCH_STEPS) {
-        /* Pass finished. Rest where people usually are, if that is known. */
-        s_search_step = -1;
-        s_search_until = now + 20000000;
-        if (s_home_set) {
-            look_at_units((int)s_home_yaw, (int)s_home_pitch);
-            printf("  search: done, resting at the usual spot\n");
+    const int64_t deadline = esp_timer_get_time() + ARRIVE_TIMEOUT_MS * 1000;
+    int stable = 0;
+    int last_y = -1, last_p = -1;
+
+    while (esp_timer_get_time() < deadline) {
+        head_tick();
+        vTaskDelay(pdMS_TO_TICKS(1000 / TICK_HZ));
+
+        const int y = scs_read_pos(SCS_ID_YAW);
+        const int p = scs_read_pos(SCS_ID_PITCH);
+        if (y < 0 || p < 0) continue;
+
+        const int dy = y > last_y ? y - last_y : last_y - y;
+        const int dp = p > last_p ? p - last_p : last_p - p;
+        last_y = y;
+        last_p = p;
+
+        /* Arrived means the setpoint has been reached AND the servos have
+           stopped physically moving. Both, because either alone lies. */
+        if (!head_is_moving() && dy <= 2 && dp <= 2) {
+            if (++stable >= 3) break;
         } else {
-            head_center();
-            printf("  search: done, resting at centre\n");
+            stable = 0;
         }
-        return;
     }
 
-    const float deg = kSearchDeg[s_search_step];
-    const int units = (int)(deg / DEG_PER_UNIT);
-    look_at_units(s_seen_yaw + units, s_seen_pitch);
-    printf("  search: %+.0f deg from last sighting\n", (double)deg);
+    vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
+    vision_forget();   /* and start fresh from where we actually ended up */
+}
 
-    s_search_step++;
-    s_search_until = now + SEARCH_DWELL_US;
+/** Convert a normalized image offset into a servo-unit correction. */
+static int correction(float offset, float half_fov, float sign)
+{
+    const int units = (int)(sign * offset * half_fov * GAIN / DEG_PER_UNIT);
+    if (units > -MIN_STEP && units < MIN_STEP) return 0;
+    return units;
 }
 
 /* ------------------------------------------------------------------ main -- */
@@ -293,12 +252,13 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(2500));
 
     printf("\n==================================================\n");
-    printf("  PACT x M5STACKCHAN - stage D\n");
+    printf("  PACT x M5STACKCHAN\n");
+    printf("  Looks only while still, so it can never chase\n");
+    printf("  its own movement.\n");
     printf("==================================================\n");
 
-    if (!servo_power_on_then_release_i2c()) {
-        printf("WARNING: servo rail unconfirmed\n");
-    }
+    if (!power_servos_then_release_i2c()) printf("WARNING: servo rail unconfirmed\n");
+
     if (!scs_begin(SERVO_TX, SERVO_RX, SERVO_BAUD)) {
         printf("servo bus FAILED\n");
         return;
@@ -308,153 +268,113 @@ void app_main(void)
     printf("\n--- mechanical limits ---\n");
     head_calibrate();
 
-    /* No hard-coded neutral.
-     *
-     * An earlier build clamped pitch to the middle 30% because mid-travel
-     * happened to see the room from where the robot was sitting. That is a
-     * guess about placement, and it was wrong the moment the robot moved -
-     * it spent a whole session staring at a ceiling.
-     *
-     * Instead the full travel stays available and the robot LEARNS which
-     * pitch bands produce activity. On a desk it will settle looking ahead;
-     * on the floor it will learn to look up. Nothing here assumes where it
-     * has been put. */
-
-    int yt = 0, pt = 0;
-    head_travel_units(&yt, &pt);
-    printf("  usable travel: yaw %d units, pitch %d units\n", yt, pt);
+    int yaw_travel = 0, pitch_travel = 0;
+    head_travel_units(&yaw_travel, &pitch_travel);
+    printf("  yaw %d units (%.0f deg), pitch %d units (%.0f deg)\n",
+           yaw_travel, (double)(yaw_travel * DEG_PER_UNIT),
+           pitch_travel, (double)(pitch_travel * DEG_PER_UNIT));
 
     printf("\n--- camera ---\n");
-    const bool have_eyes = eyes_begin();
-    if (have_eyes) {
-        eyes_frame_size(&s_frame_w, &s_frame_h);
-        printf("  %dx%d RGB565\n", s_frame_w, s_frame_h);
-        printf("\n--- tracking ---\n");
-        printf("  corrections come from the lens field of view, so there\n");
-        printf("  is nothing to calibrate at runtime.\n");
-        printf("  fov %.0fx%.0f deg, %.3f deg/unit, gain %.2f\n",
-               (double)(HALF_FOV_X * 2), (double)(HALF_FOV_Y * 2),
-               (double)DEG_PER_UNIT, (double)TRACK_GAIN);
-    } else {
-        printf("  camera FAILED - the head will still move, but blind\n");
-    }
+    const bool eyes = vision_begin();
+    if (!eyes) printf("  FAILED - the head will move but blind\n");
+
+    head_center();
+    move_and_settle();
 
     printf("\n--- running ---\n\n");
 
-    int64_t next_report = 0;
-    int64_t next_grid   = esp_timer_get_time() + 3000000;
-    int64_t next_jpeg   = esp_timer_get_time() + 6000000;
+    int64_t last_seen_us = esp_timer_get_time();
+    int seen_yaw = 0, seen_pitch = 0;
+    int search_step = -1;
+    int64_t search_until = 0;
+    int64_t next_grid = esp_timer_get_time() + GRID_EVERY_US;
+    int64_t next_jpeg = esp_timer_get_time() + JPEG_EVERY_US;
 
     while (1) {
         const int64_t now = esp_timer_get_time();
-        eyes_set_head_moving(head_is_moving());
 
-        static int64_t last_us = 0;
-        const float dt_s = last_us ? (float)(now - last_us) / 1000000.0f : 0.05f;
-        last_us = now;
+        /* The head is still here by construction: every move below is
+           followed by move_and_settle() before the loop comes back round. */
+        motion_t m;
+        bool acted = false;
 
-        points_target_t tgt;
-        bool saw = false;
+        if (eyes && vision_look(&m) && m.valid && m.strength >= MIN_STRENGTH) {
+            const bool off_x = (m.x > DEADBAND_X || m.x < -DEADBAND_X);
+            const bool off_y = (m.y > DEADBAND_Y || m.y < -DEADBAND_Y);
 
-        if (have_eyes && eyes_track_points(s_pending_shift_x, s_pending_shift_y,
-                                           dt_s, &tgt)) {
-            s_pending_shift_x = s_pending_shift_y = 0.0f;
+            const int dy = off_x ? correction(m.x, HALF_FOV_X, SIGN_X) : 0;
+            const int dp = off_y ? correction(m.y, HALF_FOV_Y, -SIGN_Y) : 0;
 
-            if (tgt.valid && tgt.confidence >= MIN_CONFIDENCE) {
-                /* Lead the target rather than trail it. The points carry a
-                   velocity, so aim at where the person is going to be by the
-                   time the head gets there. */
-                const float lead = 0.25f;   /* seconds of prediction */
-                const float px = tgt.x + tgt.vx * lead * 2.0f;
-                const float py = tgt.y + tgt.vy * lead * 2.0f;
+            /* Remember where we were looking when we saw it. */
+            float hx = 0.0f, hy = 0.0f;
+            head_position(&hx, &hy);
+            seen_yaw   = (int)(hx * (float)(yaw_travel / 2));
+            seen_pitch = (int)(hy * (float)(pitch_travel / 2));
+            last_seen_us = now;
+            search_step = -1;
 
-                const bool off_x = (px > DEADBAND_X || px < -DEADBAND_X);
-                const bool off_y = (py > DEADBAND_Y || py < -DEADBAND_Y);
+            printf("  move (%+.2f,%+.2f) str %.2f -> %+d,%+d units\n",
+                   (double)m.x, (double)m.y, (double)m.strength, dy, dp);
 
-                const int dy = off_x ? correction_units(px, HALF_FOV_X, TRACK_SIGN_X) : 0;
-                const int dp = off_y ? correction_units(py, HALF_FOV_Y, -TRACK_SIGN_Y) : 0;
+            if (dy || dp) {
+                head_nudge_units(dy, dp);
+                move_and_settle();
+                acted = true;
+            }
+        }
 
-                if (dy || dp) {
-                    head_nudge_units(dy, dp);
-                    /* Remember how far this swings the view so the tracker
-                       can subtract its own motion next frame. */
-                    s_pending_shift_x = (float)dy * (DEG_PER_UNIT / HALF_FOV_X)
-                                        * (float)(s_frame_w / 2);
-                    s_pending_shift_y = (float)dp * (DEG_PER_UNIT / HALF_FOV_Y)
-                                        * (float)(s_frame_h / 2);
-                }
-
-                saw = true;
-                s_search_step = -1;
-
+        /* Nothing for a while: one outward sweep around the last sighting,
+           then rest. A robot still hunting an hour later reads as broken. */
+        if (!acted && (now - last_seen_us) > BORED_US && now >= search_until) {
+            if (search_step < 0) {
+                search_step = 0;
+                printf("  searching around the last sighting\n");
+            }
+            if (search_step < SEARCH_N) {
+                const int units = (int)(kSearch[search_step] / DEG_PER_UNIT);
                 float hx = 0.0f, hy = 0.0f;
                 head_position(&hx, &hy);
-                int yt = 0, pt2 = 0;
-                head_travel_units(&yt, &pt2);
-                s_seen_yaw   = (int)(hx * (float)(yt / 2));
-                s_seen_pitch = (int)(hy * (float)(pt2 / 2));
-                s_seen_us    = now;
-
-                if (!s_home_set) {
-                    s_home_yaw = (float)s_seen_yaw;
-                    s_home_pitch = (float)s_seen_pitch;
-                    s_home_set = true;
-                } else {
-                    s_home_yaw   += 0.01f * ((float)s_seen_yaw - s_home_yaw);
-                    s_home_pitch += 0.01f * ((float)s_seen_pitch - s_home_pitch);
-                }
-
-                if (now >= next_report) {
-                    next_report = now + 500000;
-                    printf("  track (%+.2f,%+.2f) v(%+.2f,%+.2f) pts %d -> %+d,%+d\n",
-                           tgt.x, tgt.y, tgt.vx, tgt.vy, tgt.n_points, dy, dp);
-                }
-            } else if (now >= next_report) {
-                next_report = now + 2000000;
-                printf("  (no moving target, %d point(s) alive)\n", tgt.n_points);
+                const int cur = (int)(hx * (float)(yaw_travel / 2));
+                head_nudge_units((seen_yaw + units) - cur, 0);
+                printf("  search %+0.f deg\n", (double)kSearch[search_step]);
+                search_step++;
+                move_and_settle();
+                search_until = esp_timer_get_time() + SEARCH_DWELL_US;
+            } else {
+                /* Pass over. Rest facing where movement was last seen. */
+                search_step = -1;
+                search_until = now + 25000000;
+                printf("  search done, resting\n");
             }
         }
 
-        if (!saw && (now - s_seen_us) > MEMORY_US) {
-            search_step(now);
+        if (eyes && now >= next_grid) {
+            next_grid = now + GRID_EVERY_US;
+            vision_debug_grid();
         }
-
-        /* Telemetry, only while the head is still - a grid taken mid-move
-           shows the camera sweeping, not the room. */
-        if (have_eyes && !head_is_moving()) {
-            if (now >= next_grid) {
-                next_grid = now + DEBUG_GRID_EVERY_US;
-                eyes_debug_grid();
-            }
-            if (now >= next_jpeg) {
-                next_jpeg = now + DEBUG_JPEG_EVERY_US;
-                uint8_t *jpg = NULL;
-                size_t len = 0;
-                if (eyes_capture_jpeg(&jpg, &len, 70)) {
-                    /* Base64, not raw bytes.
-                     *
-                     * stdout here is a text stream and translates LF to
-                     * CRLF, which silently corrupts any 0x0A inside binary
-                     * data. Measured: every raw frame arrived starting FFD8
-                     * correctly and never ending FFD9. Base64 is immune. */
-                    static const char b64[] =
-                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                    printf("--JPEG64 %u\n", (unsigned)len);
-                    for (size_t i = 0; i < len; i += 3) {
-                        const uint32_t a = jpg[i];
-                        const uint32_t b = (i + 1 < len) ? jpg[i + 1] : 0;
-                        const uint32_t c = (i + 2 < len) ? jpg[i + 2] : 0;
-                        const uint32_t v = (a << 16) | (b << 8) | c;
-                        putchar(b64[(v >> 18) & 63]);
-                        putchar(b64[(v >> 12) & 63]);
-                        putchar((i + 1 < len) ? b64[(v >> 6) & 63] : '=');
-                        putchar((i + 2 < len) ? b64[v & 63] : '=');
-                        /* Wrap so no single line is enormous. */
-                        if ((i / 3) % 19 == 18) putchar('\n');
-                    }
-                    printf("\n--ENDJPEG\n");
-                    free(jpg);
+        if (eyes && now >= next_jpeg) {
+            next_jpeg = now + JPEG_EVERY_US;
+            uint8_t *jpg = NULL;
+            size_t len = 0;
+            if (vision_jpeg(&jpg, &len, 70)) {
+                /* Base64: the device stdout is a text stream and translates
+                   LF to CRLF, which corrupts any 0x0A inside binary. */
+                static const char b64[] =
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                printf("--JPEG64 %u\n", (unsigned)len);
+                for (size_t i = 0; i < len; i += 3) {
+                    const uint32_t a = jpg[i];
+                    const uint32_t b = (i + 1 < len) ? jpg[i + 1] : 0;
+                    const uint32_t c = (i + 2 < len) ? jpg[i + 2] : 0;
+                    const uint32_t v = (a << 16) | (b << 8) | c;
+                    putchar(b64[(v >> 18) & 63]);
+                    putchar(b64[(v >> 12) & 63]);
+                    putchar((i + 1 < len) ? b64[(v >> 6) & 63] : '=');
+                    putchar((i + 2 < len) ? b64[v & 63] : '=');
+                    if ((i / 3) % 19 == 18) putchar('\n');
                 }
+                printf("\n--ENDJPEG\n");
+                free(jpg);
             }
         }
 
