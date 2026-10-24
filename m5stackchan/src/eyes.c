@@ -531,6 +531,21 @@ static bool follow_template(const uint8_t *grid, activity_t *out)
 {
     if (!s_has_tpl) return false;
 
+    /* A template matching a STATIC scene feature is not evidence that a
+     * person is there - a ceiling light matches its own template perfectly
+     * and indefinitely. Observed doing exactly that: the same reading
+     * (-0.05, +0.00) frame after frame, which kept the head frozen looking
+     * up because every frame counted as "someone is here".
+     *
+     * The expiry has to live here rather than in a query the caller might
+     * not make. Only motion nearby renews a lock; matching yourself does
+     * not. */
+    if (esp_timer_get_time() - s_tpl_confirmed_us > 8000000) {
+        s_has_tpl = false;
+        s_tpl_miss = 0;
+        return false;
+    }
+
     int gx = 0, gy = 0, err = 0;
     const bool found = find_template(grid, &gx, &gy, &err);
 
