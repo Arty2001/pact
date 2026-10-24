@@ -183,6 +183,32 @@ void head_look(float x, float y)
     s_pit_target = clampi(pc + (int)(y * (s_pit_hi - pc)), s_pit_lo, s_pit_hi);
 }
 
+void head_nudge_units(int d_yaw, int d_pitch)
+{
+    s_yaw_target = clampi(s_yaw_target + d_yaw, s_yaw_lo, s_yaw_hi);
+    s_pit_target = clampi(s_pit_target + d_pitch, s_pit_lo, s_pit_hi);
+}
+
+void head_travel_units(int *yaw_units, int *pitch_units)
+{
+    if (yaw_units) *yaw_units = s_yaw_hi - s_yaw_lo;
+    if (pitch_units) *pitch_units = s_pit_hi - s_pit_lo;
+}
+
+void head_limit_pitch(float fraction)
+{
+    if (fraction <= 0.0f || fraction > 1.0f) return;
+
+    const int c = mid(s_pit_lo, s_pit_hi);
+    const int half = (int)((float)(s_pit_hi - s_pit_lo) * fraction * 0.5f);
+    s_pit_lo = c - half;
+    s_pit_hi = c + half;
+    ESP_LOGI(TAG, "pitch narrowed to %d..%d (%.0f%% of travel)",
+             s_pit_lo, s_pit_hi, (double)(fraction * 100.0f));
+
+    s_pit_target = clampi(s_pit_target, s_pit_lo, s_pit_hi);
+}
+
 void head_center(void)
 {
     s_yaw_target = mid(s_yaw_lo, s_yaw_hi);

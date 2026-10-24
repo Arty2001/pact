@@ -43,8 +43,12 @@ static const char *TAG = "eyes";
  * Has to exceed the shift a calibration nudge produces or the match falls
  * outside the search and the result collapses to 0 - which is exactly what
  * happened with a +-40 window: stddev 1259 and frame delta 267 proved the
- * scene was textured and had moved, yet the reported shift was +0. */
-#define MAX_LAG 80
+ * scene was textured and had moved, yet the reported shift was +0.
+ *
+ * It also has to exceed it with room to spare: a measured shift landing
+ * exactly on the limit is pinned, not measured. An +80 px result against an
+ * 80 px window is a clipped answer that reads as a real one. */
+#define MAX_LAG 110
 
 /* How long after the head stops before motion data is trusted again. The
    scene is still settling - and so is the servo - for a moment after. */
@@ -60,6 +64,14 @@ static int64_t s_still_since = 0;
 
 /* Smoothed output. Vision is noisy frame to frame; the head should not be. */
 static float s_sx = 0.0f, s_sy = 0.0f;
+
+/* Kept purely so the debug dump shows what the tracker actually saw on its
+   last pass, rather than a fresh frame that may look nothing like it. */
+static int16_t s_last_diff[GW * GH];
+static int s_last_mean = 0;
+static int s_last_active = 0;
+static float s_last_cx = 0.0f, s_last_cy = 0.0f;
+static bool s_last_valid = false;
 
 /* ------------------------------------------------------------------ init -- */
 
@@ -236,6 +248,11 @@ bool eyes_read(activity_t *out)
         }
     }
 
+    memcpy(s_last_diff, diff, sizeof(diff));
+    s_last_mean   = mean;
+    s_last_active = active;
+    s_last_valid  = false;
+
     if (active < MIN_ACTIVE_BLOCKS || total == 0) return true;
 
     /* Too much of the frame changed to be one thing happening in it. */
@@ -270,137 +287,185 @@ bool eyes_read(activity_t *out)
     out->y = s_sy;
     out->confidence = conf;
     out->valid = true;
+
+    s_last_cx    = s_sx;
+    s_last_cy    = s_sy;
+    s_last_valid = true;
     return true;
 }
 
-/* ------------------------------------------------- yaw sign measurement -- */
+/* ----------------------------------------------------------- debug views -- */
 
-/** Collapse a frame to a column brightness profile. */
-static bool column_profile(int32_t *prof, int width)
+bool eyes_capture_jpeg(uint8_t **out, size_t *len, int quality)
+{
+    if (!out || !len) return false;
+
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) return false;
+
+    const bool ok = frame2jpg(fb, quality, out, len);
+    esp_camera_fb_return(fb);
+    return ok;
+}
+
+void eyes_debug_grid(void)
+{
+    /* One character per block, scaled by how much it changed. Reading this
+       is how you tell a person moving (a tight cluster) from the lights
+       changing (the whole grid) from noise (scattered specks). */
+    static const char ramp[] = " .:-=+*#%@";
+
+    printf("--GRID %dx%d mean=%d active=%d", GW, GH, s_last_mean, s_last_active);
+    if (s_last_valid) printf(" centroid=%+.2f,%+.2f", s_last_cx, s_last_cy);
+    printf("\n");
+
+    for (int gy = 0; gy < GH; gy++) {
+        printf("  |");
+        for (int gx = 0; gx < GW; gx++) {
+            const int d = s_last_diff[gy * GW + gx] - s_last_mean;
+            int mag = d < 0 ? -d : d;
+            if (mag < BLOCK_THRESHOLD) {
+                putchar(ramp[0]);
+            } else {
+                int level = 1 + (mag - BLOCK_THRESHOLD) / 8;
+                if (level > 9) level = 9;
+                putchar(ramp[level]);
+            }
+        }
+        printf("|\n");
+    }
+    printf("--ENDGRID\n");
+}
+
+
+/* ======================================================================== */
+/*  Shift measurement: how far the view slides when the head moves.         */
+/*                                                                          */
+/*  This is what lets the controller be calibrated rather than tuned by      */
+/*  guesswork. Servo feedback tells us the shaft turned; only the camera     */
+/*  tells us how much the view actually changed, which is what matters for   */
+/*  pointing at something.                                                   */
+/* ======================================================================== */
+
+static int32_t s_snap_col[320];
+static int32_t s_snap_row[240];
+static int s_snap_w = 0, s_snap_h = 0;
+static bool s_have_snap = false;
+
+/** Column and row brightness profiles of one frame. */
+static bool profiles(int32_t *col, int32_t *row, int *w_out, int *h_out)
 {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) return false;
 
+    const int w = (int)fb->width > 320 ? 320 : (int)fb->width;
+    const int h = (int)fb->height > 240 ? 240 : (int)fb->height;
     const uint16_t *px = (const uint16_t *)fb->buf;
-    for (int x = 0; x < width; x++) prof[x] = 0;
 
-    for (int y = 0; y < (int)fb->height; y += 3) {
-        for (int x = 0; x < width && x < (int)fb->width; x++) {
+    for (int x = 0; x < w; x++) col[x] = 0;
+    for (int y = 0; y < h; y++) row[y] = 0;
+
+    /* Every 2nd row and column: still thousands of samples per profile. */
+    for (int y = 0; y < h; y += 2) {
+        for (int x = 0; x < w; x += 2) {
             const uint16_t p = px[y * fb->width + x];
             const int r = (p >> 11) & 0x1F, g = (p >> 5) & 0x3F, b = p & 0x1F;
-            prof[x] += (r << 1) + g + (b << 1);
+            const int32_t lum = (r << 1) + g + (b << 1);
+            col[x] += lum;
+            row[y] += lum;
         }
     }
     esp_camera_fb_return(fb);
+
+    if (w_out) *w_out = w;
+    if (h_out) *h_out = h;
     return true;
 }
 
-/** Lag where `b` best matches `a`. Positive means content moved right. */
-static int best_shift(const int32_t *a, const int32_t *b, int w, int max_lag)
-{
-    int64_t ma = 0, mb = 0;
-    for (int x = 0; x < w; x++) { ma += a[x]; mb += b[x]; }
-    ma /= w; mb /= w;
 
-    int64_t best = INT64_MIN;
-    int best_lag = 0;
-    for (int lag = -max_lag; lag <= max_lag; lag++) {
-        int64_t score = 0;
-        int n = 0;
-        for (int x = 0; x < w; x++) {
-            const int xb = x + lag;
-            if (xb < 0 || xb >= w) continue;
-            score += (int64_t)(a[x] - ma) * (int64_t)(b[xb] - mb);
-            n++;
+/**
+ * Lag at which b best matches a, plus how distinct that match is.
+ *
+ * Correlates the DERIVATIVE of each profile rather than the profile itself.
+ * That matters: a smooth brightness ramp - a bright ceiling over a dark
+ * floor, say - has enormous variance but no distinctive features, so it
+ * correlates almost equally at every lag and the search settles on 0 by
+ * noise. Measured exactly that way: a pitch move of 40 servo units reported
+ * a shift of 0 px while the profile's variance looked healthy at 1201.
+ * Differencing removes the ramp and leaves the edges, which correlate
+ * sharply.
+ *
+ * @param sharpness best score divided by the mean score. Near 1.0 means
+ *                  every lag fits equally well, i.e. the answer is noise.
+ */
+static int best_lag(const int32_t *a, const int32_t *b, int n, int stride,
+                    int max_lag, double *sharpness)
+{
+    /* Gradient profiles. One sample shorter, hence n - stride below. */
+    static double da[320], db[320];
+    int m = 0;
+    for (int i = 0; i + stride < n && m < 320; i += stride, m++) {
+        da[m] = (double)a[i + stride] - (double)a[i];
+        db[m] = (double)b[i + stride] - (double)b[i];
+    }
+    if (m < 8) { if (sharpness) *sharpness = 0.0; return 0; }
+
+    const int lag_steps = max_lag / stride;
+    double best = -1e30, sum_abs = 0.0;
+    int best_l = 0, considered = 0;
+
+    for (int l = -lag_steps; l <= lag_steps; l++) {
+        double score = 0.0;
+        int k = 0;
+        for (int i = 0; i < m; i++) {
+            const int j = i + l;
+            if (j < 0 || j >= m) continue;
+            score += da[i] * db[j];
+            k++;
         }
-        if (n < w / 2) continue;
-        score /= n;
-        if (score > best) { best = score; best_lag = lag; }
+        if (k < m / 2) continue;
+        score /= k;
+
+        sum_abs += score < 0 ? -score : score;
+        considered++;
+        if (score > best) { best = score; best_l = l * stride; }
     }
-    return best_lag;
+
+    if (sharpness) {
+        const double mean_abs = considered ? sum_abs / considered : 0.0;
+        *sharpness = (mean_abs > 1e-9) ? (best / mean_abs) : 0.0;
+    }
+    return best_l;
 }
 
-/** Spread of a profile. Near zero means the scene has no vertical edges. */
-static double profile_stddev(const int32_t *p, int w)
+bool eyes_snapshot(void)
 {
-    double mean = 0.0;
-    for (int x = 0; x < w; x++) mean += (double)p[x];
-    mean /= w;
-
-    double var = 0.0;
-    for (int x = 0; x < w; x++) {
-        const double d = (double)p[x] - mean;
-        var += d * d;
-    }
-    return (var > 0.0) ? __builtin_sqrt(var / w) : 0.0;
+    if (!profiles(s_snap_col, s_snap_row, &s_snap_w, &s_snap_h)) return false;
+    s_have_snap = true;
+    return true;
 }
 
-bool eyes_measure_yaw_sign(void (*nudge)(void), int *out_sign)
+bool eyes_shift_since_snapshot(int *dx, int *dy, double *quality)
 {
-    if (!nudge || !out_sign) return false;
+    if (!s_have_snap) return false;
 
-    const int w = s_w < 320 ? s_w : 320;
-    static int32_t before[320], after[320];
+    static int32_t col[320], row[240];
+    int w = 0, h = 0;
+    if (!profiles(col, row, &w, &h)) return false;
+    if (w != s_snap_w || h != s_snap_h) return false;
 
-    if (!column_profile(before, w)) return false;
+    /* Rows are sampled every 2nd line, so the row profile has gaps; stride
+       the correlation to match or every other lag scores against zeros. */
+    double sx = 0.0, sy = 0.0;
+    const int lx = best_lag(s_snap_col, col, w, 2, MAX_LAG, &sx);
+    const int ly = best_lag(s_snap_row, row, h, 2, MAX_LAG, &sy);
+    if (dx) *dx = lx;
+    if (dy) *dy = ly;
 
-    /* Distinguish the two reasons this can fail. A flat scene has nothing to
-       correlate; a scene with plenty of structure that still shows no shift
-       means the head did not actually move. Reporting "too flat" for both
-       would send you looking in the wrong place. */
-    const double sd = profile_stddev(before, w);
-
-    nudge();  /* caller commands a small POSITIVE yaw move and settles */
-
-    if (!column_profile(after, w)) return false;
-
-    /* How different the two frames are at all, before asking about direction. */
-    int64_t absdiff = 0;
-    for (int x = 0; x < w; x++) {
-        const int64_t d = (int64_t)after[x] - (int64_t)before[x];
-        absdiff += d < 0 ? -d : d;
-    }
-    absdiff /= w;
-
-    const int shift = best_shift(before, after, w, MAX_LAG);
-    ESP_LOGI(TAG, "yaw sign probe: shift %+d px, scene stddev %.0f, frame delta %lld",
-             shift, sd, (long long)absdiff);
-
-    if (sd < 200.0) {
-        ESP_LOGW(TAG, "scene has almost no vertical structure (stddev %.0f)", sd);
-        ESP_LOGW(TAG, "point the robot at a doorway, shelf or patterned wall");
-        return false;
-    }
-    if (absdiff < 50) {
-        ESP_LOGW(TAG, "frames are nearly identical - the head likely did not move");
-        ESP_LOGW(TAG, "check the servo rail and that yaw is not at a travel limit");
-        return false;
-    }
-
-    /* If the head turned right, the world slid left across the sensor. */
-    if (shift < -3) {
-        *out_sign = +1;
-        ESP_LOGI(TAG, "positive yaw turns the head RIGHT");
-        return true;
-    }
-    if (shift > 3) {
-        *out_sign = -1;
-        ESP_LOGI(TAG, "positive yaw turns the head LEFT");
-        return true;
-    }
-
-    /* Structure and movement were both confirmed above, so a zero or
-       pinned shift means the correlation could not find the match - almost
-       always because the head moved further than the search window. With
-       little overlap between the two frames there is no good lag anywhere
-       and the search falls back to 0. */
-    if (shift == 0) {
-        ESP_LOGW(TAG, "no shift found despite a changed, textured scene");
-        ESP_LOGW(TAG, "the nudge is probably too large - reduce it");
-    } else if (shift >= MAX_LAG - 2 || shift <= -(MAX_LAG - 2)) {
-        ESP_LOGW(TAG, "shift pinned at the search limit (%+d) - nudge too large", shift);
-    } else {
-        ESP_LOGW(TAG, "shift %+d too small to be sure of a direction", shift);
-    }
-    return false;
+    /* Quality is now how DISTINCT the match is, not how much the profile
+       varies. Variance was the wrong measure: a smooth ramp scores high on
+       it and still cannot be correlated. The caller asks about one axis at
+       a time, so report each axis' own sharpness via the axis it asked for. */
+    if (quality) *quality = (dy && !dx) ? sy : ((dx && !dy) ? sx : (sx < sy ? sx : sy));
+    return true;
 }

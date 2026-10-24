@@ -18,6 +18,8 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,21 +56,51 @@ bool eyes_read(activity_t *out);
 void eyes_set_head_moving(bool moving);
 
 /**
- * Measure which way a positive yaw command actually points the lens.
+ * Remember the current view, for comparison after the head moves.
  *
- * This cannot be derived from servo feedback - feedback says the shaft
- * turned, not where the lens ended up, which depends on how the horn was
- * seated and how the gears are arranged. So we nudge the head and watch
- * which way the world slides across the frame.
- *
- * @param nudge   called to command a small positive yaw move and settle
- * @param out_sign +1 if a positive command turns the head right, -1 if left
- * @return false if the scene was too flat to measure (say so, do not guess)
+ * Stores a column and a row brightness profile. Used to calibrate how far
+ * the image slides per unit of servo travel - which cannot be derived from
+ * servo feedback, because feedback says the shaft turned, not where the lens
+ * ended up pointing.
  */
-bool eyes_measure_yaw_sign(void (*nudge)(void), int *out_sign);
+bool eyes_snapshot(void);
+
+/**
+ * How far the view has slid since eyes_snapshot().
+ *
+ * @param dx       pixels the scene moved horizontally (positive = right)
+ * @param dy       pixels the scene moved vertically (positive = down)
+ * @param quality  how much structure there was to match on; below about 200
+ *                 the answer is not trustworthy and should be rejected
+ * @return false if no frame was available
+ *
+ * Note the sense: if the head turns right, the scene slides LEFT, so dx is
+ * negative. Callers convert that into a direction themselves.
+ */
+bool eyes_shift_since_snapshot(int *dx, int *dy, double *quality);
 
 /** Frame dimensions, once the camera is up. */
 void eyes_frame_size(int *w, int *h);
+
+/* --- debugging ---------------------------------------------------------- */
+
+/**
+ * Capture the current view as JPEG.
+ *
+ * For looking at what the robot actually sees while debugging. The GC0308
+ * has no hardware encoder, so this is a software pass and not something to
+ * do in the tracking loop. Caller frees with free().
+ */
+bool eyes_capture_jpeg(uint8_t **out, size_t *len, int quality);
+
+/**
+ * Render the last motion grid as text.
+ *
+ * More useful than the photo for diagnosing the tracker, because it shows
+ * what the algorithm sees rather than what the lens sees: which blocks
+ * tripped the threshold, and where the centroid landed.
+ */
+void eyes_debug_grid(void);
 
 #ifdef __cplusplus
 }

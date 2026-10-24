@@ -69,6 +69,34 @@ bool head_is_moving(void);
 /** Max units of travel per tick. Lower is calmer, higher is snappier. */
 void head_set_rate(int units_per_tick);
 
+/**
+ * Shift the target by raw servo units.
+ *
+ * The controller works in servo units because that is what the camera
+ * calibration measures against: pixels of image shift per servo unit. Going
+ * via normalized coordinates would divide by each axis' travel and silently
+ * change the gain between axes, which is exactly the bug that made pitch
+ * track three times too weakly (yaw has 967 units of travel, pitch 307).
+ */
+void head_nudge_units(int d_yaw, int d_pitch);
+
+/** Usable travel per axis, in servo units, after calibration. */
+void head_travel_units(int *yaw_units, int *pitch_units);
+
+/**
+ * Narrow an axis to a fraction of its travel, centred on the midpoint.
+ *
+ * Mechanical limits are not the same as USEFUL limits. Photographed on this
+ * robot: at mid-travel the camera sees the room, but at either pitch extreme
+ * it sees only ceiling. The head is heavy enough that near the limits the
+ * whole robot rocks back on its base and the lens swings skyward - which
+ * also made the pitch gain unmeasurable, since the correlation was tracking
+ * the robot tipping rather than the head turning.
+ *
+ * @param fraction 0..1 of the full travel to keep, e.g. 0.6
+ */
+void head_limit_pitch(float fraction);
+
 #ifdef __cplusplus
 }
 #endif
