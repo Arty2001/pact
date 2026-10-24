@@ -2,3 +2,8 @@
 # Create an app at: https://dash.cloudflare.com/?to=/:account/calls
 REALTIME_APP_ID=
 REALTIME_APP_SECRET=
+
+# Nebius Token Factory. The planner (Nemotron) runs in the Worker, so the
+# Worker needs this; perception keeps its own copy for the teacher.
+# Key: https://tokenfactory.nebius.com -> API keys
+NEBIUS_API_KEY=

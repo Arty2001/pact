@@ -83,6 +83,9 @@ void head_nudge_units(int d_yaw, int d_pitch);
 /** Usable travel per axis, in servo units, after calibration. */
 void head_travel_units(int *yaw_units, int *pitch_units);
 
+/** The working limits in raw servo units. */
+void head_limits_units(int *yaw_lo, int *yaw_hi, int *pit_lo, int *pit_hi);
+
 /**
  * Narrow an axis to a fraction of its travel, centred on the midpoint.
  *

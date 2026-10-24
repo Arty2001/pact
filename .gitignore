@@ -1,5 +1,26 @@
 node_modules/
 .wrangler/
-.dev.vars
+# Every .dev.vars variant, because a file-manager duplicate named
+# ".dev.vars copy.example" is exactly how a real key gets committed.
+.dev.vars*
+!.dev.vars.example
 dist/
 bridge/node_modules/
+
+# Secrets. Anything matching .env is ignored everywhere, not just at the root,
+# because the perception service reads its own and a stray one is a leaked key.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Frames and recorded score traces. Never commit footage.
+perception/traces/
+perception/frames/
+perception/debug/

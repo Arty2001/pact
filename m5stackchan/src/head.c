@@ -8,8 +8,42 @@
 static const char *TAG = "head";
 
 /* Filled from each servo's own EEPROM at init - never hard-coded. */
-static int s_yaw_lo = 20, s_yaw_hi = 1003;
-static int s_pit_lo = 20, s_pit_hi = 1003;
+/* Two different kinds of limit, measured two different ways.
+ *
+ * MECHANICAL is how far the chassis lets each axis go. A servo probe finds
+ * it, and it reproduces: yaw 24..993, pitch 579..887.
+ *
+ * WORKING is the range worth using, and no servo probe can tell you that -
+ * it comes from sweeping the axis, capturing a frame at each stop, and
+ * looking at them. Doing that showed pitch 589..615 framing the room and
+ * everything above about 650 seeing nothing but ceiling and a chandelier.
+ * Level is near the BOTTOM of the pitch travel, not the middle.
+ *
+ * That mattered because head_center() aims at the midpoint. Over the full
+ * mechanical range the midpoint is 733 - squarely in the ceiling - so the
+ * head sat staring upward with no person ever in frame, which looked for
+ * all the world like a tracker that did not work. Narrowing the working
+ * range to the band people actually occupy makes the midpoint land on them.
+ *
+ * Baked in rather than probed at boot: probing cost 32 seconds of every
+ * boot, drove both axes into their hard stops to do it, and when it failed
+ * quietly it returned a 110-unit yaw range that passed the sanity check.
+ * head_calibrate() can still re-measure the mechanical limits; it reports
+ * them and refuses implausible results, and never widens the working band. */
+#define YAW_MECH_LO  24
+#define YAW_MECH_HI  993
+#define PIT_MECH_LO 579
+#define PIT_MECH_HI 887
+
+/* Yaw wants all the travel it can get - turning to face someone is the
+   whole job. Pitch wants only the band where people are. */
+#define YAW_LO (YAW_MECH_LO + 10)
+#define YAW_HI (YAW_MECH_HI - 10)
+#define PIT_LO 582
+#define PIT_HI 645
+
+static int s_yaw_lo = YAW_LO, s_yaw_hi = YAW_HI;
+static int s_pit_lo = PIT_LO, s_pit_hi = PIT_HI;
 
 static int s_yaw_target, s_pit_target;  /* servo units */
 static int s_yaw_now, s_pit_now;
@@ -52,10 +86,25 @@ static int probe_mechanical_limit(uint8_t id, int from, int dir,
     const int progress_units = 4;   /* less than this is "not moving" */
     const int stuck_rounds   = 3;   /* consecutive still readings to confirm */
 
-    int commanded = from;
-    int reached   = from;
-    int last      = from;
+    /* Start from where the servo PHYSICALLY is, not from a caller-supplied
+       value. The previous probe left the head leaning the other way, so a
+       stale baseline makes the first readings look like either a huge jump
+       or no movement at all - and since `reached` only advances on progress,
+       a probe that never gets going returns its own starting point and
+       passes for a measurement. */
+    int here = scs_read_pos(id);
+    if (here < 0) here = from;
+    scs_write16(id, SCS_REG_GOAL_POSITION, (uint16_t)here);
+    vTaskDelay(pdMS_TO_TICKS(300));
+    here = scs_read_pos(id);
+    if (here < 0) here = from;
+
+    int commanded = here;
+    int reached   = here;
+    int last      = here;
     int stuck     = 0;
+
+    ESP_LOGI(TAG, "  probe id=%d dir=%+d from=%d", id, dir, here);
 
     while (1) {
         const int next = commanded + dir * step;
@@ -74,6 +123,8 @@ static int probe_mechanical_limit(uint8_t id, int from, int dir,
         last = actual;
 
         if (moved < progress_units) {
+            ESP_LOGI(TAG, "    cmd=%d actual=%d moved=%d stuck=%d",
+                     commanded, actual, moved, stuck + 1);
             if (++stuck >= stuck_rounds) break;  /* genuinely at the stop */
         } else {
             stuck   = 0;
@@ -86,6 +137,7 @@ static int probe_mechanical_limit(uint8_t id, int from, int dir,
     scs_write16(id, SCS_REG_GOAL_POSITION, (uint16_t)safe);
     vTaskDelay(pdMS_TO_TICKS(250));
 
+    ESP_LOGI(TAG, "  probe id=%d dir=%+d -> %d", id, dir, reached);
     return reached;
 }
 
@@ -104,22 +156,34 @@ bool head_calibrate(void)
         return false;
     }
 
-    const int y_hi = probe_mechanical_limit(SCS_ID_YAW, y0, +1, s_yaw_lo, s_yaw_hi);
-    const int y_lo = probe_mechanical_limit(SCS_ID_YAW, y0, -1, s_yaw_lo, s_yaw_hi);
-    const int p_hi = probe_mechanical_limit(SCS_ID_PITCH, p0, +1, s_pit_lo, s_pit_hi);
-    const int p_lo = probe_mechanical_limit(SCS_ID_PITCH, p0, -1, s_pit_lo, s_pit_hi);
+    /* Probe inside the servo's electrical range; the working range is now
+       tighter than the mechanics and would stop the probe short of them. */
+    const int y_hi = probe_mechanical_limit(SCS_ID_YAW, y0, +1, 20, 1003);
+    const int y_lo = probe_mechanical_limit(SCS_ID_YAW, y0, -1, 20, 1003);
+    const int p_hi = probe_mechanical_limit(SCS_ID_PITCH, p0, +1, 20, 1003);
+    const int p_lo = probe_mechanical_limit(SCS_ID_PITCH, p0, -1, 20, 1003);
 
     ESP_LOGI(TAG, "eeprom says    : yaw %d..%d   pitch %d..%d",
              s_yaw_lo, s_yaw_hi, s_pit_lo, s_pit_hi);
     ESP_LOGI(TAG, "mechanical is  : yaw %d..%d   pitch %d..%d",
              y_lo, y_hi, p_lo, p_hi);
 
-    /* Keep a small margin so normal tracking never rests on a hard stop. */
-    const int margin = 10;
-    if (y_hi - y_lo > 60) { s_yaw_lo = y_lo + margin; s_yaw_hi = y_hi - margin; }
-    if (p_hi - p_lo > 60) { s_pit_lo = p_lo + margin; s_pit_hi = p_hi - margin; }
+    /* Report against the known mechanics. A probe that quits early returns
+       a plausible-looking narrow range, and accepting one of those is what
+       locked the head into a 32 degree window. */
+    const int want_yaw = (YAW_MECH_HI - YAW_MECH_LO) * 4 / 5;
+    const int want_pit = (PIT_MECH_HI - PIT_MECH_LO) * 4 / 5;
 
-    ESP_LOGI(TAG, "using          : yaw %d..%d   pitch %d..%d",
+    if (y_hi - y_lo < want_yaw)
+        ESP_LOGW(TAG, "yaw probe gave %d units, expected ~%d - BAD PROBE",
+                 y_hi - y_lo, want_yaw);
+    if (p_hi - p_lo < want_pit)
+        ESP_LOGW(TAG, "pitch probe gave %d units, expected ~%d - BAD PROBE",
+                 p_hi - p_lo, want_pit);
+
+    /* The working range stays as it is either way. It encodes where people
+       are in frame, which a servo probe cannot see. */
+    ESP_LOGI(TAG, "working range unchanged: yaw %d..%d pitch %d..%d",
              s_yaw_lo, s_yaw_hi, s_pit_lo, s_pit_hi);
 
     scs_write16(SCS_ID_YAW, SCS_REG_GOAL_SPEED, 600);
@@ -135,15 +199,17 @@ bool head_begin(void)
 {
     uint16_t lo = 0, hi = 0;
 
+    /* EEPROM limits are the servo's own electrical guard and read 20..1003 -
+       far wider than the chassis allows. Take the intersection, so the
+       measured mechanical range wins but a servo configured tighter than the
+       chassis is still respected. */
     if (scs_read_limits(SCS_ID_YAW, &lo, &hi) && lo != hi) {
-        s_yaw_lo = lo; s_yaw_hi = hi;
-    } else {
-        ESP_LOGW(TAG, "yaw limits unreadable, keeping %d..%d", s_yaw_lo, s_yaw_hi);
+        if (lo > s_yaw_lo) s_yaw_lo = lo;
+        if (hi < s_yaw_hi) s_yaw_hi = hi;
     }
     if (scs_read_limits(SCS_ID_PITCH, &lo, &hi) && lo != hi) {
-        s_pit_lo = lo; s_pit_hi = hi;
-    } else {
-        ESP_LOGW(TAG, "pitch limits unreadable, keeping %d..%d", s_pit_lo, s_pit_hi);
+        if (lo > s_pit_lo) s_pit_lo = lo;
+        if (hi < s_pit_hi) s_pit_hi = hi;
     }
     ESP_LOGI(TAG, "travel: yaw %d..%d, pitch %d..%d",
              s_yaw_lo, s_yaw_hi, s_pit_lo, s_pit_hi);
@@ -195,6 +261,14 @@ void head_travel_units(int *yaw_units, int *pitch_units)
     if (yaw_units) *yaw_units = s_yaw_hi - s_yaw_lo;
     if (pitch_units) *pitch_units = s_pit_hi - s_pit_lo;
 }
+void head_limits_units(int *yaw_lo, int *yaw_hi, int *pit_lo, int *pit_hi)
+{
+    if (yaw_lo) *yaw_lo = s_yaw_lo;
+    if (yaw_hi) *yaw_hi = s_yaw_hi;
+    if (pit_lo) *pit_lo = s_pit_lo;
+    if (pit_hi) *pit_hi = s_pit_hi;
+}
+
 
 void head_limit_pitch(float fraction)
 {

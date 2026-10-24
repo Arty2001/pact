@@ -63,6 +63,21 @@ void vision_forget(void);
 /** Frame size, once the camera is up. */
 void vision_frame_size(int *w, int *h);
 
+/** Grid dimensions used by the detector. */
+void vision_grid_size(int *w, int *h);
+
+/**
+ * Capture one frame as JPEG and/or raw detector grid.
+ *
+ * One exposure feeds both, so the picture and the grid always describe the
+ * same instant - which is the point: the host replay tool can then run the
+ * detector on exactly the bytes the device saw, instead of on a
+ * reimplementation that has to be trusted.
+ *
+ * Pass NULL for either output. Caller frees *jpg.
+ */
+bool vision_capture(uint8_t **jpg, size_t *jpg_len, int quality, uint8_t *grid);
+
 /** Capture a JPEG for debugging. Caller frees. */
 bool vision_jpeg(uint8_t **out, size_t *len, int quality);
 

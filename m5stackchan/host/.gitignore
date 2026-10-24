@@ -1,0 +1,6 @@
+# Recordings are large and reproducible; baseline_empty is kept as the
+# false-positive test set.
+recordings/*
+!recordings/baseline_empty/
+recordings/baseline_empty/*.jpg
+*.png

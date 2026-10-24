@@ -67,7 +67,14 @@ bool vision_begin(void)
         .jpeg_quality  = 0,
         .fb_count      = 2,
         .fb_location   = CAMERA_FB_IN_PSRAM,
-        .grab_mode     = CAMERA_GRAB_WHEN_EMPTY,
+        /* LATEST, not WHEN_EMPTY. WHEN_EMPTY hands back the OLDEST queued
+           frame, so after the head has been still for a second both buffers
+           still held frames captured while it was moving. Measured with the
+           sweep: the montage was two frames behind the servo throughout, and
+           the first stop showed where the head had been before the sweep
+           began. That stale frame became the reference for the next
+           comparison, which made the whole room look like it had moved. */
+        .grab_mode     = CAMERA_GRAB_LATEST,
         .sccb_i2c_port = -1,
     };
 
@@ -98,6 +105,29 @@ void vision_frame_size(int *w, int *h)
 void vision_forget(void) { s_have_prev = false; }
 
 /* -------------------------------------------------------------- sampling -- */
+
+/**
+ * Get a frame that is actually current.
+ *
+ * The driver keeps fb_count buffers filled continuously, so a frame handed
+ * back right after a pause can have been exposed before it. GRAB_LATEST
+ * picks the newest of the queue, and discarding the queued ones first makes
+ * sure the newest is one exposed after this call rather than during the
+ * move that preceded it.
+ *
+ * This matters more than it sounds: a stale frame taken while the head was
+ * turning became the reference the next frame was compared against, which
+ * reported the entire room as moving and sent the head chasing it.
+ */
+static camera_fb_t *grab_fresh(void)
+{
+    for (int i = 0; i < 2; i++) {
+        camera_fb_t *stale = esp_camera_fb_get();
+        if (!stale) return NULL;
+        esp_camera_fb_return(stale);
+    }
+    return esp_camera_fb_get();
+}
 
 /** Reduce a frame to a GW x GH brightness grid. */
 static void sample(const camera_fb_t *fb, uint8_t *grid)
@@ -133,7 +163,7 @@ bool vision_look(motion_t *out)
     memset(out, 0, sizeof(*out));
     s_last_valid = false;
 
-    camera_fb_t *fb = esp_camera_fb_get();
+    camera_fb_t *fb = grab_fresh();
     if (!fb) return false;
 
     static uint8_t grid[GW * GH];
@@ -195,14 +225,29 @@ bool vision_look(motion_t *out)
 
 /* ----------------------------------------------------------------- debug -- */
 
+void vision_grid_size(int *w, int *h)
+{
+    if (w) *w = GW;
+    if (h) *h = GH;
+}
+
+bool vision_capture(uint8_t **jpg, size_t *jpg_len, int quality, uint8_t *grid)
+{
+    camera_fb_t *fb = grab_fresh();
+    if (!fb) return false;
+
+    bool ok = true;
+    if (grid) sample(fb, grid);
+    if (jpg && jpg_len) ok = frame2jpg(fb, quality, jpg, jpg_len);
+
+    esp_camera_fb_return(fb);
+    return ok;
+}
+
 bool vision_jpeg(uint8_t **out, size_t *len, int quality)
 {
     if (!out || !len) return false;
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb) return false;
-    const bool ok = frame2jpg(fb, quality, out, len);
-    esp_camera_fb_return(fb);
-    return ok;
+    return vision_capture(out, len, quality, NULL);
 }
 
 void vision_debug_grid(void)
