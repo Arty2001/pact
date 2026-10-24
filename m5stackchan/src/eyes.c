@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "esp_camera.h"
+#include "points.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -745,4 +746,48 @@ bool eyes_shift_since_snapshot(int *dx, int *dy, double *quality)
        a time, so report each axis' own sharpness via the axis it asked for. */
     if (quality) *quality = (dy && !dx) ? sy : ((dx && !dy) ? sx : (sx < sy ? sx : sy));
     return true;
+}
+
+/* ------------------------------------------------- point tracking entry -- */
+
+/*
+ * Half-resolution grayscale buffer.
+ *
+ * The point tracker searches a window per point per frame, so it runs on a
+ * 160x120 reduction rather than the full QVGA frame. That keeps the work
+ * inside one frame interval and still resolves a person across a room.
+ */
+#define PW 160
+#define PH 120
+static uint8_t s_gray[PW * PH];
+
+bool eyes_track_points(float shift_x, float shift_y, float dt_s,
+                       points_target_t *out)
+{
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb || !fb->buf) {
+        if (fb) esp_camera_fb_return(fb);
+        return false;
+    }
+
+    const uint16_t *px = (const uint16_t *)fb->buf;
+    const int sx = (int)fb->width / PW;
+    const int sy = (int)fb->height / PH;
+
+    for (int y = 0; y < PH; y++) {
+        const int srcy = y * sy;
+        for (int x = 0; x < PW; x++) {
+            const uint16_t p = px[srcy * fb->width + x * sx];
+            const int r = (p >> 11) & 0x1F;
+            const int g = (p >> 5) & 0x3F;
+            const int b = p & 0x1F;
+            /* Scale the 5/6/5 channels into a single 0-255 brightness. */
+            s_gray[y * PW + x] = (uint8_t)(((r << 1) + g + (b << 1)) * 255 / 187);
+        }
+    }
+    esp_camera_fb_return(fb);
+
+    /* The head moved the whole view by this much, in full-frame pixels;
+       halve it to match the reduced buffer. */
+    return points_update(s_gray, PW, PH, shift_x * 0.5f, shift_y * 0.5f, dt_s, out);
 }

@@ -32,6 +32,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "head.h"
+#include "points.h"
 #include "scs.h"
 
 static const char *TAG = "pact";
@@ -117,6 +118,10 @@ static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_py32;
 
 static int s_frame_w = 320, s_frame_h = 240;
+
+/* View shift the last commanded move will produce, handed to the tracker on
+   the next frame so it can tell its own motion from the room's. */
+static float s_pending_shift_x = 0.0f, s_pending_shift_y = 0.0f;
 
 /* Where a target was last actually seen, in servo units, and when. */
 static int s_seen_yaw = 0, s_seen_pitch = 0;
@@ -344,61 +349,72 @@ void app_main(void)
         const int64_t now = esp_timer_get_time();
         eyes_set_head_moving(head_is_moving());
 
-        activity_t act;
+        static int64_t last_us = 0;
+        const float dt_s = last_us ? (float)(now - last_us) / 1000000.0f : 0.05f;
+        last_us = now;
+
+        points_target_t tgt;
         bool saw = false;
 
-        if (have_eyes && eyes_read(&act) && act.valid &&
-            act.confidence >= MIN_CONFIDENCE) {
+        if (have_eyes && eyes_track_points(s_pending_shift_x, s_pending_shift_y,
+                                           dt_s, &tgt)) {
+            s_pending_shift_x = s_pending_shift_y = 0.0f;
 
-            /* Per-axis deadbands. A target this close to centre is already
-               being looked at, and chasing it is nervous twitching. */
-            const bool off_x = (act.x > DEADBAND_X || act.x < -DEADBAND_X);
-            const bool off_y = (act.y > DEADBAND_Y || act.y < -DEADBAND_Y);
+            if (tgt.valid && tgt.confidence >= MIN_CONFIDENCE) {
+                /* Lead the target rather than trail it. The points carry a
+                   velocity, so aim at where the person is going to be by the
+                   time the head gets there. */
+                const float lead = 0.25f;   /* seconds of prediction */
+                const float px = tgt.x + tgt.vx * lead * 2.0f;
+                const float py = tgt.y + tgt.vy * lead * 2.0f;
 
-            const int dy = off_x ? correction_units(act.x, HALF_FOV_X, TRACK_SIGN_X) : 0;
-            const int dp = off_y ? correction_units(act.y, HALF_FOV_Y, -TRACK_SIGN_Y) : 0;
+                const bool off_x = (px > DEADBAND_X || px < -DEADBAND_X);
+                const bool off_y = (py > DEADBAND_Y || py < -DEADBAND_Y);
 
-            if (dy || dp) {
-                head_nudge_units(dy, dp);
-                /* Let the eyes subtract this move from the next frame
-                   instead of reading it as something in the room moving. */
-                eyes_compensate((float)dy * (DEG_PER_UNIT / HALF_FOV_X) * (float)(s_frame_w / 2),
-                                (float)dp * (DEG_PER_UNIT / HALF_FOV_Y) * (float)(s_frame_h / 2));
-            }
+                const int dy = off_x ? correction_units(px, HALF_FOV_X, TRACK_SIGN_X) : 0;
+                const int dp = off_y ? correction_units(py, HALF_FOV_Y, -TRACK_SIGN_Y) : 0;
 
-            saw = true;
-            s_search_step = -1;   /* someone is here; stop searching */
+                if (dy || dp) {
+                    head_nudge_units(dy, dp);
+                    /* Remember how far this swings the view so the tracker
+                       can subtract its own motion next frame. */
+                    s_pending_shift_x = (float)dy * (DEG_PER_UNIT / HALF_FOV_X)
+                                        * (float)(s_frame_w / 2);
+                    s_pending_shift_y = (float)dp * (DEG_PER_UNIT / HALF_FOV_Y)
+                                        * (float)(s_frame_h / 2);
+                }
 
-            /* Remember where this happened, and slowly average it into the
-               spot people usually occupy. */
-            float hx = 0.0f, hy = 0.0f;
-            head_position(&hx, &hy);
-            int yt = 0, pt = 0;
-            head_travel_units(&yt, &pt);
-            s_seen_yaw   = (int)(hx * (float)(yt / 2));
-            s_seen_pitch = (int)(hy * (float)(pt / 2));
-            s_seen_us    = now;
+                saw = true;
+                s_search_step = -1;
 
-            if (!s_home_set) {
-                s_home_yaw = (float)s_seen_yaw;
-                s_home_pitch = (float)s_seen_pitch;
-                s_home_set = true;
-            } else {
-                s_home_yaw   += 0.01f * ((float)s_seen_yaw - s_home_yaw);
-                s_home_pitch += 0.01f * ((float)s_seen_pitch - s_home_pitch);
-            }
+                float hx = 0.0f, hy = 0.0f;
+                head_position(&hx, &hy);
+                int yt = 0, pt2 = 0;
+                head_travel_units(&yt, &pt2);
+                s_seen_yaw   = (int)(hx * (float)(yt / 2));
+                s_seen_pitch = (int)(hy * (float)(pt2 / 2));
+                s_seen_us    = now;
 
-            if (now >= next_report) {
-                next_report = now + 500000;
-                printf("  %s (%+.2f,%+.2f) conf %.2f -> %+d,%+d units\n",
-                       act.from_template ? "follow  " : "activity",
-                       act.x, act.y, act.confidence, dy, dp);
+                if (!s_home_set) {
+                    s_home_yaw = (float)s_seen_yaw;
+                    s_home_pitch = (float)s_seen_pitch;
+                    s_home_set = true;
+                } else {
+                    s_home_yaw   += 0.01f * ((float)s_seen_yaw - s_home_yaw);
+                    s_home_pitch += 0.01f * ((float)s_seen_pitch - s_home_pitch);
+                }
+
+                if (now >= next_report) {
+                    next_report = now + 500000;
+                    printf("  track (%+.2f,%+.2f) v(%+.2f,%+.2f) pts %d -> %+d,%+d\n",
+                           tgt.x, tgt.y, tgt.vx, tgt.vy, tgt.n_points, dy, dp);
+                }
+            } else if (now >= next_report) {
+                next_report = now + 2000000;
+                printf("  (no moving target, %d point(s) alive)\n", tgt.n_points);
             }
         }
 
-        /* Nothing seen for a while: search around the last sighting, one
-           outward pass, then rest. Short memory bridges detector misses
-           without freezing the head on somebody who has left. */
         if (!saw && (now - s_seen_us) > MEMORY_US) {
             search_step(now);
         }

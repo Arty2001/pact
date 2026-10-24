@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "points.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -109,6 +110,20 @@ bool eyes_has_lock(void);
 
 /** Forget the tracked appearance, e.g. when deliberately looking elsewhere. */
 void eyes_drop_lock(void);
+
+/**
+ * Track moving points in the current frame.
+ *
+ * Grabs a frame, reduces it to grayscale at half resolution, and hands it
+ * to the point tracker. Half resolution because the tracker searches a
+ * window per point per frame, and 160x120 keeps that inside one frame
+ * interval while still resolving a person across the room.
+ *
+ * @param shift_x pixels the head just swung the view, so the tracker can
+ *                tell its own motion from the room's
+ */
+bool eyes_track_points(float shift_x, float shift_y, float dt_s,
+                       points_target_t *out);
 
 /** Frame dimensions, once the camera is up. */
 void eyes_frame_size(int *w, int *h);
