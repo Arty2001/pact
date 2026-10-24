@@ -19,7 +19,9 @@ npm start -- --hub https://pact.lanvar.ai --name "ESP32" --input http://10.0.0.7
 npm start -- --hub https://pact.lanvar.ai --config sources.json
 ```
 
-Requires `ffmpeg` on PATH. Ctrl-C takes the feeds off the wall cleanly.
+Requires `ffmpeg` on PATH. Ctrl-C in a terminal takes the feeds off the wall
+cleanly - but see [signals](#signals-matter-here) before running it under a
+supervisor.
 
 ## Why this exists
 
@@ -126,11 +128,54 @@ errors will be printed just above.
 | `--bitrate <rate>` | Target bitrate when transcoding, e.g. `2500k` |
 | `--dry-run` | Print the SDP and packet count, publish nothing |
 
+## Signals matter here
+
+The hub decides a device is live by whether its WebSocket is open, so **the
+process must actually die for the feed to leave the wall.** That makes signal
+delivery load-bearing rather than cosmetic, and there are two separate ways it
+goes wrong.
+
+**Wrapper processes swallow signals.** `npm start` spawns a chain
+(`npm` -> `tsx` -> `node` -> `ffmpeg`) and npm does not forward signals to its
+children. `sh -c` has the same problem. Signalling the wrapper kills the wrapper
+and orphans the bridge. So for anything unattended, skip npm:
+
+```bash
+npx tsx src/index.ts --hub https://pact.lanvar.ai --config sources.json
+```
+
+**On Windows, programmatic SIGINT does not work at all.** Node on Windows only
+fires `process.on("SIGINT")` from a genuine console Ctrl-C; there is no way to
+deliver a console control event to a detached process from a script. This is an
+OS limitation, not something the code can fix. Use `taskkill` instead:
+
+```bash
+taskkill /PID <pid> /T /F        # /T includes children
+```
+
+The symptom of getting this wrong is a **phantom device stuck on the wall**:
+the process is still alive, still holding its hub socket open, still pushing
+media to the SFU, with no terminal attached to stop it.
+
+What works, verified:
+
+| | |
+|---|---|
+| Ctrl-C in a terminal | Clean shutdown everywhere — the TTY signals the whole process group |
+| `SIGTERM` / `SIGINT` to the node process on Unix | Clean shutdown |
+| systemd with `KillMode=control-group` | Clean — signals every process in the cgroup |
+| `taskkill /T /F` on Windows | Feed leaves the wall immediately |
+| `kill -9` / any hard kill | Feed leaves the wall immediately |
+
+That last row is the safety net worth knowing: **you never need a graceful
+shutdown to get a feed off the wall.** Killing the process closes the socket,
+and the hub removes the device on the next round trip. The graceful path only
+exists to make it tidy.
+
 ## Running it permanently
 
-Nothing here daemonises itself. Use whatever your host already has — systemd,
-a Docker restart policy, pm2. The internal supervision handles source failures;
-process-level supervision handles the process dying.
+Nothing here daemonises itself. Use whatever your host already has. Note that
+`ExecStart` invokes tsx rather than npm, per the section above.
 
 ```ini
 # /etc/systemd/system/pact-bridge.service
@@ -140,13 +185,18 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=/opt/pact/bridge
-ExecStart=/usr/bin/npm start -- --hub https://pact.lanvar.ai --config /etc/pact/sources.json
+ExecStart=/opt/pact/bridge/node_modules/.bin/tsx src/index.ts --hub https://pact.lanvar.ai --config /etc/pact/sources.json
 Restart=always
 RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+In Docker use exec form — `ENTRYPOINT ["npx","tsx","src/index.ts"]`. The shell
+form wraps the command in `/bin/sh -c`, which swallows signals exactly like npm.
 
 ## What is not handled
 
