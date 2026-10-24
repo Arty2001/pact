@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pact",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+
+  // Static assets are served first. Anything that is not a file on disk
+  // (i.e. every /api/* path) falls through to the Worker in src/index.ts.
+  "assets": {
+    "directory": "./public"
+  },
+
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+
+  "routes": [
+    { "pattern": "pact.lanvar.ai", "custom_domain": true }
+  ]
+}

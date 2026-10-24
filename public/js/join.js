@@ -1,0 +1,188 @@
+/* ===========================================================================
+   Publisher.
+
+   Two things happen when you press start:
+
+     1. The stream goes to the SFU over WebRTC.
+     2. A WebSocket opens to the Hub and announces the device.
+
+   That socket is the liveness signal. The Hub treats socket-open as
+   device-live, so we never send a heartbeat and never have to time anything
+   out — closing the tab is what takes the feed off the wall.
+   =========================================================================== */
+
+import { publish } from "./sfu-client.js";
+
+const el = (id) => document.getElementById(id);
+
+const gate = el("gate");
+const setup = el("setup");
+const onair = el("onair");
+const preview = el("preview");
+const placeholder = el("placeholder");
+const nameInput = el("name");
+const startBtn = el("start");
+const status = el("status");
+
+let stream = null;
+let kind = null;
+let session = null; // { pc, sessionId, trackNames }
+let ws = null;
+
+// ------------------------------------------------------------------- claim --
+
+/**
+ * Redeem the one-time code from the QR before showing anything.
+ *
+ * This is deliberately thin: it stops a stranger who finds the URL from
+ * publishing, and it is not a substitute for real auth. See the README.
+ */
+async function checkClaim() {
+  const code = new URLSearchParams(location.search).get("c");
+
+  if (!code) {
+    return fail("No code in the link", 'Open the wall, choose "Add a device", and scan the code it shows you.');
+  }
+
+  const res = await fetch("/api/hub/redeem", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+
+  if (res.ok) {
+    gate.hidden = true;
+    setup.hidden = false;
+    return;
+  }
+
+  const { reason } = await res.json().catch(() => ({ reason: "unknown" }));
+  return reason === "expired"
+    ? fail("That code expired", "Codes last ten minutes. Generate a fresh one from the wall.")
+    : fail("That code is not valid", "It may have been used already. Each code works once.");
+}
+
+function fail(title, body) {
+  el("gate-title").textContent = title;
+  el("gate-body").textContent = body;
+  gate.hidden = false;
+  setup.hidden = true;
+}
+
+// ------------------------------------------------------------------ source --
+
+async function pick(which) {
+  try {
+    const next =
+      which === "camera"
+        ? await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false,
+          })
+        : await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: { ideal: 15 } },
+            audio: false,
+          });
+
+    stream?.getTracks().forEach((t) => t.stop());
+    stream = next;
+    kind = which === "camera" ? "camera" : "screen";
+
+    preview.srcObject = stream;
+    placeholder.hidden = true;
+
+    el("pick-camera").setAttribute("aria-pressed", String(which === "camera"));
+    el("pick-screen").setAttribute("aria-pressed", String(which === "screen"));
+
+    if (!nameInput.value) nameInput.value = which === "camera" ? "Camera" : "Screen";
+    startBtn.disabled = false;
+    say("");
+
+    // The browser's own "stop sharing" bar ends the track without telling us.
+    stream.getVideoTracks()[0].addEventListener("ended", () => stop());
+  } catch (err) {
+    say(err.name === "NotAllowedError" ? "Permission denied." : `Could not open source: ${err.message}`, "err");
+  }
+}
+
+function say(text, cls = "") {
+  status.textContent = text;
+  status.className = `status ${cls}`;
+}
+
+// ------------------------------------------------------------------- start --
+
+async function start() {
+  startBtn.disabled = true;
+  say("Connecting to the edge...");
+
+  try {
+    session = await publish(stream);
+  } catch (err) {
+    say(`Could not start: ${err.message}`, "err");
+    startBtn.disabled = false;
+    return;
+  }
+
+  const device = {
+    id: crypto.randomUUID(),
+    name: nameInput.value.trim() || (kind === "camera" ? "Camera" : "Screen"),
+    kind,
+    sfuSessionId: session.sessionId,
+    trackNames: session.trackNames,
+    since: Date.now(),
+  };
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/api/hub/ws`);
+
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ type: "publish", device }));
+    setup.hidden = true;
+    onair.hidden = false;
+    el("onair-name").textContent = device.name;
+    el("onair-status").textContent = `${device.kind} · ${session.trackNames.length} track(s) · live`;
+  };
+
+  // If the Hub connection drops, the feed is effectively off the wall.
+  ws.onclose = () => {
+    if (!onair.hidden) el("onair-status").textContent = "Disconnected from the hub.";
+  };
+}
+
+// -------------------------------------------------------------------- stop --
+
+function stop() {
+  ws?.close();
+  session?.pc.close();
+  stream?.getTracks().forEach((t) => t.stop());
+  ws = session = stream = null;
+
+  preview.srcObject = null;
+  placeholder.hidden = false;
+  startBtn.disabled = true;
+  onair.hidden = true;
+  setup.hidden = false;
+  el("pick-camera").setAttribute("aria-pressed", "false");
+  el("pick-screen").setAttribute("aria-pressed", "false");
+  say("Stopped.");
+}
+
+// -------------------------------------------------------------------- boot --
+
+el("pick-camera").onclick = () => pick("camera");
+el("pick-screen").onclick = () => pick("screen");
+startBtn.onclick = start;
+el("stop").onclick = stop;
+
+// iOS Safari has getUserMedia but not getDisplayMedia. Say so instead of
+// letting the button fail.
+if (!navigator.mediaDevices?.getDisplayMedia) {
+  const b = el("pick-screen");
+  b.disabled = true;
+  b.title = "This browser cannot share a screen";
+  b.style.opacity = "0.45";
+}
+
+gate.hidden = false;
+checkClaim();

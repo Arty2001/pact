@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pact — share a device</title>
+<meta name="description" content="Put this device's camera or screen on the Pact wall.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/pact.css">
+</head>
+<body class="join">
+
+<div class="join-card">
+
+  <div class="join-head">
+    <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 1.4 17.4 5.7v8.6L10 18.6 2.6 14.3V5.7z"
+            fill="none" stroke="#9e3340" stroke-width="1.4"/>
+      <path d="M5.8 12.1h8.4" stroke="#e9e6e0" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>
+    <b>pact</b>
+  </div>
+
+  <!-- Shown while the claim code is being checked, or if it is bad. -->
+  <div id="gate" hidden>
+    <h1 id="gate-title">Checking the code</h1>
+    <p id="gate-body">One moment.</p>
+  </div>
+
+  <!-- The actual share flow. -->
+  <div id="setup" hidden>
+    <h1>Share this device</h1>
+    <p>Pick what to send. Nothing leaves this device until you start.</p>
+
+    <div class="preview">
+      <video id="preview" autoplay playsinline muted></video>
+      <div class="placeholder" id="placeholder">no source selected</div>
+    </div>
+
+    <div class="sources">
+      <button class="btn" id="pick-camera" aria-pressed="false">Camera</button>
+      <button class="btn" id="pick-screen" aria-pressed="false">Screen</button>
+    </div>
+
+    <div class="field">
+      <label for="name">Name on the wall</label>
+      <input id="name" type="text" placeholder="Desk" autocomplete="off">
+    </div>
+
+    <button class="btn btn-primary" id="start" disabled>Start streaming</button>
+    <div class="status" id="status"></div>
+  </div>
+
+  <!-- Shown once it is live. -->
+  <div id="onair" hidden>
+    <div class="live-banner">
+      <span class="tally"></span>
+      <div>
+        <span id="onair-name">This device</span> is on the wall
+        <small>Keep this tab open. Closing it ends the feed.</small>
+      </div>
+    </div>
+    <button class="btn" id="stop">Stop streaming</button>
+    <div class="status live" id="onair-status"></div>
+  </div>
+
+</div>
+
+<script type="module" src="/js/join.js"></script>
+</body>
+</html>

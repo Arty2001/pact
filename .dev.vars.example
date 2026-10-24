@@ -1,0 +1,4 @@
+# Cloudflare Realtime SFU credentials.
+# Create an app at: https://dash.cloudflare.com/?to=/:account/calls
+REALTIME_APP_ID=
+REALTIME_APP_SECRET=
