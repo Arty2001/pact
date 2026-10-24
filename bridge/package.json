@@ -1,0 +1,19 @@
+{
+  "name": "pact-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Publishes an RTSP / RTMP / MJPEG / file source into a Pact hub over WebRTC.",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "werift": "^0.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.2"
+  }
+}

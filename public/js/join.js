@@ -32,6 +32,27 @@ let ws = null;
 // ------------------------------------------------------------------- claim --
 
 /**
+ * Check the hub can actually reach Cloudflare Realtime before we let anyone
+ * pick a camera. Without the secrets every publish dies at the first fetch
+ * with a bare 503, which tells the user nothing they can act on.
+ */
+async function checkConfig() {
+  const { sfuReady } = await fetch("/api/config")
+    .then((r) => r.json())
+    .catch(() => ({ sfuReady: false }));
+
+  if (sfuReady) return true;
+
+  fail(
+    "The hub is not connected to Cloudflare Realtime yet",
+    "Streaming needs a Realtime app. On the machine that deploys this hub, run " +
+      "'wrangler secret put REALTIME_APP_ID' and 'wrangler secret put REALTIME_APP_SECRET', " +
+      "then reload this page. No redeploy needed.",
+  );
+  return false;
+}
+
+/**
  * Redeem the one-time code from the QR before showing anything.
  *
  * This is deliberately thin: it stops a stranger who finds the URL from
@@ -119,7 +140,12 @@ async function start() {
   try {
     session = await publish(stream);
   } catch (err) {
-    say(`Could not start: ${err.message}`, "err");
+    say(
+      /503/.test(err.message)
+        ? "The hub has no Cloudflare Realtime credentials set, so it cannot start a stream."
+        : `Could not start: ${err.message}`,
+      "err",
+    );
     startBtn.disabled = false;
     return;
   }
@@ -185,4 +211,4 @@ if (!navigator.mediaDevices?.getDisplayMedia) {
 }
 
 gate.hidden = false;
-checkClaim();
+checkConfig().then((ok) => ok && checkClaim());

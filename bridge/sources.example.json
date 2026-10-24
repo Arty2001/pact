@@ -1,0 +1,18 @@
+[
+  {
+    "name": "Shop floor",
+    "input": "rtsp://user:pass@192.168.1.50:554/stream1",
+    "rtspTransport": "tcp"
+  },
+  {
+    "name": "ESP32 cam",
+    "input": "http://192.168.1.77:81/stream",
+    "transcode": true,
+    "comment": "ESP32-CAM serves MJPEG, which browsers cannot play over WebRTC. Must transcode."
+  },
+  {
+    "name": "Test pattern",
+    "input": "testsrc",
+    "comment": "Synthetic source. No hardware needed - good for checking the pipeline."
+  }
+]

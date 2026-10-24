@@ -24,7 +24,7 @@ distribution layer only — the piece everything else needs first.
 | QR / one-time code pairing | Working |
 | Live device registry, pushed over WebSocket | Working |
 | Auto-reconnect, self-healing wall | Working |
-| RTSP / RTMP / ESP32 ingest | **Not wired up** — see [Tier 2](#tier-2-rtsp-rtmp-esp32) |
+| RTSP / RTMP / MJPEG / ESP32 ingest | Working, via [the bridge](bridge/) |
 
 ---
 
@@ -114,6 +114,13 @@ public/
     sfu-client.js  publish() and subscribe(). The WebRTC core.
     wall.js        Hub socket, tile lifecycle, QR dialog.
     join.js        Source picking, publish, liveness socket.
+
+bridge/          Node process for non-browser sources. Own package.json.
+  src/
+    index.ts     CLI + per-source supervision (restart, backoff, watchdog).
+    publish.ts   werift -> SFU. The Node twin of sfu-client.js.
+    source.ts    ffmpeg argument construction and spawning.
+    hub.ts       Hub WebSocket client: announce + liveness.
 ```
 
 No build step and no framework. The frontend is modules the browser loads
@@ -152,28 +159,39 @@ so instead of failing at handshake time.
 
 ## Tier 2: RTSP, RTMP, ESP32
 
-Not wired up, and worth being precise about why.
+Non-browser sources go through [`bridge/`](bridge/) — a small Node process that
+runs wherever the camera is reachable:
 
-Cloudflare Realtime SFU uses its own sessions/tracks API, **not WHIP**. WHIP
-ingest lives on Cloudflare Stream, a different product. So there is no one-line
-`ffmpeg -f whip` path to the SFU this repo is built on, even though ffmpeg 8
-ships a WHIP muxer. Three honest options:
+```bash
+cd bridge && npm install
 
-1. **Local WebRTC bridge.** A small Node process using `werift` or
-   `node-datachannel` that reads RTSP and publishes through the same
-   `/api/sfu/*` endpoints the browser uses. Most work, keeps one media plane,
-   stays on the free tier.
-2. **Cloudflare Stream Live.** Has a real WHIP endpoint, so
-   `ffmpeg -i rtsp://… -f whip https://…` works. Costs $1 per 1,000 minutes
-   delivered, and means running two media planes.
-3. **Share a tab.** Point a browser at the camera's MJPEG URL on a machine near
-   it and screen-share that tab. Zero code, poor efficiency, fine for a demo.
+# synthetic source, no hardware needed
+npm start -- --hub https://pact.lanvar.ai --name "Test" --input testsrc
+
+# an H.264 RTSP camera (no transcode, nearly free)
+npm start -- --hub https://pact.lanvar.ai --name "Shop" --input rtsp://10.0.0.5:554/stream1
+
+# an ESP32-CAM serving MJPEG (must be re-encoded)
+npm start -- --hub https://pact.lanvar.ai --name "ESP32" --input http://10.0.0.77:81/stream --transcode
+```
+
+It exists because **Cloudflare Realtime SFU does not speak WHIP** — it has its
+own sessions/tracks API, so despite ffmpeg 8 shipping a WHIP muxer there is no
+`ffmpeg -f whip` shortcut that reaches it. The bridge does the WebRTC handshake
+itself against the same `/api/sfu/*` endpoints the browser uses:
+
+```
+ffmpeg ──RTP/UDP──▶ localhost ──▶ werift ──WebRTC──▶ SFU ──▶ wall
+                                     └──WebSocket──▶ Hub (announce + liveness)
+```
+
+Nothing is decoded in Node — ffmpeg's bytes are forwarded packet by packet into
+a WebRTC track. See [bridge/README.md](bridge/README.md) for the copy-vs-transcode
+decision, the supervision model, and `--dry-run`.
 
 For ESP32 specifically, [`esp-webrtc-solution`](https://github.com/espressif/esp-webrtc-solution)
-can publish WebRTC from an S3 or P4 directly, which would make a camera node a
-first-class publisher rather than a bridged one.
-
----
+can publish WebRTC from an S3 or P4 directly, making a camera node a
+first-class publisher with no bridge at all.
 
 ## What this deliberately is not
 
@@ -181,7 +199,9 @@ first-class publisher rather than a bridged one.
   publishing, and that is all they do. Anyone with the wall URL can watch. Put
   Cloudflare Access in front of it before pointing it at anything private.
 - **No recording.** Live only, nothing is stored.
-- **No transcoding.** Viewers get whatever the publisher's browser encoded.
+- **No transcoding in the cloud.** The SFU forwards bytes untouched, so viewers
+  get whatever the publisher encoded. The bridge can transcode locally with
+  `--transcode`, on your CPU, not Cloudflare's.
 - **Audio is not published.** A wall of simultaneous audio is unusable; wall
   videos are `muted` anyway, which is also what lets them autoplay.
 
