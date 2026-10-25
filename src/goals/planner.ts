@@ -36,10 +36,21 @@ const SYSTEM = `You turn a plain sentence about a habit or goal into skills and 
 
 A skill is a single visual question about one frame. Its label becomes the detector directly, with no training, so the label must describe what a camera would LITERALLY SEE - a posture, an object, a place. Never an intention, a feeling, or anything requiring memory of earlier frames.
 
+ONE FRAME is the whole test. Read your label back and ask whether a single
+photograph could show it. If the answer needs two moments, it is not a label.
+
 Good labels:   "a person standing at a bathroom sink"
+               "a person at the bottom of a squat, hips below knees, thighs parallel to the floor"
                "a person lying on a bench pressing a barbell upward"
-Bad labels:    "someone being healthy"  (not visible)
-               "the user finished their routine"  (needs memory)
+Bad labels:    "someone being healthy"                (not visible)
+               "the user finished their routine"      (needs memory)
+               "a person lowering into a squat then rising"   (two moments, not one)
+               "a person walking into the kitchen"    (a journey, not a picture)
+
+A repetition is ONE frame of its extreme, never the movement. A squat is the
+bottom of a squat. A pushup is the bottom of a pushup. The counter kind turns
+that single pose into reps on its own; describing the motion gives it nothing
+to match, because no frame ever looks like "lowering then rising".
 
 The six kinds:
   gate          a place or presence. Everything beneath it is skipped when it is false.
@@ -54,6 +65,8 @@ Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer a
 Order, via sequence_index on a use. Most goals do not need it: "twenty squats" is twenty squats whenever they happen. Use it only when an earlier step is a PRECONDITION for a later one being meaningful - reading the weight before counting bench reps, boiling the kettle before the cup is made. An event whose step is not yet due is credited to nothing, so a wrong order silently costs the user their count. When in doubt, leave it out.
 
 Do NOT use sequence_index for the two halves of one repetition. Going down and coming back up is a single counter skill, not two ordered steps; the counter already reads a rise and a fall as one entry.
+
+Numbers. If the sentence contains one, it belongs in done_min, and on a counter it belongs in min_count too. "Ten squats" with no min_count settles on the first rep, which is the single commonest way a goal ends up wrong.
 
 Always include exactly one gate. Call create_goal exactly once, last.`;
 
@@ -109,7 +122,13 @@ const TOOLS: Tool[] = [
             description: "limit inverts the rule: firing at all is a violation.",
           },
           cadence: { type: "string", enum: ["daily", "weekly:1", "weekly:3", "weekly:5"] },
-          done_min: { type: "number" },
+          done_min: {
+            type: "number",
+            description:
+              "The number in the sentence. \"Ten squats\" is 10, \"twice a day\" is 2, "+
+              "\"two minutes\" is 120 seconds. Omit ONLY when the sentence has no "+
+              "number at all, which means once is enough.",
+          },
           window_start: { type: "string", description: "local HH:MM" },
           window_end: { type: "string", description: "local HH:MM, may cross midnight" },
           uses: {
@@ -120,7 +139,13 @@ const TOOLS: Tool[] = [
                 skill_key: { type: "string" },
                 role: { type: "string", enum: ["gate", "required", "discriminating"] },
                 class_key: { type: "string" },
-                min_count: { type: "number" },
+                min_count: {
+                  type: "number",
+                  description:
+                    "Required on a counter, and normally the same number as "+
+                    "done_min. A counter without it needs one rep to be satisfied, "+
+                    "so \"ten squats\" settles on the first.",
+                },
                 accumulate: { type: "boolean" },
                 sequence_index: {
                   type: "number",
@@ -252,17 +277,26 @@ export async function plan(
   }
 
   const rawUses = Array.isArray(goal.uses) ? (goal.uses as Array<Record<string, unknown>>) : [];
+  const doneMin = goal.done_min === undefined ? null : Number(goal.done_min);
   const uses = rawUses.map((u) => {
     const key = String(u.skill_key ?? "");
     const existing = known.get(key);
     const fresh = drafted.get(key);
+    const kind = existing?.kind ?? fresh?.kind ?? "object";
+    // A counter with no min_count is satisfied by its first rep, so "ten
+    // squats" settles on the first one. The prompt asks for the number and
+    // a model still drops it, and the failure is silent - the goal simply
+    // goes green early and nobody wonders why. The sentence's own number is
+    // the obvious fallback, and if there is not one then one rep is right.
+    const given = u.min_count === undefined ? null : Number(u.min_count);
+    const minCount = kind === "counter" ? (given ?? doneMin ?? 1) : given;
     return {
       key,
       label: existing?.label ?? fresh?.label ?? "",
-      kind: existing?.kind ?? fresh?.kind ?? "object",
+      kind,
       role: String(u.role ?? "required"),
       classKey: u.class_key === undefined ? null : String(u.class_key),
-      minCount: u.min_count === undefined ? null : Number(u.min_count),
+      minCount,
       sequenceIndex: u.sequence_index === undefined ? null : Number(u.sequence_index),
       isNew: existing === undefined,
     };
