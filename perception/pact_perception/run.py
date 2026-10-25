@@ -376,7 +376,10 @@ class Runner:
         # seen. Observed for real: a session opened at 0.506 before the first
         # calibration landed, then could not close because the post-fit scores
         # straddled exit_conf. Collect the background first, then start.
-        if skill.kind != "discriminator" and skill.key not in room.calibrated:
+        # Every kind waits for its calibration, discriminators included. They
+        # used to be exempt, which meant they ran their state machine on a
+        # flat softmax and reported a margin of effectively zero forever.
+        if skill.key not in room.calibrated:
             room.warming.add(skill.key)
             return
 
@@ -515,8 +518,52 @@ class Runner:
         frame between 0.47 and 0.60 and makes an enter threshold of 0.75
         literally unreachable. The numbers have to come from this room.
         """
-        if skill.w is None or skill.kind == "discriminator":
+        if skill.w is None:
             return
+
+        if skill.kind == "discriminator":
+            # A discriminator needs calibrating too, and skipping it here is
+            # why one could never decide anything. Its logits are raw cosines,
+            # and sibling classes - which are siblings precisely because they
+            # look alike - sit within about 0.001 of each other. A softmax
+            # over that is flat, so every margin came out near zero and the
+            # verdict was permanently "I cannot tell".
+            #
+            # What needs scaling is the SPREAD BETWEEN classes, not the
+            # distance from a background, so this fits on the gap between the
+            # best and second-best class rather than on a quantile.
+            w = np.atleast_2d(skill.w)
+            gaps = np.sort(w @ e)[::-1]
+            gap = float(gaps[0] - gaps[1]) if gaps.size > 1 else 0.0
+            hist = room.history.setdefault(skill.key, [])
+            hist.append(abs(gap))
+            if len(hist) > _CALIBRATION_WINDOW:
+                del hist[0 : len(hist) - _CALIBRATION_WINDOW]
+
+            done = room.refits.get(skill.key, 0)
+            if done >= 2 or len(hist) < (_PROVISIONAL_AFTER if done == 0 else _CALIBRATE_AFTER):
+                return
+            room.refits[skill.key] = done + 1
+            # Set the temperature so a typical gap becomes a decisive logit
+            # difference. The margin threshold on the skill row then means
+            # what it says rather than being unreachable.
+            typical = float(np.quantile(np.asarray(hist), 0.9)) or 1e-4
+            temperature = max(typical / 2.2, 1e-5)
+            self.skills[skill.key] = replace(skill, bias=0.0, temperature=temperature)
+            room.calibrated.add(skill.key)
+            self._pending_calibration.append(skill.key)
+            self.log.info(
+                "probe.refit",
+                skill=skill.key,
+                provisional=done == 0,
+                n_examples=len(hist),
+                holdout_before=0.0,
+                holdout_after=0.0,
+                temperature=round(temperature, 6),
+                typical_gap=round(typical, 5),
+            )
+            return
+
         cos = float(np.dot(skill.w, e))
         hist = room.history.setdefault(skill.key, [])
         hist.append(cos)
