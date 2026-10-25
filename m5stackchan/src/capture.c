@@ -31,6 +31,10 @@
 #include "freertos/task.h"
 #include "head.h"
 #include "pact_board.h"
+#ifdef PACT_VOICE
+#include "audio.h"
+#include "voice.h"
+#endif
 #include "scs.h"
 #include "vision.h"
 
@@ -43,6 +47,10 @@
 
 static const char kB64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+#ifdef PACT_VOICE
+static bool s_voice;
+#endif
 
 static uint8_t s_grid[32 * 32];
 static uint32_t s_idx;
@@ -133,6 +141,14 @@ void app_main(void)
 
     if (!pact_power_servos()) printf("WARNING: servo rail unconfirmed\n");
 
+    /* Both of these need pins 12/11, which the camera is about to claim
+       for SCCB and will not share. */
+    pact_i2c_scan();
+#ifdef PACT_VOICE
+    s_voice = audio_begin();
+    if (!s_voice) printf("WARNING: no speaker, cues will be silent\n");
+#endif
+
     const bool servos =
         scs_begin(PACT_SERVO_TX, PACT_SERVO_RX, PACT_SERVO_BAUD) && head_begin();
     if (!servos) printf("WARNING: no servos, camera only\n");
@@ -168,6 +184,28 @@ void app_main(void)
     /* From here the head is still, and whatever moves in frame really is
        moving. This is the stretch the detector gets judged on. */
     printf("--HOLD\n");
+
+#ifdef PACT_VOICE
+    /* The robot reads the test script aloud and prints a marker as it says
+       each line. The first attempt at this failed because the recording
+       window and the person doing the actions were never in step and the
+       footage came back empty; with the device driving the schedule, every
+       cue is timestamped on the same clock as the frames. */
+    if (s_voice) {
+        for (int i = 0; i < VOICE_STEPS; i++) {
+            const voice_cue_t *c = &kVoiceScript[i];
+            printf("--CUE %d %lld %s\n", i, (long long)esp_timer_get_time(), c->text);
+            audio_play_u8(c->pcm, c->len);
+
+            /* Frames keep flowing through the hold - that footage is the
+               data, and the cue divides it into labelled stretches. */
+            const int64_t until = esp_timer_get_time() + (int64_t)c->hold_s * 1000000;
+            while (esp_timer_get_time() < until) emit_frame();
+        }
+        printf("--SCRIPTEND\n");
+    }
+#endif
+
     while (1) emit_frame();
 }
 

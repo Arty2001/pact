@@ -20,7 +20,10 @@ from typing import Literal
 from .log import Level
 
 SourceKind = Literal["folder", "camera", "relay"]
-EmbedKind = Literal["local", "remote"]
+#: `stub` is a fake encoder with no model behind it. It exists so the whole
+#: pipeline can be exercised in seconds instead of after a four gigabyte
+#: download; it detects nothing and no threshold fitted against it transfers.
+EmbedKind = Literal["local", "remote", "stub"]
 
 #: C-RADIOv3-B's preferred input is 512x512 and its siglip2 teacher was
 #: distilled at 432, but cost scales with the square of this: 512 is ~5x the
@@ -47,6 +50,7 @@ class Config:
     source: SourceKind
     folder: str | None
     camera_index: int
+    loop_folder: bool
 
     embed: EmbedKind
     embed_url: str | None
@@ -109,8 +113,14 @@ def load(argv: list[str] | None = None) -> Config:
     add("--source", choices=("folder", "camera", "relay"), default=_env("PACT_SOURCE", "folder"))
     add("--folder", default=_env("PACT_FOLDER"))
     add("--camera-index", type=int, default=_env_int("PACT_CAMERA_INDEX", 0))
+    add(
+        "--loop-folder",
+        action="store_true",
+        default=_env("PACT_LOOP_FOLDER") == "1",
+        help="Replay the folder forever. What a demo wants; a tuning run does not.",
+    )
 
-    add("--embed", choices=("local", "remote"), default=_env("PACT_EMBED", "local"))
+    add("--embed", choices=("local", "remote", "stub"), default=_env("PACT_EMBED", "local"))
     add("--embed-url", default=_env("PACT_EMBED_URL"))
     add("--model-version", default=_env("PACT_MODEL", "c-radio_v3-b"))
     add("--adaptor", default=_env("PACT_ADAPTOR", "siglip2"))
@@ -144,6 +154,7 @@ def load(argv: list[str] | None = None) -> Config:
         source=a.source,
         folder=a.folder,
         camera_index=a.camera_index,
+        loop_folder=a.loop_folder,
         embed=a.embed,
         embed_url=a.embed_url,
         model_version=a.model_version,

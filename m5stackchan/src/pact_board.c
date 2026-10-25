@@ -81,3 +81,28 @@ bool pact_power_servos(void)
     s_bus = NULL;
     return ok;
 }
+
+void pact_i2c_scan(void)
+{
+    const i2c_master_bus_config_t bus = {
+        .i2c_port                     = I2C_NUM_0,
+        .sda_io_num                   = PIN_SDA,
+        .scl_io_num                   = PIN_SCL,
+        .clk_source                   = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt            = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t h = NULL;
+    if (i2c_new_master_bus(&bus, &h) != ESP_OK) {
+        ESP_LOGE(TAG, "i2c scan: cannot open bus");
+        return;
+    }
+
+    printf("--I2C");
+    for (uint8_t a = 0x08; a < 0x78; a++) {
+        if (i2c_master_probe(h, a, 50) == ESP_OK) printf(" 0x%02X", a);
+    }
+    printf("\n");
+
+    i2c_del_master_bus(h);
+}

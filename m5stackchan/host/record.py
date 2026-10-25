@@ -41,6 +41,9 @@ def record(seconds, name):
     ser = serial.Serial(PORT, 115200, timeout=0.2)
     buf = bytearray()
     grids, times, poses = [], [], []
+    # Spoken cues, so every frame can be labelled with the step it belongs
+    # to. This is the whole point of the robot reading the script aloud.
+    cues = []
     kept = 0
     gw = gh = 0
 
@@ -66,6 +69,23 @@ def record(seconds, name):
         chunk = ser.read(65536)
         if chunk:
             buf.extend(chunk)
+
+        # Cue markers arrive between frames, on the device's own clock.
+        while True:
+            ci = buf.find(b"--CUE ")
+            if ci < 0:
+                break
+            nl = buf.find(b"\n", ci)
+            if nl < 0:
+                break
+            try:
+                parts = bytes(buf[ci + 6:nl]).decode("utf-8", "replace").split(None, 2)
+                cues.append((int(parts[0]), int(parts[1]),
+                             parts[2].strip() if len(parts) > 2 else ""))
+                print(f"  CUE {parts[0]}: {parts[2].strip()}", flush=True)
+            except (ValueError, IndexError):
+                pass
+            del buf[ci:nl + 1]
 
         while True:
             i = buf.find(b"--F ")
@@ -148,6 +168,11 @@ def record(seconds, name):
             np.array(grids).reshape(-1, gh, gw))
     np.save(os.path.join(out, "times.npy"), t)
     np.save(os.path.join(out, "poses.npy"), np.array(poses, dtype=np.int32))
+    if cues:
+        with open(os.path.join(out, "cues.txt"), "w", newline="\n") as f:
+            for idx, us, text in cues:
+                f.write(f"{idx}	{us}	{text}\n")
+        print(f"{len(cues)} cues recorded")
 
     span = (t[-1] - t[0]) / 1e6
     print(f"\n{kept} frames, {span:.1f}s on device = {kept / max(span, 1e-9):.1f} fps")

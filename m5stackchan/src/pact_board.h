@@ -24,6 +24,17 @@ extern "C" {
  */
 bool pact_power_servos(void);
 
+/**
+ * Print every device answering on the internal I2C bus.
+ *
+ * Call before the camera starts: esp32-camera takes over pins 12/11 for
+ * SCCB and will not share them. Diagnostic only - this board is not a stock
+ * CoreS3 (its expander is a PY32 at 0x6F, not an AW9523 at 0x58), so what
+ * is on the bus is a question to answer by probing rather than by reading a
+ * reference schematic.
+ */
+void pact_i2c_scan(void);
+
 #ifdef __cplusplus
 }
 #endif

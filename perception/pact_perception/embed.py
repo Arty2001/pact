@@ -194,3 +194,62 @@ class RemoteEmbedder:
 
     def close(self) -> None:
         self._client.close()
+
+
+class StubEmbedder:
+    """
+    A fake encoder for exercising the wiring, with no model and no download.
+
+    It understands nothing. There is no semantic content in what it returns,
+    so a skill labelled "a person at a sink" will not detect a person at a
+    sink, and no threshold learned against it transfers to the real encoder.
+    It exists for one reason: the pipeline between a frame and a settled
+    instance has a lot of moving parts, and being able to watch all of them
+    work in seconds rather than after a four gigabyte download is worth more
+    than it looks.
+
+    What it does guarantee is enough to be useful:
+
+    Determinism. The same text always yields the same vector, so a skill's
+    weights are stable across restarts.
+
+    Responsiveness. The image vector is built from a coarse grid of the frame
+    itself, so standing in front of the camera genuinely moves the score and
+    the state machine genuinely fires. That makes it a live end-to-end test
+    rather than a replay of canned numbers.
+
+    Both are produced by projecting through one fixed random basis, so image
+    and text land in the same space and their dot product is a real cosine -
+    just a meaningless one.
+    """
+
+    #: Any dimension works; matching the real encoder keeps the Engine's
+    #: stored vectors the same width whichever one wrote them.
+    def __init__(self, dim: int = SIGLIP2_DIM, resolution: int = 384, grid: int = 8) -> None:
+        self.dim = dim
+        self.resolution = resolution
+        self.encoder_id = f"stub/none@{resolution}"
+        self._grid = grid
+        # One fixed basis, seeded by a constant, so vectors survive restarts.
+        rng = np.random.default_rng(20261024)
+        self._image_basis = rng.normal(size=(grid * grid * 3, dim)).astype(np.float32)
+        self._text_basis = rng.normal(size=(64, dim)).astype(np.float32)
+
+    def encode_image(self, image: Image.Image) -> Embedding:
+        started = time.perf_counter()
+        small = image.convert("RGB").resize((self._grid, self._grid), Image.Resampling.BILINEAR)
+        feat = (np.asarray(small, dtype=np.float32) / 255.0).ravel()
+        vec = _l2(feat @ self._image_basis)
+        return Embedding(vector=vec, ms=(time.perf_counter() - started) * 1000.0)
+
+    def encode_text(self, texts: list[str]) -> np.ndarray:
+        out = np.zeros((len(texts), self.dim), dtype=np.float32)
+        for i, text in enumerate(texts):
+            # A character histogram is a deterministic, content-dependent
+            # fingerprint. Two similar sentences land near each other, which
+            # is the one property that makes a stub worth running at all.
+            hist = np.zeros(64, dtype=np.float32)
+            for ch in text.lower():
+                hist[ord(ch) % 64] += 1.0
+            out[i] = hist @ self._text_basis
+        return _l2(out)

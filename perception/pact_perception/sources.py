@@ -214,12 +214,13 @@ def build(
     folder: str | None = None,
     camera_index: int = 0,
     hz: float = 2.0,
+    loop: bool = False,
 ) -> FrameSource:
     """One place that maps a config string to a source."""
     if kind == "folder":
         if folder is None:
             raise ValueError("folder source needs a folder")
-        return FolderSource(folder, hz=hz)
+        return FolderSource(folder, hz=hz, loop=loop)
     if kind == "camera":
         return CameraSource(camera_index, hz=hz)
     if kind == "relay":
