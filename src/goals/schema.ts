@@ -22,6 +22,20 @@
  * including its trace id, is still there.
  */
 
+/**
+ * Columns added after the table first shipped.
+ *
+ * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+ * so a new column never reaches a Durable Object that has been running since
+ * before it was written. Each of these runs on its own and is allowed to
+ * fail: SQLite raises "duplicate column name" when it is already there, which
+ * is the normal case on every boot after the first.
+ */
+export const ADDITIONS: readonly string[] = [
+  "ALTER TABLE skills ADD COLUMN min_cycle_s REAL NOT NULL DEFAULT 0.0",
+  "ALTER TABLE transitions ADD COLUMN needed_conf REAL",
+];
+
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS skills (
   key              TEXT PRIMARY KEY,
@@ -36,6 +50,9 @@ CREATE TABLE IF NOT EXISTS skills (
   exit_s           REAL NOT NULL DEFAULT 2.0,
   cooldown_s       REAL NOT NULL DEFAULT 10.0,
   escalate_after_s REAL NOT NULL DEFAULT 60.0,
+  -- Shortest believable gap between two counts, count-to-count. Cooldown
+  -- measures from the end of a session and so cannot express this.
+  min_cycle_s      REAL NOT NULL DEFAULT 0.0,
 
   classes          TEXT,
   margin           REAL,

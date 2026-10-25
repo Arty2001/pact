@@ -1,7 +1,7 @@
 import { Logger, newTraceId } from "../log";
 import { evaluate, inWindow } from "./evaluate";
 import { plan } from "./planner";
-import { SCHEMA } from "./schema";
+import { ADDITIONS, SCHEMA } from "./schema";
 import type {
   EngineMessage,
   Goal,
@@ -80,6 +80,14 @@ export class Engine implements DurableObject {
     private env: { NEBIUS_API_KEY?: string },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
+    for (const addition of ADDITIONS) {
+      try {
+        this.ctx.storage.sql.exec(addition);
+      } catch {
+        // Already present. This is the expected outcome on every boot after
+        // the one that introduced the column.
+      }
+    }
     this.log = new Logger("engine");
     void this.ctx.storage.setAlarm(Date.now() + TICK_MS);
   }
@@ -338,25 +346,59 @@ export class Engine implements DurableObject {
       return Response.json({ error: "key and label are required" }, { status: 400 });
     }
     const now = Date.now();
+    // Only a changed label invalidates the vector — the label IS the detector.
+    const prior = this.rows<Record<string, unknown>>(
+      "SELECT * FROM skills WHERE key = ?",
+      body.key,
+    )[0];
+    const keep = prior && String(prior.label) === body.label ? prior : undefined;
+
+    // The vector and the fit are carried separately because they depend on
+    // different things. A vector is the embedded label and nothing else. A
+    // fit is solved for one enter/exit pair, so a moved band leaves it
+    // describing a threshold that is no longer there — perception refits
+    // from fresh background instead.
+    const enterConf = body.enterConf ?? 0.75;
+    const exitConf = body.exitConf ?? 0.45;
+    const sameBand =
+      keep !== undefined &&
+      Number(keep.enter_conf) === enterConf &&
+      Number(keep.exit_conf) === exitConf;
+    const fit = sameBand ? keep : undefined;
+
     this.sql(
       `INSERT OR REPLACE INTO skills
         (key, kind, label, room, depends_on, enter_conf, exit_conf, dwell_s, exit_s,
-         cooldown_s, escalate_after_s, classes, margin, sample_hz, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
+         w, encoder_id, dim, bias, temperature, weight_state, n_labels, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       body.key,
       body.kind ?? "object",
       body.label,
       body.room ?? null,
       body.dependsOn ?? null,
-      body.enterConf ?? 0.75,
-      body.exitConf ?? 0.45,
+      enterConf,
+      exitConf,
       body.dwellS ?? defaultDwellS(body.kind ?? "object"),
       body.exitS ?? defaultExitS(body.kind ?? "object"),
       body.cooldownS ?? defaultCooldownS(body.kind ?? "object"),
       body.escalateAfterS ?? 60.0,
+      body.minCycleS ?? defaultMinCycleS(body.kind ?? "object"),
       body.classes ? JSON.stringify(body.classes) : null,
       body.margin ?? null,
       body.sampleHz ?? defaultHz(body.kind ?? "object"),
+      // Carried over when the label is unchanged. Editing a threshold used to
+      // wipe the weight vector and the fitted calibration, so perception
+      // re-embedded and re-fitted on whatever happened to be in frame at that
+      // second — which is how a squat counter ended up calibrated against a
+      // static scene and firing on 40% of all frames.
+      keep?.w ?? null,
+      keep?.encoder_id ?? null,
+      keep?.dim ?? null,
+      fit?.bias ?? 0.0,
+      fit?.temperature ?? 1.0,
+      fit ? String(fit.weight_state) : keep?.w ? "zeroshot" : "pending",
+      keep?.n_labels ?? 0,
       now,
     );
     // Push the registry so perception embeds the label without waiting for a
@@ -905,6 +947,7 @@ function toSkill(r: Record<string, unknown>): Skill {
     exitS: Number(r.exit_s),
     cooldownS: Number(r.cooldown_s),
     escalateAfterS: Number(r.escalate_after_s),
+    minCycleS: Number(r.min_cycle_s ?? 0),
     classes: r.classes === null ? null : (JSON.parse(String(r.classes)) as string[]),
     margin: r.margin === null ? null : Number(r.margin),
     bias: Number(r.bias),
@@ -998,6 +1041,18 @@ function defaultCooldownS(kind: Skill["kind"]): number {
   if (kind === "counter") return 0;
   if (kind === "action") return 60;
   return 10;
+}
+
+/**
+ * The floor on how fast a kind can legitimately repeat.
+ *
+ * Only a counter has one. A squat is well over a second bottom-to-bottom, and
+ * a counter without this floor counts every entry into the pose — sitting
+ * down, bending over, pausing mid-set — because a pose detector has no notion
+ * of having to come back up.
+ */
+function defaultMinCycleS(kind: Skill["kind"]): number {
+  return kind === "counter" ? 1.2 : 0;
 }
 
 /** Target for the n-th occurrence of a progression. */

@@ -39,6 +39,7 @@ import signal
 import sys
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -83,6 +84,29 @@ _PROVISIONAL_AFTER = 20
 #: How often a room ships its score snapshot to the console. Four a second
 #: is already past what anyone reads off a moving line.
 _SNAPSHOT_EVERY_S = 0.25
+
+
+def rebanded_keys(
+    before: Mapping[str, Skill], after: Mapping[str, Skill]
+) -> set[str]:
+    """
+    Keys whose enter/exit band moved between two registry snapshots.
+
+    Bias and temperature are solved *for* a particular band, so a skill whose
+    thresholds were edited is carrying a fit aimed at thresholds that are no
+    longer there. Returning the key tells the caller to drop the fit and let
+    perception measure the background again. A skill that is new, or gone, is
+    not rebanded: there is no previous band to have moved away from.
+    """
+    return {
+        key
+        for key, now in after.items()
+        if (was := before.get(key)) is not None
+        and (
+            was.params.enter_conf != now.params.enter_conf
+            or was.params.exit_conf != now.params.exit_conf
+        )
+    }
 
 
 @dataclass
@@ -171,6 +195,7 @@ class Runner:
                 exit_s=float(row.get("exitS", 2.0)),
                 cooldown_s=float(row.get("cooldownS", 10.0)),
                 escalate_after_s=float(row.get("escalateAfterS", 60.0)),
+                min_cycle_s=float(row.get("minCycleS", 0.0)),
             )
             classes = row.get("classes") or []
             encoded = row.get("w")
@@ -190,11 +215,21 @@ class Runner:
                 n_labels=int(row.get("nLabels", 0)),
             )
 
+        rebanded = rebanded_keys(self.skills, fresh)
         self.skills = fresh
         for room in self.rooms.values():
             for key in list(room.states):
                 if key not in fresh:
                     del room.states[key]
+            for key in rebanded:
+                room.calibrated.discard(key)
+                room.refits.pop(key, None)
+        if rebanded:
+            self.log.info(
+                "probe.refit",
+                detail="band moved, recalibrating",
+                skills=len(rebanded),
+            )
 
         # Anything with no vector, or one fitted elsewhere, needs its label
         # embedded. Queued rather than done here because this callback runs
