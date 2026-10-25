@@ -74,8 +74,14 @@ The claim is about the **shape** of the cost curve. Naive is linear in frames
 a skill is 1152 multiply-adds against an embedding already paid for. Adding
 goal fifty costs nothing measurable.
 
-And for the demo it costs less still: C-RADIO runs at **217 ms per frame on a
-laptop CPU** at 256 px, so no GPU is needed at all.
+And for the demo it costs less still. Measured end to end on a laptop CPU,
+C-RADIO runs a frame in **1164 ms at 256 px** - about 0.9 fps, against the
+0.5 Hz a gate samples at. So gates and actions need no GPU at all. Rep
+counting at 8 Hz does, which is the honest limit of the cheap path.
+
+(The backbone alone is 217 ms at that resolution. The difference is the
+adaptor head and a loaded host, and the end-to-end number is the one worth
+planning against.)
 
 ---
 
@@ -89,8 +95,8 @@ laptop CPU** at 256 px, so no GPU is needed at all.
 | RTSP / RTMP / MJPEG / ESP32 ingest | Working, via [the bridge](bridge/) |
 | Motion gate in the browser | Working |
 | Frame relay → perception | Working |
-| C-RADIO embedding, zero-shot skills from text | Working |
-| State machines, near-miss diagnostics | Working, 41 tests |
+| C-RADIO embedding, zero-shot skills from text | Working, semantically verified |
+| State machines, near-miss diagnostics | Working, 54 tests |
 | Goal ledger, instances, settlement | Working |
 | Planner: a sentence → skills + a goal rule | Working, reuses existing skills |
 | Teacher: escalation to Nemotron VL | Working |
@@ -301,6 +307,7 @@ public/
     wall.js  join.js  goals.js
 
 perception/         Python. Own pyproject. See its README.
+  make_demo_frames.py  Generates the synthetic recording the quickstart replays
   pact_perception/
     run.py          The loop. The only file that knows the order.
     sources.py      folder | camera | relay, behind one interface
@@ -311,7 +318,7 @@ perception/         Python. Own pyproject. See its README.
     probe.py        Logistic refit with before/after holdout
     store.py        Local SQLite: scores, embeddings, labels
     ledger.py       The Engine WebSocket
-  tests/            41 tests. The arithmetic, mutation-checked.
+  tests/            54 tests. The arithmetic, mutation-checked.
 
 bridge/             Node. RTSP/RTMP/MJPEG → the wall. Own README.
 m5stackchan/        ESP32 camera firmware.

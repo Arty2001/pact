@@ -88,7 +88,7 @@ def _accuracy(w: np.ndarray, b: float, x: np.ndarray, y: np.ndarray, temperature
 def _split(n: int, seed: int) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(seed)
     order = rng.permutation(n)
-    cut = max(1, int(round(n * _HOLDOUT)))
+    cut = max(1, round(n * _HOLDOUT))
     return order[cut:], order[:cut]
 
 

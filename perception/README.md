@@ -49,10 +49,15 @@ npm run dev          # localhost:8787
 Then, with **no model and no download**, to watch the whole pipeline work:
 
 ```bash
+python make_demo_frames.py        # traces/ is gitignored, so generate them
 python -m pact_perception.run \
   --room gym --embed stub --source folder --folder traces/demo --loop-folder \
   --hub http://localhost:8787 --level info
 ```
+
+The frames are generated rather than committed, because shipping footage is
+how a repository ends up carrying pictures of someone's bathroom. Same seed,
+same frames, same scores, which is the property the tuning workflow rests on.
 
 Against a real webcam and the real encoder:
 
@@ -95,9 +100,23 @@ Text is embedded **once per skill, ever**, at creation. The image path runs
 forever. The first adaptor construction also pulls the SigLIP2 text tower,
 about 3.5 GB.
 
-Measured on a laptop CPU, 4 threads: **217 ms** at 256 px, **561 ms** at
-384 px, **1077 ms** at 512 px. A gate needs 0.5 Hz, so CPU is ample; rep
-counting wants 4-8 Hz and benefits from more cores or a GPU.
+### Measured CPU latency
+
+Two numbers, because the difference between them matters and quoting only
+the first would flatter the system.
+
+| | 256 px | 384 px | 512 px |
+|---|---|---|---|
+| Backbone alone, 4 threads, idle machine | 217 ms | 561 ms | 1077 ms |
+| **End to end**, incl. the adaptor head, machine under load | **1164 ms** | **2486 ms** | - |
+
+The second row is what a frame actually costs. The gap is the siglip2
+adaptor head plus a host with 2 GiB free, and it is the row to plan against.
+
+So about **0.9 fps at 256 px on a loaded laptop**. A gate samples at 0.5 Hz,
+so CPU has headroom there and an action at 2 Hz is borderline. **Rep counting
+at 8 Hz is out of reach on CPU** - that one wants a GPU, or a recorded trace
+replayed for the demo.
 
 ---
 
@@ -157,7 +176,7 @@ pure function of `(state, score, now)` for the same reason: `pytest` replays a
 score trace through it with different numbers and no camera involved.
 
 ```bash
-pytest -q          # 41 tests: the state machine, the scoring maths, the probe
+pytest -q          # 54 tests: the machine, the scoring maths, the probe, escalation
 ruff check .
 ```
 
