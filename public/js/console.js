@@ -338,36 +338,33 @@ function drawPlot() {
   const parts = [];
 
   parts.push(
-    `<rect x="42" y="${y(enter)}" width="${W - 50}" height="${Math.max(0, y(exit) - y(enter))}" fill="#76B900" opacity=".055"/>`,
-    line(42, y(enter), W - 8, y(enter), "#76B900", ".65"),
-    line(42, y(exit), W - 8, y(exit), "#94A3B4", ".45"),
-    label(0, y(enter) + 3, num(enter), "#BFF230"),
-    label(0, y(exit) + 3, num(exit), "#94A3B4"),
+    `<rect class="plot-band" x="42" y="${y(enter)}" width="${W - 50}" height="${Math.max(0, y(exit) - y(enter))}"/>`,
+    line(42, y(enter), W - 8, y(enter), "plot-enter"),
+    line(42, y(exit), W - 8, y(exit), "plot-exit"),
+    label(0, y(enter) + 3, num(enter), "plot-lbl enter"),
+    label(0, y(exit) + 3, num(exit), "plot-lbl"),
   );
 
   if (trace.length > 1) {
     const step = (W - 50) / Math.max(TRACE - 1, 1);
     const pts = trace.map((p, i) => `${42 + i * step},${y(p.score)}`);
-    parts.push(
-      `<polyline points="${pts.join(" ")}" fill="none" stroke="#76B900" stroke-width="2" stroke-linejoin="round"/>`,
-    );
+    parts.push(`<polyline class="plot-curve" points="${pts.join(" ")}"/>`);
     const last = trace[trace.length - 1];
     parts.push(
-      `<circle cx="${42 + (trace.length - 1) * step}" cy="${y(last.score)}" r="3.5" fill="#BFF230"/>`,
+      `<circle class="plot-head" cx="${42 + (trace.length - 1) * step}" cy="${y(last.score)}" r="3.5"/>`,
     );
   } else {
     parts.push(
-      `<text x="${W / 2}" y="${H / 2}" fill="#5E7183" font-family="JetBrains Mono, monospace" font-size="11" text-anchor="middle">waiting for a watcher to report scores</text>`,
+      `<text class="plot-wait" x="${W / 2}" y="${H / 2}" text-anchor="middle">waiting for a watcher to report scores</text>`,
     );
   }
 
   svg.innerHTML = parts.join("");
 }
 
-const line = (x1, y1, x2, y2, c, o) =>
-  `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${c}" stroke-width="1" stroke-dasharray="3 3" opacity="${o}"/>`;
-const label = (x, yy, t, c) =>
-  `<text x="${x}" y="${yy}" fill="${c}" font-family="JetBrains Mono, monospace" font-size="10">${t}</text>`;
+const line = (x1, y1, x2, y2, cls) =>
+  `<line class="${cls}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke-width="1" stroke-dasharray="3 3"/>`;
+const label = (x, yy, t, cls) => `<text class="${cls}" x="${x}" y="${yy}">${t}</text>`;
 
 function pushScore(skillKey, score, phase) {
   if (focusSkill === null) focusSkill = skillKey;

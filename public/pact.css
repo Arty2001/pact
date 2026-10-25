@@ -1,11 +1,19 @@
 /* ===========================================================================
    pact — design system.
 
-   Palette derived from both brands' own shipped CSS rather than from a brand
-   page, and from NVIDIA's open-source VSS Blueprint, which is their reference
-   UI for this exact product category.
+   Light only, on purpose. A single committed theme means every colour can be
+   chosen for one ground instead of compromised across two: #BFF230 is 14.9:1
+   on a dark panel and invisible on a light one, so a theme-aware build has to
+   pick a value that is merely adequate on both. Committing lets the green
+   that reads as "proved" actually read as proved.
 
-   Three rules it follows, all of them theirs rather than ours:
+   Surfaces are glass: frosted white panes over a fixed two-bloom ground. The
+   blur is doing real work rather than decoration - it keeps the page reading
+   as one continuous material with depth, so the only hard-edged opaque thing
+   on screen is the video, which is the thing you are meant to look at.
+
+   Three rules carried over from the dark build, all of them NVIDIA's rather
+   than ours:
 
    Green is a signal, never a surface. Tracing every consumer of
    --color-brand in NVIDIA's shipped bundle, it resolves to text, borders,
@@ -13,60 +21,92 @@
 
    Hue carries one meaning. Green means proved, violet means a camera is
    watching, amber means pending. Nothing else touches hue - focus and
-   selection use a wash and a ring instead. Langfuse shipped a second meaning
-   on colour and reverted it in production; no reason to rediscover that.
+   selection use a wash and a ring instead.
 
-   Radii are 2-4px. NVIDIA's own `rounded-lg` is 4px. Soft corners read as
-   consumer software; this is instrumentation.
+   One rule changed. Radii were 2-4px, because soft corners read as consumer
+   software and this is instrumentation. Glass needs a radius to read as a
+   pane: a 2px frosted rectangle reads as a rendering artifact, not a sheet
+   of anything. So radii are 8-20px here and the instrumentation feel is
+   carried by the monospace and the density instead.
    =========================================================================== */
 
 :root {
-  /* Ground: NVIDIA's dark-UI value steps carrying Nebius's navy tint. Nebius
-     builds its whole neutral ramp on navy rather than grey, which is why
-     their surfaces read engineered. Neither brand owns this exact ladder,
-     which is what keeps it from looking like a sponsor page. */
-  --bg:        #0A0E13;
-  --panel:     #101722;
-  --raised:    #16202D;
-  --hair:      #1A2430;
-  --line:      #1E2A38;
+  color-scheme: light;
 
-  --fg:        #E8EDF2;
-  --dim:       #94A3B4;
-  --dimmer:    #5E7183;
+  /* Ground. Not white - a cool paper, so the panes have something to be
+     lighter than. The two blooms are the product's own hues at a tenth of
+     their strength, fixed to the viewport so scrolling moves content across
+     the light rather than dragging the light with it. */
+  --bg:       #EDF1F4;
+  --bloom-a:  rgba(118, 185, 0, .13);
+  --bloom-b:  rgba(97, 78, 250, .10);
 
-  /* NVIDIA green. #76B900 for fills and rings; #BFF230 once it becomes type,
-     where it is 14.9:1 against this ground rather than 8.1:1. */
+  /* Glass, in three depths: the pane, something raised on the pane, and
+     something sunk into it. */
+  --glass:     rgba(255, 255, 255, .58);
+  --glass-hi:  rgba(255, 255, 255, .76);
+  --glass-top: rgba(255, 255, 255, .85);
+  --sunk:      rgba(16, 36, 54, .045);
+
+  --hair:  rgba(16, 36, 54, .07);
+  --line:  rgba(16, 36, 54, .13);
+  --ring:  rgba(16, 36, 54, .09);
+
+  --fg:     #0D1B26;
+  --dim:    #4C6271;
+  --dimmer: #7C91A1;
+
+  /* NVIDIA green. #76B900 for fills and rings. Type needs a darker value
+     than the dark build's #BFF230, which disappears on this ground. */
   --proved:      #76B900;
-  --proved-text: #BFF230;
-  --proved-wash: rgba(118, 185, 0, .12);
+  --proved-text: #3C6500;
+  --proved-wash: rgba(118, 185, 0, .14);
+  --proved-edge: rgba(118, 185, 0, .36);
 
-  /* Nebius violet. A fill colour only: #614EFA is 3.7:1 and fails AA for
-     body text, so type uses the lightened value. */
+  /* Nebius violet. Same split, same reason. */
   --watch:       #614EFA;
-  --watch-text:  #9B8CFF;
-  --watch-wash:  rgba(97, 78, 250, .14);
+  --watch-text:  #3B29C2;
+  --watch-wash:  rgba(97, 78, 250, .11);
+  --watch-edge:  rgba(97, 78, 250, .32);
 
   /* Crossed the threshold, has not held long enough. Grafana ships this
      state between Normal and Alerting and so do we; it was in the machine
      long before it was on screen. */
   --pending:      #FF9900;
-  --pending-text: #FBAD37;
-  --pending-wash: rgba(255, 153, 0, .13);
+  --pending-text: #875200;
+  --pending-wash: rgba(255, 153, 0, .15);
+  --pending-edge: rgba(255, 153, 0, .38);
 
-  --bad:       #FE3F3F;
-  --bad-text:  #FF8080;
-  --bad-wash:  rgba(254, 63, 63, .12);
+  --bad:       #E02424;
+  --bad-text:  #B01717;
+  --bad-wash:  rgba(224, 36, 36, .10);
+  --bad-edge:  rgba(224, 36, 36, .32);
+
+  /* The video is a dark island inside a light app, and its contrast
+     requirement is the page's inverted. Anything drawn over a frame takes
+     its colour from here instead. */
+  --on-dark:        #F2F6F9;
+  --on-dark-dim:    #A6B8C5;
+  --proved-on-dark: #BFF230;
 
   /* NVIDIA ships JetBrains Mono as its own mono and names Inter as the
      metric substitute for NVIDIA Sans; Nebius ships Inter as its real UI
      face. Inter is the shared ground, not a compromise. */
-  --ui:   "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ui:      "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --display: "Hanken Grotesk", "Inter", ui-sans-serif, sans-serif;
 
-  --r:  2px;
-  --r2: 4px;
+  --blur: saturate(165%) blur(20px);
+
+  --r:  8px;
+  --r2: 14px;
+  --r3: 20px;
+
+  /* Two lifts. The second is for the one pane that should look like it is
+     floating above the others. */
+  --lift:  0 1px 2px rgba(13, 27, 38, .05), 0 3px 10px -3px rgba(13, 27, 38, .07);
+  --lift2: 0 1px 2px rgba(13, 27, 38, .05), 0 16px 40px -14px rgba(13, 27, 38, .20);
+  --inner: inset 0 1px 0 rgba(255, 255, 255, .7);
 }
 
 * { box-sizing: border-box; }
@@ -75,7 +115,12 @@ html { font-size: 16px; }
 
 body {
   margin: 0;
-  background: var(--bg);
+  min-height: 100vh;
+  background:
+    radial-gradient(1120px 640px at 6% -10%, var(--bloom-a), transparent 60%),
+    radial-gradient(940px 720px at 104% 8%, var(--bloom-b), transparent 58%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--fg);
   font-family: var(--ui);
   font-size: 14px;
@@ -90,7 +135,7 @@ a { color: var(--proved-text); }
 :focus-visible {
   outline: none;
   border-color: var(--proved);
-  box-shadow: 0 0 0 3px rgba(118, 185, 0, .35);
+  box-shadow: 0 0 0 3px rgba(118, 185, 0, .3);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -103,10 +148,12 @@ a { color: var(--proved-text); }
   display: flex;
   align-items: center;
   gap: 18px;
-  height: 46px;
-  padding: 0 clamp(12px, 3vw, 22px);
-  border-bottom: 1px solid var(--line);
-  background: var(--bg);
+  height: 52px;
+  padding: 0 clamp(12px, 3vw, 24px);
+  background: rgba(255, 255, 255, .55);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border-bottom: 1px solid var(--hair);
   position: sticky;
   top: 0;
   z-index: 40;
@@ -118,8 +165,8 @@ a { color: var(--proved-text); }
   gap: 8px;
   font-family: var(--display);
   font-weight: 700;
-  font-size: 15px;
-  letter-spacing: -.02em;
+  font-size: 16px;
+  letter-spacing: -.025em;
   color: var(--fg);
   text-decoration: none;
 }
@@ -138,39 +185,53 @@ a { color: var(--proved-text); }
   font-size: 11px;
   color: var(--dimmer);
 }
-.bar-meta b { color: var(--dim); font-weight: 400; }
+.bar-meta b { color: var(--dim); font-weight: 500; }
+@media (max-width: 720px) { .bar-meta { gap: 11px; font-size: 10px; } }
 
 /* ------------------------------------------------------------------ page */
 
 .page {
   max-width: 1480px;
   margin: 0 auto;
-  padding: clamp(12px, 2.4vw, 22px);
+  padding: clamp(14px, 2.4vw, 24px);
   display: grid;
-  gap: clamp(12px, 2vw, 18px);
+  gap: clamp(14px, 2vw, 20px);
   grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
 }
 @media (max-width: 1080px) { .page { grid-template-columns: minmax(0, 1fr); } }
 
-.col { display: flex; flex-direction: column; gap: clamp(12px, 2vw, 18px); min-width: 0; }
+.col { display: flex; flex-direction: column; gap: clamp(14px, 2vw, 20px); min-width: 0; }
 
 .card {
-  background: var(--panel);
-  border: 1px solid var(--line);
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-top);
+  box-shadow: var(--lift), var(--inner);
   border-radius: var(--r2);
   min-width: 0;
 }
+
+/* The pane holding the camera is the subject of the page, so it is the one
+   that floats. Everything else is a surface it sits above. Selected on what
+   it contains rather than a class, because the hierarchy is a fact about the
+   content and not something the markup should have to remember. */
+.card:has(.stage) {
+  border-radius: var(--r3);
+  box-shadow: var(--lift2), var(--inner);
+}
+
 .card > header {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--hair);
 }
 .card > header h2 {
   margin: 0;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: .09em;
   text-transform: uppercase;
   color: var(--dim);
@@ -181,21 +242,25 @@ a { color: var(--proved-text); }
 
 .stage {
   position: relative;
-  background: #05080C;
+  background: #070B10;
   aspect-ratio: 16 / 9;
   overflow: hidden;
-  border-radius: var(--r2) var(--r2) 0 0;
+  /* Inset by a hair so the glass edge stays visible around the frame -
+     a dark rectangle flush to the border reads as a hole in the pane. */
+  margin: 5px 5px 0;
+  border-radius: calc(var(--r3) - 6px);
 }
 .stage video { width: 100%; height: 100%; object-fit: cover; display: block; }
 
 .stage-empty {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 10px; text-align: center; padding: 20px;
-  color: var(--dim);
+  gap: 12px; text-align: center; padding: 24px;
+  color: var(--on-dark-dim);
 }
-.stage-empty b { color: var(--fg); font-size: 15px; font-weight: 600; }
-.stage-empty span { font-size: 13px; max-width: 42ch; color: var(--dim); }
+.stage-empty b { color: var(--on-dark); font-size: 16px; font-weight: 600; letter-spacing: -.015em; }
+.stage-empty span { font-size: 13px; max-width: 44ch; color: var(--on-dark-dim); }
+.stage-empty strong { color: var(--on-dark); font-weight: 600; }
 
 /* NVIDIA's VSS Blueprint draws these white and turns them green only on
    selection, with a full-opacity black shadow so the stroke survives any
@@ -203,84 +268,100 @@ a { color: var(--proved-text); }
 .bbox {
   position: absolute;
   border: 2.5px solid #fff;
+  border-radius: 3px;
   filter: drop-shadow(0 0 6px rgba(0,0,0,1));
   pointer-events: none;
   transition: border-color .12s, border-width .12s;
 }
 .bbox.hit { border-color: var(--proved); border-width: 4px; filter: drop-shadow(0 0 14px rgba(0,0,0,1)); }
 .bbox > span {
-  position: absolute; top: -20px; left: -2.5px;
+  position: absolute; top: -21px; left: -2.5px;
   background: var(--proved); color: #0A0E13;
   font-family: var(--mono); font-size: 10px; font-weight: 700;
-  padding: 2px 6px; border-radius: var(--r); white-space: nowrap;
+  padding: 2px 6px; border-radius: 5px; white-space: nowrap;
 }
 
 .hud {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; justify-content: space-between;
-  padding: clamp(10px, 1.6vw, 16px);
+  padding: clamp(12px, 1.6vw, 18px);
   pointer-events: none;
 }
 .hud-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
 
-.where { font-family: var(--mono); font-size: 10.5px; color: var(--dim); text-shadow: 0 1px 4px #000; }
-.where b { display: block; font-family: var(--ui); font-size: 13px; font-weight: 600; color: #fff; letter-spacing: -.01em; }
+.where { font-family: var(--mono); font-size: 10.5px; color: var(--on-dark-dim); text-shadow: 0 1px 4px rgba(0,0,0,.8); }
+.where b { display: block; font-family: var(--ui); font-size: 13.5px; font-weight: 600; color: var(--on-dark); letter-spacing: -.015em; }
 
 /* The count is the loudest thing on the page and everything else stays
    quiet, because it is the one number a person came to see. */
-.tally { text-align: right; line-height: 1; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
+.tally { text-align: right; line-height: 1; text-shadow: 0 2px 14px rgba(0,0,0,.9); }
 .tally .n {
   display: block;
   font-family: var(--mono); font-weight: 700;
-  font-size: clamp(40px, 7vw, 76px);
+  font-size: clamp(40px, 7vw, 78px);
   letter-spacing: -.055em;
-  color: var(--proved-text);
+  color: var(--proved-on-dark);
   font-variant-numeric: tabular-nums;
 }
-.tally .sub { font-family: var(--mono); font-size: 11px; color: var(--dim); }
-.tally .what { font-size: 13px; color: #fff; margin-top: 3px; font-weight: 500; }
+.tally .sub { font-family: var(--mono); font-size: 11px; color: var(--on-dark-dim); }
+.tally .what { font-size: 13px; color: var(--on-dark); margin-top: 3px; font-weight: 500; }
 
 .hud-bottom { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
 
+/* Dark glass, because these sit on the frame rather than on the page. */
 .probe {
   display: flex; align-items: center; gap: 9px;
-  background: rgba(10,14,19,.78);
-  backdrop-filter: blur(10px);
-  border: 1px solid var(--line);
-  border-radius: var(--r2);
-  padding: 7px 10px;
+  background: rgba(7, 11, 16, .6);
+  backdrop-filter: saturate(140%) blur(14px);
+  -webkit-backdrop-filter: saturate(140%) blur(14px);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: var(--r);
+  padding: 7px 11px;
   pointer-events: auto;
 }
-.probe .k { font-family: var(--mono); font-size: 10.5px; color: var(--fg); }
-.probe .v { font-family: var(--mono); font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
-.bar-mini { width: 60px; height: 3px; background: var(--raised); border-radius: 2px; overflow: hidden; flex: none; }
-.bar-mini i { display: block; height: 100%; background: var(--proved); transition: width .18s ease-out; }
+.probe .k { font-family: var(--mono); font-size: 10.5px; color: var(--on-dark); }
+.probe .v { font-family: var(--mono); font-size: 10.5px; color: var(--on-dark-dim); font-variant-numeric: tabular-nums; }
+.bar-mini { width: 60px; height: 3px; background: rgba(255,255,255,.18); border-radius: 2px; overflow: hidden; flex: none; }
+.bar-mini i { display: block; height: 100%; background: var(--proved-on-dark); transition: width .18s ease-out; }
 .probe.is-pending .bar-mini i { background: var(--pending); }
-.probe.is-idle .bar-mini i { background: var(--dimmer); }
+.probe.is-idle .bar-mini i { background: var(--on-dark-dim); }
 
 /* --------------------------------------------------------------- signal */
 
-.signal { padding: 12px 14px 14px; }
-.readout { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 10px; }
+.signal { padding: 14px 16px 16px; }
+.readout { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 12px; }
 .readout div { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
 .readout b {
-  display: block; font-size: 17px; color: var(--fg); font-weight: 700;
-  letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+  display: block; font-size: 18px; color: var(--fg); font-weight: 700;
+  letter-spacing: -.025em; font-variant-numeric: tabular-nums;
 }
 .readout .lit { color: var(--proved-text); }
+
+/* The score plot. These were hex literals inside the drawing code, which
+   meant the chart could not follow the palette and a theme change silently
+   left it unreadable. */
+#plot { display: block; overflow: visible; }
+.plot-band  { fill: var(--proved); opacity: .07; }
+.plot-enter { stroke: var(--proved); opacity: .7; }
+.plot-exit  { stroke: var(--dimmer); opacity: .55; }
+.plot-curve { fill: none; stroke: var(--proved); stroke-width: 2; stroke-linejoin: round; }
+.plot-head  { fill: var(--proved-text); }
+.plot-lbl       { fill: var(--dim); font-family: var(--mono); font-size: 10px; }
+.plot-lbl.enter { fill: var(--proved-text); }
+.plot-wait  { fill: var(--dimmer); font-family: var(--mono); font-size: 11px; }
 
 /* --------------------------------------------------------------- events */
 
 .events { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
 .ev {
   display: flex; gap: 10px; align-items: flex-start;
-  padding: 8px 14px;
+  padding: 9px 16px;
   border-bottom: 1px solid var(--hair);
 }
 .ev:last-child { border-bottom: 0; }
 /* A rejection keeps its place on the clock and dims, rather than vanishing,
    so it reads in the context of the events either side of it. */
-.ev.miss { opacity: .62; }
+.ev.miss { opacity: .66; }
 .ev .t { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); min-width: 56px; padding-top: 1px; }
 .ev .b { min-width: 0; font-size: 12.5px; }
 .ev .b .q { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 2px; }
@@ -289,20 +370,19 @@ a { color: var(--proved-text); }
 
 .goals { display: flex; flex-direction: column; }
 .goal {
-  padding: 12px 14px;
+  padding: 13px 16px;
   border-bottom: 1px solid var(--hair);
   display: grid;
-  gap: 7px;
+  gap: 8px;
 }
 .goal:last-child { border-bottom: 0; }
 .goal-top { display: flex; align-items: baseline; gap: 10px; }
-.goal-top .name { font-weight: 600; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-top .name { font-weight: 600; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -.01em; }
 .goal-top .key { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
 .goal-meta { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
 
-.prog { height: 3px; background: var(--raised); border-radius: 2px; overflow: hidden; }
-.prog i { display: block; height: 100%; background: var(--proved); transition: width .3s ease-out; }
-.goal.is-done .prog i { background: var(--proved); }
+.prog { height: 4px; background: var(--sunk); border-radius: 3px; overflow: hidden; }
+.prog i { display: block; height: 100%; background: var(--proved); border-radius: 3px; transition: width .3s ease-out; }
 .goal.is-violated .prog i { background: var(--bad); }
 
 .uses { display: flex; gap: 5px; flex-wrap: wrap; }
@@ -313,13 +393,13 @@ a { color: var(--proved-text); }
 .uses .chip.waiting {
   color: var(--watch-text);
   background: var(--watch-wash);
-  border-color: var(--watch);
+  border-color: var(--watch-edge);
 }
 
 /* 14 days of occurrences. A streak is the only view that shows whether a
    goal is actually working. */
 .streak { display: flex; gap: 3px; }
-.streak i { width: 11px; height: 11px; border-radius: var(--r); background: var(--raised); }
+.streak i { width: 11px; height: 11px; border-radius: 3px; background: var(--sunk); }
 .streak i.done { background: var(--proved); }
 .streak i.violated { background: var(--bad); }
 .streak i.active { background: var(--watch); }
@@ -329,17 +409,17 @@ a { color: var(--proved-text); }
 .chip {
   font-family: var(--mono);
   font-size: 10px;
-  padding: 2px 7px;
-  border-radius: var(--r);
-  background: var(--raised);
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--sunk);
   color: var(--dim);
   border: 1px solid transparent;
   white-space: nowrap;
 }
-.chip.proved     { background: var(--proved-wash);  color: var(--proved-text);  border-color: rgba(118,185,0,.3); }
-.chip.watching   { background: var(--watch-wash);   color: var(--watch-text);   border-color: rgba(97,78,250,.3); }
-.chip.pending    { background: var(--pending-wash); color: var(--pending-text); border-color: rgba(255,153,0,.3); }
-.chip.bad        { background: var(--bad-wash);     color: var(--bad-text);     border-color: rgba(254,63,63,.3); }
+.chip.proved   { background: var(--proved-wash);  color: var(--proved-text);  border-color: var(--proved-edge); }
+.chip.watching { background: var(--watch-wash);   color: var(--watch-text);   border-color: var(--watch-edge); }
+.chip.pending  { background: var(--pending-wash); color: var(--pending-text); border-color: var(--pending-edge); }
+.chip.bad      { background: var(--bad-wash);     color: var(--bad-text);     border-color: var(--bad-edge); }
 
 /* ---------------------------------------------------------------- skills */
 
@@ -349,7 +429,7 @@ a { color: var(--proved-text); }
   grid-template-columns: 78px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  padding: 8px 14px;
+  padding: 9px 16px;
   border-bottom: 1px solid var(--hair);
   font-size: 12.5px;
 }
@@ -362,21 +442,24 @@ a { color: var(--proved-text); }
 
 .notice {
   display: flex; gap: 11px; align-items: flex-start;
-  padding: 12px 14px;
-  border: 1px solid rgba(255,153,0,.35);
+  padding: 13px 16px;
+  border: 1px solid var(--pending-edge);
   background: var(--pending-wash);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
   border-radius: var(--r2);
+  box-shadow: var(--lift);
   font-size: 13px;
 }
-.notice.bad { border-color: rgba(254,63,63,.35); background: var(--bad-wash); }
+.notice.bad { border-color: var(--bad-edge); background: var(--bad-wash); }
 .notice b { display: block; margin-bottom: 2px; color: var(--fg); }
 .notice span { color: var(--dim); }
 
 /* ------------------------------------------------------------- questions */
 
-.q-item { padding: 12px 14px; border-bottom: 1px solid var(--hair); }
+.q-item { padding: 13px 16px; border-bottom: 1px solid var(--hair); }
 .q-item:last-child { border-bottom: 0; }
-.q-prompt { font-size: 13px; margin-bottom: 9px; }
+.q-prompt { font-size: 13px; margin-bottom: 10px; }
 .q-acts { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
 
 /* --------------------------------------------------------------- buttons */
@@ -385,52 +468,69 @@ a { color: var(--proved-text); }
   font: inherit;
   font-size: 12px;
   font-weight: 500;
-  padding: 6px 12px;
-  border-radius: var(--r2);
+  padding: 7px 13px;
+  border-radius: var(--r);
   border: 1px solid var(--line);
-  background: var(--raised);
+  background: var(--glass-hi);
   color: var(--fg);
   cursor: pointer;
   white-space: nowrap;
+  box-shadow: var(--lift);
+  transition: background .14s, border-color .14s, box-shadow .14s;
 }
-.btn:hover { border-color: var(--dimmer); }
-/* NVIDIA's own primary: green fill, black text. */
-.btn.primary { background: var(--proved); border-color: var(--proved); color: #0A0E13; font-weight: 600; }
-.btn.primary:hover { background: #8AD100; border-color: #8AD100; }
-.btn.ghost { background: transparent; }
-.btn.sm { padding: 4px 9px; font-size: 11px; }
+.btn:hover { background: #fff; border-color: var(--dimmer); }
+.btn:active { box-shadow: none; }
+.btn:disabled { opacity: .45; cursor: default; box-shadow: none; }
+
+/* NVIDIA's own primary: green fill, near-black text. The one place green is
+   allowed to be a surface. */
+.btn.primary, .btn.btn-primary {
+  background: var(--proved); border-color: var(--proved); color: #0A1400; font-weight: 600;
+  box-shadow: 0 1px 2px rgba(13,27,38,.08), 0 6px 18px -6px rgba(118,185,0,.5);
+}
+.btn.primary:hover, .btn.btn-primary:hover { background: #84CC00; border-color: #84CC00; }
+.btn.ghost { background: transparent; box-shadow: none; }
+.btn.ghost:hover { background: var(--glass-hi); }
+.btn.sm { padding: 5px 10px; font-size: 11px; }
+.btn[aria-pressed="true"] { border-color: var(--proved); background: var(--proved-wash); color: var(--proved-text); }
 
 /* ---------------------------------------------------------------- dialog */
 
 dialog {
-  border: 1px solid var(--line);
-  background: var(--panel);
+  border: 1px solid var(--glass-top);
+  background: rgba(255, 255, 255, .82);
+  backdrop-filter: saturate(170%) blur(28px);
+  -webkit-backdrop-filter: saturate(170%) blur(28px);
   color: var(--fg);
-  border-radius: var(--r2);
+  border-radius: var(--r3);
+  box-shadow: 0 32px 70px -20px rgba(13, 27, 38, .34), var(--inner);
   padding: 0;
   max-width: 620px;
   width: calc(100vw - 28px);
 }
-dialog::backdrop { background: rgba(3, 6, 10, .78); }
-dialog form { padding: 18px; display: grid; gap: 14px; }
-dialog h3 { margin: 0; font-family: var(--display); font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
+dialog::backdrop { background: rgba(18, 32, 44, .4); backdrop-filter: blur(3px); }
+dialog form { padding: 22px; display: grid; gap: 15px; }
+dialog h3 { margin: 0; font-family: var(--display); font-size: 21px; font-weight: 700; letter-spacing: -.028em; }
 
 .field { display: grid; gap: 5px; }
-.field label { font-size: 11px; color: var(--dim); font-weight: 500; }
+.field label { font-size: 11px; color: var(--dim); font-weight: 600; }
 .field small { font-size: 11px; color: var(--dimmer); line-height: 1.45; }
 
 input, select, textarea {
   font: inherit;
   font-size: 13px;
-  background: var(--bg);
+  /* Nearly opaque: a translucent field over a blurred ground makes its own
+     text hard to read, which is the one thing a field cannot afford. */
+  background: rgba(255, 255, 255, .92);
   border: 1px solid var(--line);
   color: var(--fg);
-  border-radius: var(--r2);
-  padding: 8px 10px;
+  border-radius: var(--r);
+  padding: 9px 11px;
   width: 100%;
   min-width: 0;
 }
 input::placeholder { color: var(--dimmer); }
+input:hover, select:hover { border-color: var(--dimmer); }
 
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 @media (max-width: 560px) { .two { grid-template-columns: 1fr; } }
@@ -442,7 +542,7 @@ input::placeholder { color: var(--dimmer); }
   gap: 6px;
 }
 @media (max-width: 640px) { .row { grid-template-columns: 1fr 1fr; } }
-.row input, .row select { font-size: 11.5px; padding: 6px 8px; }
+.row input, .row select { font-size: 11.5px; padding: 7px 9px; }
 
 .actions { display: flex; gap: 8px; justify-content: flex-end; }
 
@@ -450,17 +550,145 @@ input::placeholder { color: var(--dimmer); }
 .status.err { color: var(--bad-text); }
 .status.ok { color: var(--proved-text); }
 
-.empty { padding: 16px 14px; color: var(--dimmer); font-size: 12.5px; }
+.empty { padding: 18px 16px; color: var(--dimmer); font-size: 12.5px; }
 
 /* Pairing. The QR library draws a plain canvas, so the quiet zone around it
-   has to be a real white plate or a phone camera will not read it on a dark
-   ground. */
+   has to be a real white plate or a phone camera will not read it. */
 .qr {
   display: grid;
   place-items: center;
   background: #fff;
-  padding: 14px;
+  padding: 16px;
   border-radius: var(--r2);
+  box-shadow: var(--lift);
   justify-self: center;
 }
 .qr img, .qr canvas { display: block; }
+
+/* ============================================================ join page
+
+   /join is the first thing anyone touches - it is where a phone becomes a
+   camera on the wall. It was loading this stylesheet and finding none of its
+   own classes in it, so it rendered as unstyled HTML on a page that had
+   otherwise been designed. These are its.
+   ============================================================ */
+
+body.join {
+  display: grid;
+  place-items: center;
+  padding: clamp(14px, 4vw, 32px);
+}
+
+.join-card {
+  width: 100%;
+  max-width: 440px;
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-top);
+  border-radius: var(--r3);
+  box-shadow: var(--lift2), var(--inner);
+  padding: clamp(20px, 4vw, 28px);
+  display: grid;
+  gap: 16px;
+}
+
+.join-head { display: flex; align-items: center; gap: 9px; }
+.join-head b { font-family: var(--display); font-weight: 700; font-size: 17px; letter-spacing: -.025em; }
+
+.join-step {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+}
+
+.join-card h1 {
+  font-family: var(--display);
+  font-size: clamp(22px, 4.6vw, 27px);
+  font-weight: 700;
+  letter-spacing: -.032em;
+  line-height: 1.12;
+  margin: 0;
+  text-wrap: balance;
+}
+.join-card p { margin: 0; color: var(--dim); font-size: 13.5px; }
+
+/* The three states of this page. Scoped by class rather than by being any
+   div, because the header is a div too and inherited the grid. */
+.pane { display: grid; gap: 16px; }
+.pane-head { display: grid; gap: 5px; }
+.pane .field small { margin-top: 1px; }
+
+.join-foot {
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--hair);
+  font-size: 11.5px;
+  color: var(--dimmer);
+  text-wrap: pretty;
+}
+
+/* The preview is the only dark surface here, for the same reason the stage
+   is dark on the console: it holds a frame. */
+.preview {
+  position: relative;
+  background: #070B10;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--r2);
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(16, 36, 54, .12);
+}
+.preview video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.placeholder {
+  position: absolute; inset: 0;
+  display: grid; place-items: center;
+  font-family: var(--mono); font-size: 11px;
+  color: var(--on-dark-dim);
+}
+
+/* A choice between two things, so it reads as one control with two halves
+   rather than as two unrelated buttons. */
+.sources { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.btn.pick {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 13px; font-size: 13px; font-weight: 500;
+}
+.btn.pick svg { width: 18px; height: 18px; flex: none; opacity: .75; }
+.btn.pick[aria-pressed="true"] svg { opacity: 1; }
+.btn.wide { width: 100%; padding: 13px; font-size: 14px; }
+
+.live-banner {
+  display: flex; gap: 12px; align-items: flex-start;
+  padding: 14px 16px;
+  background: var(--proved-wash);
+  border: 1px solid var(--proved-edge);
+  border-radius: var(--r2);
+  font-size: 13.5px;
+}
+.live-banner b { font-weight: 600; letter-spacing: -.01em; }
+.live-banner small { display: block; color: var(--dim); font-size: 11.5px; margin-top: 3px; }
+
+/* The gate line turns into an instruction when something is wrong, so it has
+   to be able to hold two sentences without becoming a wall. */
+#onair-gate { line-height: 1.55; }
+#onair-gate.err {
+  padding: 11px 13px;
+  background: var(--bad-wash);
+  border: 1px solid var(--bad-edge);
+  border-radius: var(--r);
+}
+
+/* A live dot, not the console's big count - the class name collides, so it
+   is scoped to the page rather than renamed in two files. */
+.join .tally {
+  width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 5px;
+  background: var(--proved);
+  box-shadow: 0 0 0 3px var(--proved-wash);
+  animation: pip 2s ease-in-out infinite;
+  text-shadow: none;
+}
+
+.status.live { color: var(--proved-text); }
