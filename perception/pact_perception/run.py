@@ -548,6 +548,9 @@ class Runner:
                 "neededConf": event.needed_conf,
                 "peak": event.peak,
                 "count": event.count,
+                # Set only when a teacher call resolved this. That column is
+                # the whole trust model: camera, vlm, or human.
+                "verdictBy": verdict_by,
             }
         )
 

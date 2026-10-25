@@ -157,7 +157,7 @@ pure function of `(state, score, now)` for the same reason: `pytest` replays a
 score trace through it with different numbers and no camera involved.
 
 ```bash
-pytest -q          # 34 tests; the state machine's arithmetic and the scoring maths
+pytest -q          # 41 tests: the state machine, the scoring maths, the probe
 ruff check .
 ```
 
@@ -196,14 +196,122 @@ them under every other skill's.
 
 ---
 
+## The teacher, and the loop that makes it improve
+
+A skill held between its thresholds for `escalate_after_s` escalates: four
+recent frames go to `nvidia/Nemotron-3.5-Super-VL` with a longer prompt, and
+its verdict does two separate jobs. It settles the occurrence, so the
+transition is recorded `verdict_by=vlm` rather than lost. And it becomes a
+label, which is the only reason the same ambiguity costs less next time.
+
+Measured against the live model: about 1.3 to 2.0 seconds and **$0.0006 a
+call**, which at a tenth of a percent of frames is a rounding error.
+
+An `UNSURE` verdict is a real answer, not a failure — the frames genuinely do
+not show it, so the question belongs to a person. A failed *call* is
+different and is logged as an error.
+
+Without `NEBIUS_API_KEY` everything still runs; escalation is skipped and
+mid-band cases go unresolved rather than crashing. A missing credential
+should degrade, not stop.
+
+### What the refit actually delivers
+
+Every label refits the probe, and the result is reported with holdout
+accuracy measured on frames the fit never saw. **A refit that does not beat
+zero-shot is reported and discarded**, not shipped — otherwise the number
+would be decoration rather than evidence.
+
+The design claims five labels beats zero-shot and sixteen makes it solid.
+Measured on synthetic data where the labels follow a direction well off the
+sentence, that is optimistic: five and sixteen are both still refused, and
+the fit first wins at around forty, taking the cosine between the probe and
+the true direction from 0.24 to 0.62. Three hundred reaches 0.73. Real labels
+are not random draws in 1152 dimensions, so the true number is probably
+better than this, but it is not five.
+
+```json
+{"ev":"probe.refit","skill":"applied_to_face","n_examples":42,
+ "holdout_before":0.67,"holdout_after":0.75,"accepted":true}
+```
+
+---
+
 ## What is not here yet
 
-- **The teacher.** Escalation to `nvidia/Nemotron-3.5-Super-VL` on a stuck
-  mid-band or a tight discriminator margin. The state machine already emits
-  the `escalate` event; nothing consumes it. It belongs here rather than in
-  the Worker because it needs the frames, and frames stay put.
-- **Probe refitting from answers.** `probe.refit` currently reports the
-  calibration fit, with holdout accuracy stubbed at zero. Fitting a logistic
-  probe from teacher and human labels, with real before/after holdout, is the
-  next piece.
-- **A Dockerfile.** It runs from a checkout today.
+- **Discriminator refitting.** A `discriminator` skill calibrates and scores,
+  and the margin test escalates correctly, but the multi-class probe is not
+  refitted from labels the way a binary one is. Every label trains every
+  class in principle, which roughly triples the value of each answer; that is
+  not implemented.
+- **Human answers as labels.** A metric question settles its instance, but
+  the answer is not yet joined back to a frame embedding the way a teacher
+  verdict is. Only the teacher currently teaches.
+
+---
+
+## Deploying it
+
+Perception takes **no inbound connections** — it dials out to the Engine over
+one WebSocket. So there is no port to publish, no TLS to terminate and no
+ingress to configure, and "runs on a laptop" and "runs on a cloud VM" are the
+same deployment rather than two.
+
+```bash
+docker build -t pact-perception .
+docker run -d --name pact-gym \
+  -e PACT_ROOM=gym \
+  -e PACT_HUB=https://pact.lanvar.ai \
+  -e PACT_SOURCE=relay \
+  -e NEBIUS_API_KEY=$NEBIUS_API_KEY \
+  -v pact-gym-data:/data \
+  pact-perception
+```
+
+The weights are baked in at build time, not fetched at boot. A container that
+downloads four gigabytes on every start fails on a flaky network, and on
+Nebius Serverless AI the container disk is deleted with the endpoint, so a
+runtime download would happen every single time.
+
+### On Nebius
+
+Two products with confusingly similar names, and only one of them can do this.
+
+**Token Factory cannot host a custom model.** Its dedicated-endpoint API takes
+a `model_name` from a fixed catalogue — there is no image field and no HF-repo
+field — and custom weights is a gated beta limited to fine-tunes of text LLMs.
+A 90M vision encoder needing `trust_remote_code` is not reachable that way.
+
+**Nebius Serverless AI Endpoints** takes a container image and returns a
+managed HTTPS URL in about five minutes. `trust_remote_code` is a non-issue
+inside your own container.
+
+```bash
+nebius ai endpoint create --name pact-perception \
+  --image <registry>/pact-perception:v1 \
+  --platform gpu-l40s-a --preset 1gpu-8vcpu-32gb \
+  --auth token --token "$AUTH_TOKEN" --subnet-id "$SUBNET_ID"
+```
+
+But **"serverless" is a misnomer here**: there is no scale-to-zero and no
+autoscaling, billing is plain Compute VM pricing, and the smallest GPU is a
+whole L40S at about $1.55/hour. Left running that is roughly $37 a day.
+
+Which is why the measured CPU latencies above matter. Perception needs no
+inbound connectivity, so it does not need the endpoint product at all — a
+plain CPU instance with no public IP is about a sixteenth of the price and
+comfortably fast enough at the rate a gate samples. Reach for the GPU when
+the frame rate genuinely demands it, and script it up and down rather than
+leaving it on.
+
+Either way the environment is the same, which was the point:
+
+```
+PACT_ROOM        which room's frames this process handles
+PACT_HUB         the Worker's base URL
+PACT_SOURCE      relay | camera | folder
+PACT_EMBED       local | remote | stub
+PACT_RESOLUTION  multiple of 16; cost scales with the square
+PACT_STORE       where the local SQLite lives
+NEBIUS_API_KEY   optional. Without it, escalation is skipped rather than failing.
+```
