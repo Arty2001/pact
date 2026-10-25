@@ -46,6 +46,7 @@ def config(tmp_path: Any, key: str | None = "fake-key") -> Config:
         model_version="stub",
         adaptor="none",
         resolution=384,
+        device="cpu",
         idle_hz=1.0,
         max_hz=8.0,
         motion_threshold=0.012,

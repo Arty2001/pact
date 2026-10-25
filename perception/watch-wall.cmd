@@ -38,7 +38,7 @@ rem Restart on exit. A long-running process on a home network will lose its
 rem socket, and the one that needs a human to restart it is the one that is off.
 :loop
 ".venv\Scripts\python.exe" -m pact_perception.run ^
-  --room * --embed local --resolution 256 --source relay ^
+  --room * --embed local --resolution 384 --source relay ^
   --hub "%PACT_HUB%" --level info >> "%USERPROFILE%\pact-watcher.log" 2>&1
 echo [%date% %time%] watcher exited, restarting in 5s >> "%USERPROFILE%\pact-watcher.log"
 timeout /t 5 /nobreak >nul

@@ -26,9 +26,11 @@ SourceKind = Literal["folder", "camera", "relay"]
 EmbedKind = Literal["local", "remote", "stub"]
 
 #: C-RADIOv3-B's preferred input is 512x512 and its siglip2 teacher was
-#: distilled at 432, but cost scales with the square of this: 512 is ~5x the
-#: work of 224. The right value is an accuracy-vs-latency sweep against a
-#: recorded trace, not a guess, so it is a knob with a conservative default.
+#: distilled at 432. On a GPU the resolution barely matters - measured on a
+#: 3050 Ti, 224px is 66ms and 384px is 72ms, because at these sizes the model
+#: is launch-bound rather than compute-bound - so there is no reason to run
+#: below what the model was built for. On CPU the same step costs 390ms to
+#: 1090ms and the trade is real, which is what --resolution is for.
 DEFAULT_RESOLUTION = 384
 
 #: Frames per second when nothing is eligible but the gate. A gate is a
@@ -57,6 +59,7 @@ class Config:
     model_version: str
     adaptor: str
     resolution: int
+    device: str
 
     idle_hz: float
     max_hz: float
@@ -126,6 +129,12 @@ def load(argv: list[str] | None = None) -> Config:
     add("--embed-url", default=_env("PACT_EMBED_URL"))
     add("--model-version", default=_env("PACT_MODEL", "c-radio_v3-b"))
     add("--adaptor", default=_env("PACT_ADAPTOR", "siglip2"))
+    add(
+        "--device",
+        choices=("auto", "cuda", "cpu"),
+        default=_env("PACT_DEVICE", "auto"),
+        help="auto picks a GPU when one is present. Name one to rule the other out.",
+    )
     add("--resolution", type=int, default=_env_int("PACT_RESOLUTION", DEFAULT_RESOLUTION))
 
     add("--idle-hz", type=float, default=_env_float("PACT_IDLE_HZ", DEFAULT_IDLE_HZ))
@@ -164,6 +173,7 @@ def load(argv: list[str] | None = None) -> Config:
         model_version=a.model_version,
         adaptor=a.adaptor,
         resolution=a.resolution,
+        device=a.device,
         idle_hz=a.idle_hz,
         max_hz=a.max_hz,
         motion_threshold=a.motion_threshold,

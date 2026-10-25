@@ -33,6 +33,8 @@ forever. They are split here so a deployment can carry only what it needs.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -65,6 +67,21 @@ class Embedder(Protocol):
     def encode_text(self, texts: list[str]) -> np.ndarray: ...
 
 
+def _pick_device(torch: Any, requested: str) -> str:
+    """
+    Resolve "auto" to the fastest thing actually present.
+
+    Explicit beats clever: a device named on the command line is used as
+    given, so a GPU that turns out to be slower than the CPU for some
+    resolution can be ruled out without editing code.
+    """
+    if requested != "auto":
+        return requested
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
 def _l2(x: np.ndarray) -> np.ndarray:
     """Row-wise unit norm, so every dot product downstream is a cosine."""
     n = np.linalg.norm(x, axis=-1, keepdims=True)
@@ -86,7 +103,7 @@ class LocalEmbedder:
         version: str = "c-radio_v3-b",
         adaptor: str = "siglip2",
         resolution: int = 384,
-        device: str = "cpu",
+        device: str = "auto",
     ) -> None:
         import torch
 
@@ -98,7 +115,21 @@ class LocalEmbedder:
         self._torch = torch
         self.adaptor_name = adaptor
         self.resolution = resolution
-        self.device = device
+        self.device = _pick_device(torch, device)
+
+        # Half precision on a GPU, via autocast rather than by casting the
+        # weights. Casting the module outright fails on this model: RADIO
+        # carries buffers that are not plain float tensors, and .to(float16)
+        # turns a matmul into "float != struct". Autocast picks per operation
+        # instead, which is both correct here and what the tensor cores want.
+        self._amp = self.device.startswith("cuda")
+
+        if self.device == "cpu":
+            # torch defaults to physical cores and leaves hyperthreads idle.
+            # On an 8-thread laptop that is half the machine, and this is the
+            # cheapest speedup available before reaching for a GPU.
+            torch.set_num_threads(max(1, os.cpu_count() or 1))
+
         self.encoder_id = f"{version}/{adaptor}@{resolution}"
 
         # trust_repo=True is not optional in anything non-interactive: without
@@ -113,9 +144,15 @@ class LocalEmbedder:
             skip_validation=True,
             trust_repo=True,
         )
-        self._model.eval().to(device)
+        self._model.eval().to(self.device)
         self._adaptor: Any = self._model.adaptors[adaptor]
         self.dim = SIGLIP2_DIM
+
+        # The text tower stays on the CPU. It runs once per skill, ever, so
+        # its speed is irrelevant, and keeping it off a 4 GB card leaves the
+        # whole budget to the thing that runs every frame.
+        with contextlib.suppress(Exception):
+            self._adaptor.text_model.to("cpu")
 
     def _tensor(self, image: Image.Image):
         torch = self._torch
@@ -129,9 +166,13 @@ class LocalEmbedder:
     def encode_image(self, image: Image.Image) -> Embedding:
         torch = self._torch
         started = time.perf_counter()
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast("cuda", enabled=self._amp, dtype=torch.float16):
             out = self._model(self._tensor(image))
         summary = out[self.adaptor_name].summary
+        # .cpu() below forces a sync, so the number this returns is real work
+        # rather than kernel-launch time. Worth stating: CUDA is asynchronous,
+        # and a timer that stops before the device has finished reports a
+        # speedup that does not exist.
         vec = _l2(summary.float().cpu().numpy())[0]
         if vec.shape[-1] != self.dim:
             raise RuntimeError(f"expected {self.dim}-d summary, got {vec.shape[-1]}")
@@ -149,7 +190,7 @@ class LocalEmbedder:
         with torch.no_grad():
             tokens = self._adaptor.tokenizer(texts)
             if hasattr(tokens, "to"):
-                tokens = tokens.to(self.device)
+                tokens = tokens.to("cpu")
             w = self._adaptor.encode_text(tokens, normalize=True)
         return _l2(w.float().cpu().numpy())
 
