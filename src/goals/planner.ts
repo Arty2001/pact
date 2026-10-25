@@ -64,7 +64,19 @@ EVERY skill has a surface: "camera" for a room camera, "screen" for a shared scr
 
 Screen skills follow one extra rule, and it is the one that decides whether they work.
 
-The detector behind a label CANNOT READ TEXT. It recognises the overall look of a screen - a code editor, a spreadsheet, a video player, a chat app, a slide deck, a terminal. It cannot tell one file from another, Python from JavaScript, or a work document from a personal one. So:
+Two things about the detector decide whether a screen label works at all.
+
+It CANNOT READ TEXT. It recognises the overall look of a screen - a code editor, a spreadsheet, a video player, a chat app, a slide deck, a terminal. It cannot tell one file from another, Python from JavaScript, or a work document from a personal one.
+
+A SCREEN NEVER CONTAINS THE PERSON. You are not in a screen share; the screen IS the frame. "a person typing in a code editor" describes a photograph of someone at a desk, which no screen capture ever shows - so on a screen it matches nothing, or worse, it matches a person inside a video. Write what is on the screen: "a code editor with the cursor in a block of syntax-highlighted code". The word "person" never belongs in a screen label.
+
+It AVERAGES THE WHOLE FRAME into one summary. It does not look at regions. So anything occupying a small part of the screen - a button, a badge, a sidebar, a progress bar, a tab - is drowned out by whatever fills the rest, and a label naming one describes something the detector can barely see. Describe what DOMINATES the frame, or describe the overall layout.
+
+  bad:  "a red notification badge"        (a small detail, averaged away)
+  bad:  "a browser tab bar at the top"    (same)
+  good: "a tall vertical video filling the centre of the screen with dark bars either side"
+
+So:
 
   - a "screen" GATE must name a recognisable kind of screen, not a specific thing:
       good: "a code editor filling the screen, with a file tree and syntax-highlighted code"
@@ -74,7 +86,21 @@ The detector behind a label CANNOT READ TEXT. It recognises the overall look of 
     the screen is asked to settle it:
       good: "Python source code being edited, with def and import statements visible"
 
-Describe appearance, layout and colour, not brand names. "a dark code editor with a file tree down the left" beats "VS Code".
+NEVER WRITE A BRAND OR PRODUCT NAME. Not TikTok, not YouTube, not VS Code, not Instagram, not Excel. The label is embedded as a picture of a scene, and a name is a word about a scene - it spends the sentence on something the detector cannot use and leaves the actual appearance undescribed. "an app's UI elements" is the same mistake twice over: a name, and a detail too small to survive the averaging.
+
+Describe appearance, layout, shape, colour and proportion instead:
+  instead of "TikTok"     -> "a tall vertical video filling the centre with dark bars either side and a column of round buttons down the right"
+  instead of "VS Code"    -> "a dark code editor with a file tree down the left and syntax-highlighted code in the centre"
+  instead of "a spreadsheet app" -> "a dense grid of small rectangular cells in pale rows filling the whole screen"
+
+THE CHILD MUST SAY SOMETHING THE GATE DOES NOT. Copying the gate's label onto the child gives two detectors scoring the identical sentence, which costs two embeddings and tells you nothing the gate already did not. The gate names the KIND of screen; the child names the state that counts - what is different about the screen while the thing is actually happening. If you genuinely cannot tell them apart, make the child the more specific of the two, never a copy.
+
+  gate:  "a dark code editor with a file tree down the left and syntax-highlighted code in the centre"
+  child: "a code editor with the cursor inside a dense block of code and no dialog over it"
+
+CADENCE comes from the sentence. "every day" is daily. "every weekday" and "on weekdays" are weekly:5. "three times a week" is weekly:3. "once a week" is weekly:1. Daily is the default only when nothing in the sentence says otherwise - a weekday goal marked daily fails every Saturday.
+
+A limit on time needs something to measure. "Stop doing X for more than twenty minutes" is a gate plus an ACTION child with accumulate true - the gate says what the screen is, the child accumulates the seconds. A gate on its own measures nothing, so the limit can never be reached and the goal never fires.
 
 Screen goals are nearly always an "action" child accumulating time beneath a "screen" gate. Set accumulate true on the child so sessions sum across the day, and set done_min to the number of SECONDS the goal needs - an hour is 3600.
 
@@ -88,7 +114,11 @@ Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer a
 
 Always include exactly one gate, and give every non-gate skill a depends_on pointing at it.
 
-THE GATE MUST MATCH THE SURFACE. A screen goal is gated by a screen skill - something visible in the shared window, like "a video player filling most of the screen". Never gate a screen goal on a person: a camera skill cannot see a screen share, and reusing one here is the single commonest way a goal is drafted that can never fire. "person_visible" is a camera gate. If the catalogue has no screen gate that fits, create one; a new gate is cheaper than a goal that never advances.
+THE GATE MUST WATCH THE SAME SURFACE AS WHAT IT GATES. This is the single most damaging mistake available to you, and it does not fail cleanly.
+
+Gate a screen goal on a camera skill like "a person is visible" and it does not simply never fire. It fires on the people INSIDE whatever video is playing on the screen. The detector then reports the content of the media instead of the fact of it, and the goal appears to work intermittently for no discoverable reason - which is far worse than not working, because nobody goes looking for a bug that sometimes gives the right answer.
+
+A screen goal is gated by something visible in the shared window: "a video player filling most of the screen", "a code editor with a file tree". "person_visible" is a camera gate and belongs to camera goals only. If the catalogue has no screen gate that fits, create one - a new gate is cheaper than a goal that silently reports someone else's video.
 
 The same holds in reverse. A camera goal is not gated by anything that lives in a browser window.
 
@@ -334,6 +364,13 @@ export async function plan(
 
   const rawUses = Array.isArray(goal.uses) ? (goal.uses as Array<Record<string, unknown>>) : [];
   const doneMin = goal.done_min === undefined ? null : Number(goal.done_min);
+  // The sentence says it plainly and the model marks it daily anyway, which
+  // fails every Saturday and looks like a missed day rather than a wrong
+  // rule. Cheaper to read the sentence than to argue with the prompt.
+  const said = sentence.toLowerCase();
+  const cadence = /weekday|work ?day/.test(said)
+    ? "weekly:5"
+    : String(goal.cadence ?? "daily");
   const uses = rawUses.map((u) => {
     const key = String(u.skill_key ?? "");
     const existing = known.get(key);
@@ -344,6 +381,12 @@ export async function plan(
     // a model still drops it, and the failure is silent - the goal simply
     // goes green early and nobody wonders why. The sentence's own number is
     // the obvious fallback, and if there is not one then one rep is right.
+    // A gate-kind skill is a gate. The model marks one "required" often
+    // enough that it is worth settling here: the role decides whether
+    // evaluate() treats it as a precondition or as a thing to be achieved,
+    // and a gate counted as an achievement is a goal satisfied by standing
+    // in the right place.
+    const role = kind === "gate" ? "gate" : String(u.role ?? "required");
     const given = u.min_count === undefined ? null : Number(u.min_count);
     const minCount = kind === "counter" ? (given ?? doneMin ?? 1) : given;
     return {
@@ -352,7 +395,7 @@ export async function plan(
       kind,
       surface: existing?.surface ?? fresh?.surface ?? "any",
       dependsOn: existing?.dependsOn ?? fresh?.dependsOn ?? null,
-      role: String(u.role ?? "required"),
+      role,
       classKey: u.class_key === undefined ? null : String(u.class_key),
       minCount,
       sequenceIndex: u.sequence_index === undefined ? null : Number(u.sequence_index),
@@ -371,7 +414,7 @@ export async function plan(
     key: String(goal.key ?? ""),
     description: String(goal.description ?? sentence),
     type: String(goal.type ?? "target"),
-    cadence: String(goal.cadence ?? "daily"),
+    cadence,
     doneMin: goal.done_min === undefined ? null : Number(goal.done_min),
     windowStart: goal.window_start === undefined ? null : String(goal.window_start),
     windowEnd: goal.window_end === undefined ? null : String(goal.window_end),

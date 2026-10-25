@@ -619,6 +619,24 @@ export class Engine implements DurableObject {
       return Response.json({ error: "key and description are required" }, { status: 400 });
     }
 
+    // evaluate() skips gates on purpose - a gate is a precondition, not a
+    // thing to achieve - so a goal with nothing else has no sub-goals, and a
+    // goal with no sub-goals can never be met. It would sit on the console
+    // looking ordinary and never advance, and nothing would say why. Refused
+    // here rather than discovered a week later.
+    const doing = (body.uses ?? []).filter((u) => u.role !== "gate");
+    if ((body.uses ?? []).length > 0 && doing.length === 0) {
+      return Response.json(
+        {
+          error:
+            "a goal needs at least one non-gate skill. A gate says where to " +
+            "look; something beneath it has to be the thing being measured, " +
+            "or the goal can never settle.",
+        },
+        { status: 400 },
+      );
+    }
+
     this.sql(
       `INSERT OR REPLACE INTO goals
         (key, description, type, cadence, done_min, done_max, window_start, window_end,
