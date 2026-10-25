@@ -141,7 +141,16 @@ function renderGoals() {
       for (const u of g.uses ?? []) {
         const c = document.createElement("span");
         c.className = "chip";
-        c.textContent = `${u.role}: ${u.skillKey}${u.minCount ? ` ≥${u.minCount}` : ""}`;
+        const step = u.sequenceIndex == null ? "" : `${stepOrder(g, u.sequenceIndex)}. `;
+        c.textContent =
+          `${step}${u.role}: ${u.skillKey}${u.minCount ? ` ≥${u.minCount}` : ""}`;
+        // A step the goal is waiting on is the single most useful thing on
+        // this card: it says what to do next rather than that nothing
+        // happened.
+        if (u.sequenceIndex != null && u.sequenceIndex === g.waitingOn) {
+          c.classList.add("waiting");
+          c.title = "waiting on this step";
+        }
         const s = state.skills.find((x) => x.key === u.skillKey);
         if (s) c.title = s.label;
         uses.append(c);
@@ -532,6 +541,7 @@ $("g-add").addEventListener("click", () => addRow());
 function addRow(preset = {}) {
   const el = document.createElement("div");
   el.className = "row";
+  if (preset.sequenceIndex != null) el.dataset.step = String(preset.sequenceIndex);
   el.append(
     select(["gate", "object", "action", "counter", "discriminator", "metric"], preset.kind ?? "action"),
     input(preset.key ?? "", "person_at_desk"),
@@ -582,7 +592,13 @@ $("goal-form").addEventListener("submit", async (e) => {
 
   const defined = [...rows.children].map((el) => {
     const [kind, key, label, role] = el.querySelectorAll("select, input");
-    return { kind: kind.value, key: key.value.trim(), label: label.value.trim(), role: role.value };
+    return {
+      kind: kind.value,
+      key: key.value.trim(),
+      label: label.value.trim(),
+      role: role.value,
+      sequenceIndex: el.dataset.step === undefined ? null : Number(el.dataset.step),
+    };
   });
 
   // Skills first: the join row carries a foreign key, and a goal pointing at
@@ -613,6 +629,7 @@ $("goal-form").addEventListener("submit", async (e) => {
           skillKey: r.key,
           role: r.role,
           minCount: r.kind === "counter" ? Number($("g-donemin").value) || null : null,
+          sequenceIndex: r.sequenceIndex,
         })),
     }),
   });
@@ -665,3 +682,20 @@ drawPlot();
 void load();
 hubSocket();
 engineSocket();
+
+/**
+ * Where a sequence index sits in the running order.
+ *
+ * The planner may well emit 10 and 20, which are labels rather than
+ * positions. Showing "10." beside the first step of two reads as a bug.
+ */
+function stepOrder(goal, index) {
+  const indices = [
+    ...new Set(
+      (goal.uses ?? [])
+        .filter((u) => u.sequenceIndex != null && u.role !== "gate")
+        .map((u) => u.sequenceIndex),
+    ),
+  ].sort((a, b) => a - b);
+  return indices.indexOf(index) + 1;
+}

@@ -51,6 +51,10 @@ The six kinds:
 
 Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer an existing one even if its label is not a perfect match for your phrasing.
 
+Order, via sequence_index on a use. Most goals do not need it: "twenty squats" is twenty squats whenever they happen. Use it only when an earlier step is a PRECONDITION for a later one being meaningful - reading the weight before counting bench reps, boiling the kettle before the cup is made. An event whose step is not yet due is credited to nothing, so a wrong order silently costs the user their count. When in doubt, leave it out.
+
+Do NOT use sequence_index for the two halves of one repetition. Going down and coming back up is a single counter skill, not two ordered steps; the counter already reads a rise and a fall as one entry.
+
 Always include exactly one gate. Call create_goal exactly once, last.`;
 
 const TOOLS: Tool[] = [
@@ -118,6 +122,15 @@ const TOOLS: Tool[] = [
                 class_key: { type: "string" },
                 min_count: { type: "number" },
                 accumulate: { type: "boolean" },
+                sequence_index: {
+                  type: "number",
+                  description:
+                    "Only when order matters. Steps run lowest first, and a " +
+                    "step is skipped-ahead - credited to nothing - until the " +
+                    "step before it is satisfied. Share an index to mean " +
+                    "'both, in any order'. Leave it out for an unordered " +
+                    "goal, which is most of them.",
+                },
               },
               required: ["skill_key", "role"],
             },
@@ -144,6 +157,7 @@ export interface PlanDraft {
     role: string;
     classKey: string | null;
     minCount: number | null;
+    sequenceIndex: number | null;
     isNew: boolean;
   }>;
   reused: number;
@@ -249,6 +263,7 @@ export async function plan(
       role: String(u.role ?? "required"),
       classKey: u.class_key === undefined ? null : String(u.class_key),
       minCount: u.min_count === undefined ? null : Number(u.min_count),
+      sequenceIndex: u.sequence_index === undefined ? null : Number(u.sequence_index),
       isNew: existing === undefined,
     };
   });

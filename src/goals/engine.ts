@@ -1,5 +1,6 @@
 import { Logger, newTraceId } from "../log.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
+import { sequence, stepsOf } from "./sequence.ts";
 import { plan } from "./planner.ts";
 import { ADDITIONS, SCHEMA } from "./schema.ts";
 import type {
@@ -697,6 +698,25 @@ export class Engine implements DurableObject {
     return Response.json({ ok: true });
   };
 
+  /**
+   * Where an ordered goal's open pass has got to, for the console.
+   *
+   * Recomputed rather than stored, for the same reason the cursor itself is
+   * derived: a saved cursor is a second copy of something the ledger already
+   * says, and two copies eventually disagree. An unordered goal returns
+   * nothing at all, so the payload only grows for goals that have an order.
+   */
+  private sequenceView(goal: Goal): { waitingOn?: number | null; passes?: number } {
+    const links = this.links(goal.key);
+    if (stepsOf(links).length === 0) return {};
+    const transitions = this.transitionsSince(
+      links.map((l) => l.skillKey),
+      Date.now() - WINDOW_LOOKBACK_MS,
+    ).filter((t) => this.insideWindow(goal, t.at));
+    const out = sequence(links, transitions, goal.sequenceWindowS);
+    return { waitingOn: out.cursor, passes: out.completions };
+  }
+
   // --------------------------------------------------------------- reading
 
   /** Everything the UI needs, in one request. */
@@ -707,6 +727,7 @@ export class Engine implements DurableObject {
         ...goal,
         uses: this.links(goal.key),
         instances: this.instances(goal.key),
+        ...this.sequenceView(goal),
       })),
       questions: this.openQuestions(),
       rooms: [...this.lastFrameAt].map(([room, at]) => ({ room, secondsAgo: (Date.now() - at) / 1000 })),

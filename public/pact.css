@@ -307,6 +307,15 @@ a { color: var(--proved-text); }
 
 .uses { display: flex; gap: 5px; flex-wrap: wrap; }
 
+/* The step an ordered goal is waiting on. Watch rather than proved: nothing
+   is wrong, the sequence simply has not got here yet, and green is a signal
+   that something was proved. */
+.uses .chip.waiting {
+  color: var(--watch-text);
+  background: var(--watch-wash);
+  border-color: var(--watch);
+}
+
 /* 14 days of occurrences. A streak is the only view that shows whether a
    goal is actually working. */
 .streak { display: flex; gap: 3px; }
