@@ -492,11 +492,31 @@ a { color: var(--proved-text); }
   grid-template-columns: 78px minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  padding: 9px 16px;
+  /* Indented by depth in the gate tree. A child is only eligible while its
+     parent is open, and that is worth seeing at a glance rather than by
+     reading `depends_on` out of the log. */
+  padding: 9px 16px 9px calc(16px + var(--depth, 0) * 17px);
   border-bottom: 1px solid var(--hair);
   font-size: 12.5px;
+  position: relative;
 }
 .skill:last-child { border-bottom: 0; }
+
+/* The elbow into a child. Drawn rather than implied by indentation alone,
+   because three roots indented once look identical to one root with three
+   children until something connects them. */
+.skill[data-child]::before {
+  content: "";
+  position: absolute;
+  left: calc(16px + (var(--depth) - 1) * 17px + 5px);
+  top: 0;
+  height: 50%;
+  width: 9px;
+  border-left: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-bottom-left-radius: 5px;
+  pointer-events: none;
+}
 .skill .kind { font-family: var(--mono); font-size: 9.5px; color: var(--dimmer); text-transform: uppercase; letter-spacing: .05em; }
 .skill .key { font-family: var(--mono); font-size: 11px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .skill .label { font-size: 11px; color: var(--dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

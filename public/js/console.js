@@ -418,6 +418,49 @@ function chipFor(goal, instance) {
 
 // ----------------------------------------------------------------- skills --
 
+/**
+ * Order the skills into the tree they actually form.
+ *
+ * `depends_on` is a real gate chain in the Engine - a skill is eligible only
+ * while its parent is open - and drawing the column flat hid the one
+ * structural fact worth seeing: which skills are cheap because they spend
+ * most of their life asleep.
+ *
+ * Two things this has to survive, because the column renders whatever the
+ * Engine sent rather than a shape anything validated:
+ *
+ *   A parent that is not in the list. A room filter can orphan a child, and a
+ *   child that silently vanished would read as a missing skill. Orphans are
+ *   drawn at the root instead.
+ *
+ *   A cycle. `depends_on` is self-referencing, so one bad row could point at
+ *   an ancestor and spin this forever. The seen-set costs nothing and turns a
+ *   hung tab into a flat list.
+ */
+function skillTree(skills) {
+  const byKey = new Map(skills.map((s) => [s.key, s]));
+  const kids = new Map();
+  const roots = [];
+
+  for (const s of skills) {
+    const parent = s.dependsOn && byKey.has(s.dependsOn) ? s.dependsOn : null;
+    if (parent === null) roots.push(s);
+    else kids.set(parent, [...(kids.get(parent) ?? []), s]);
+  }
+
+  const out = [];
+  const seen = new Set();
+  const walk = (s, depth) => {
+    if (seen.has(s.key)) return;
+    seen.add(s.key);
+    out.push({ skill: s, depth });
+    for (const k of kids.get(s.key) ?? []) walk(k, depth + 1);
+  };
+  for (const r of roots) walk(r, 0);
+  for (const s of skills) if (!seen.has(s.key)) out.push({ skill: s, depth: 0 });
+  return out;
+}
+
 function renderSkills() {
   const host = $("skills");
   if ((state.skills ?? []).length === 0) {
@@ -430,9 +473,11 @@ function renderSkills() {
     return;
   }
   host.replaceChildren(
-    ...(state.skills ?? []).map((s) => {
+    ...skillTree(state.skills ?? []).map(({ skill: s, depth }) => {
       const el = document.createElement("div");
       el.className = "skill";
+      el.style.setProperty("--depth", String(depth));
+      if (depth > 0) el.dataset.child = "1";
       // `pending` is not broken — it means perception has not embedded the
       // label yet, and conflating the two sends people debugging a wait.
       const w =
