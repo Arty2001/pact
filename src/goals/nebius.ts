@@ -40,6 +40,8 @@ export interface Tool {
 }
 
 export interface ToolCall {
+  /** Needed verbatim when replying with this call's result. */
+  id: string;
   name: string;
   args: Record<string, unknown>;
 }
@@ -49,6 +51,15 @@ export interface Completion {
   /** Why it answered the way it did. Empty content plus this is a budget problem. */
   reasoning: string;
   toolCalls: ToolCall[];
+  /**
+   * The assistant message exactly as it arrived.
+   *
+   * Kept because continuing a tool conversation means replaying this message
+   * back verbatim. Reconstructing it from the parsed fields loses the tool
+   * call ids the next turn has to echo, and the model then has no idea which
+   * result answers which call.
+   */
+  raw: unknown;
   usage: { prompt: number; completion: number; reasoning: number };
 }
 
@@ -57,7 +68,12 @@ export class Nebius {
 
   async chat(opts: {
     model: string;
-    messages: Array<{ role: string; content: unknown }>;
+    /**
+     * Loose on purpose. A tool conversation replays assistant messages
+     * verbatim, and those carry tool_calls rather than content, so a stricter
+     * shape here would reject exactly the message that has to go back.
+     */
+    messages: Array<Record<string, unknown>>;
     tools?: Tool[];
     maxTokens?: number;
     temperature?: number;
@@ -88,7 +104,7 @@ export class Nebius {
         message?: {
           content?: string | null;
           reasoning_content?: string | null;
-          tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>;
+          tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
         };
       }>;
       usage?: Record<string, number>;
@@ -100,7 +116,11 @@ export class Nebius {
       const name = call.function?.name;
       if (!name) continue;
       try {
-        toolCalls.push({ name, args: JSON.parse(call.function?.arguments ?? "{}") });
+        toolCalls.push({
+          id: call.id ?? name,
+          name,
+          args: JSON.parse(call.function?.arguments ?? "{}"),
+        });
       } catch {
         // A tool call we cannot parse is worse than none: acting on half an
         // object would write a malformed skill into the ledger.
@@ -112,6 +132,7 @@ export class Nebius {
       content: message.content ?? "",
       reasoning: message.reasoning_content ?? "",
       toolCalls,
+      raw: message,
       usage: {
         prompt: usage.prompt_tokens ?? 0,
         completion: usage.completion_tokens ?? 0,

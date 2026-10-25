@@ -22,6 +22,16 @@ import type { Skill } from "./types";
 /** Text planner. Tool calling, no images. */
 const PLANNER_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
+/**
+ * How many tool turns to allow before giving up.
+ *
+ * A goal needs at most one turn per new skill plus one for the goal itself,
+ * and the first goal in a room is the expensive one at three or four skills.
+ * Six leaves room for that without letting a confused model bill for an
+ * unbounded conversation.
+ */
+const MAX_TURNS = 6;
+
 const SYSTEM = `You turn a plain sentence about a habit or goal into skills and a goal rule for a camera-based tracker.
 
 A skill is a single visual question about one frame. Its label becomes the detector directly, with no training, so the label must describe what a camera would LITERALLY SEE - a posture, an object, a place. Never an intention, a feeling, or anything requiring memory of earlier frames.
@@ -155,43 +165,77 @@ export async function plan(
           .join("\n");
 
   const nebius = new Nebius(apiKey);
-  const out = await nebius.chat({
-    model: PLANNER_MODEL,
-    tools: TOOLS,
-    maxTokens: 2048,
-    messages: [
-      { role: "system", content: SYSTEM },
-      {
-        role: "user",
-        content:
-          `EXISTING SKILLS - reuse whenever one fits:\n${listing}\n\n` +
-          `The person's timezone is ${tz}.\n\n` +
-          `Their goal: "${sentence}"`,
-      },
-    ],
-  });
-
-  if (out.toolCalls.length === 0) {
-    // Empty content with reasoning present is the max_tokens trap, and it is
-    // worth naming in the error rather than reporting a generic failure.
-    const hint = out.content === "" && out.reasoning !== "" ? " (ran out of budget while reasoning)" : "";
-    throw new Error(`planner returned no tool calls${hint}`);
-  }
+  const messages: Array<Record<string, unknown>> = [
+    { role: "system", content: SYSTEM },
+    {
+      role: "user",
+      content:
+        `EXISTING SKILLS - reuse whenever one fits:\n${listing}\n\n` +
+        `The person's timezone is ${tz}.\n\n` +
+        `Their goal: "${sentence}"`,
+    },
+  ];
 
   const known = new Map(catalogue.map((s) => [s.key, s]));
   const drafted = new Map<string, { kind: string; label: string }>();
   let goal: Record<string, unknown> | null = null;
+  const usage = { prompt: 0, completion: 0, reasoning: 0 };
 
-  for (const call of out.toolCalls) {
-    if (call.name === "create_skill") {
-      const key = String(call.args.key ?? "");
-      if (key) drafted.set(key, { kind: String(call.args.kind ?? "object"), label: String(call.args.label ?? "") });
-    } else if (call.name === "create_goal") {
-      goal = call.args;
+  /**
+   * A tool conversation, not a single call.
+   *
+   * This was a single request at first and it worked only by accident: a goal
+   * that reuses everything reaches create_goal on the first turn, so the
+   * bathroom case passed while every goal needing a new skill failed with no
+   * create_goal at all. A tool-calling model emits create_skill and then
+   * stops, waiting to be told it succeeded. Each result has to go back,
+   * echoing the call id, before it will continue.
+   */
+  for (let turn = 0; turn < MAX_TURNS && goal === null; turn++) {
+    const out = await nebius.chat({
+      model: PLANNER_MODEL,
+      tools: TOOLS,
+      maxTokens: 2048,
+      messages,
+    });
+    usage.prompt += out.usage.prompt;
+    usage.completion += out.usage.completion;
+    usage.reasoning += out.usage.reasoning;
+
+    if (out.toolCalls.length === 0) {
+      // Empty content with reasoning present is the max_tokens trap, and it
+      // is worth naming rather than reporting a generic failure.
+      const hint =
+        out.content === "" && out.reasoning !== "" ? " (ran out of budget while reasoning)" : "";
+      throw new Error(`planner stopped calling tools after ${turn} turn(s)${hint}`);
+    }
+
+    messages.push(out.raw as Record<string, unknown>);
+
+    for (const call of out.toolCalls) {
+      let result: string;
+      if (call.name === "create_skill") {
+        const key = String(call.args.key ?? "");
+        if (key) {
+          drafted.set(key, {
+            kind: String(call.args.kind ?? "object"),
+            label: String(call.args.label ?? ""),
+          });
+        }
+        result = JSON.stringify({ ok: true, key, note: "drafted; now call create_goal" });
+      } else if (call.name === "create_goal") {
+        goal = call.args;
+        result = JSON.stringify({ ok: true });
+      } else {
+        result = JSON.stringify({ ok: false, error: `unknown tool ${call.name}` });
+      }
+      messages.push({ role: "tool", tool_call_id: call.id, content: result });
     }
   }
 
-  if (goal === null) throw new Error("planner never called create_goal");
+  if (goal === null) {
+    throw new Error(`planner never called create_goal within ${MAX_TURNS} turns`);
+  }
 
   const rawUses = Array.isArray(goal.uses) ? (goal.uses as Array<Record<string, unknown>>) : [];
   const uses = rawUses.map((u) => {
@@ -220,6 +264,6 @@ export async function plan(
     uses,
     reused: uses.filter((u) => !u.isNew).length,
     created: uses.filter((u) => u.isNew).length,
-    usage: out.usage,
+    usage,
   };
 }
