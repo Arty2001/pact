@@ -444,6 +444,22 @@ class Runner:
             self.log.info("service.start", detail="watching", room=name)
         return room
 
+    def _chain_open(self, skill: Skill, room: Room) -> bool:
+        """Is every gate above this skill currently active?"""
+        parent = skill.depends_on
+        hops = 0
+        while parent and hops < 8:
+            st = room.states.get(parent)
+            if st is None or st.phase != "active":
+                return False
+            parent = self.skills[parent].depends_on if parent in self.skills else None
+            hops += 1
+        return True
+
+    def _driving(self, room: Room, surface: str = "any") -> list[Skill]:
+        """The subset whose gates are open, and which may therefore fire."""
+        return [s for s in self._eligible(room, surface) if self._chain_open(s, room)]
+
     def _eligible(self, room: Room, surface: str = "any") -> list[Skill]:
         """
         Skills whose gate chain is open, and which are about this surface.
@@ -457,26 +473,27 @@ class Runner:
         business scoring a bathroom camera, and the reason to enforce it is
         not the wrong answer - which would be a harmlessly low score - but
         that scoring also calibrates. See `skills.applies_to`.
+
+        The gate chain is deliberately NOT tested here, and that is the whole
+        point of this function. Scoring also calibrates, and calibration fits
+        a threshold above ordinary background - so a child only ever scored
+        while its gate was open saw nothing BUT the thing it was meant to
+        detect, called that ordinary, and put its bar above it. Measured on a
+        live skill: an identical label to its gate, cosines within 0.001 of
+        it, and a bias of 0.142 against a 90th-percentile cosine of 0.128. It
+        could not fire, ever, and nothing said so.
+
+        Skipping a child here never saved anything worth having either. The
+        embedding is already paid for by the time this runs, so a skill costs
+        one dot product - microseconds - against a calibration that is either
+        right or permanently broken. `_driving` applies the gate where it
+        belongs, to the state machine.
         """
-        out: list[Skill] = []
-        for skill in self.skills.values():
-            if skill.kind not in SCORED_KINDS or not skill.ready:
-                continue
-            if not applies_to(skill, surface):
-                continue
-            parent = skill.depends_on
-            open_chain = True
-            hops = 0
-            while parent and hops < 8:
-                st = room.states.get(parent)
-                if st is None or st.phase != "active":
-                    open_chain = False
-                    break
-                parent = self.skills[parent].depends_on if parent in self.skills else None
-                hops += 1
-            if open_chain:
-                out.append(skill)
-        return out
+        return [
+            skill
+            for skill in self.skills.values()
+            if skill.kind in SCORED_KINDS and skill.ready and applies_to(skill, surface)
+        ]
 
     def _rate(self, eligible: list[Skill]) -> float:
         """The fastest rate any currently eligible skill needs."""
@@ -540,10 +557,10 @@ class Runner:
         if room.snapshot and now - room.last_sent >= _SNAPSHOT_EVERY_S:
             room.last_sent = now
             await self.ledger.scores(
-                room_name, self._rate(self._eligible(room, surface)), dict(room.snapshot)
+                room_name, self._rate(self._driving(room, surface)), dict(room.snapshot)
             )
 
-        hz = self._rate(self._eligible(room, surface))
+        hz = self._rate(self._driving(room, surface))
         if abs(hz - room.asked_hz) > 1e-6:
             # The publisher owns its clock, so this is a request, not a
             # command. Sent only on change: a counter going eligible is the
@@ -616,6 +633,14 @@ class Runner:
         # flat softmax and reported a margin of effectively zero forever.
         if skill.key not in room.calibrated:
             room.warming.add(skill.key)
+            return
+
+        # The gate belongs here rather than around the scoring. A closed gate
+        # means this cannot be happening, so it must not fire - but the score
+        # above was still worth taking, because that is what calibration is
+        # built from and a sample only taken while the gate is open is a
+        # sample of the answer rather than of the background.
+        if not self._chain_open(skill, room):
             return
 
         state = room.states.get(skill.key, initial(now))

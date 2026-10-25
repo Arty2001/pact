@@ -221,7 +221,9 @@ a { color: var(--proved-text); }
   gap: clamp(14px, 2vw, 20px);
   grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
 }
-@media (max-width: 1080px) { .page { grid-template-columns: minmax(0, 1fr); } }
+/* 1080 was too late: at 1100px the right column is 300px holding goal
+   descriptions and skill rows, which is where the overlapping started. */
+@media (max-width: 1240px) { .page { grid-template-columns: minmax(0, 1fr); } }
 
 .col { display: flex; flex-direction: column; gap: clamp(14px, 2vw, 20px); min-width: 0; }
 
@@ -365,7 +367,7 @@ a { color: var(--proved-text); }
 /* --------------------------------------------------------------- signal */
 
 .signal { padding: 14px 16px 16px; }
-.readout { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 12px; }
+.readout { display: flex; gap: 10px 22px; flex-wrap: wrap; margin-bottom: 12px; }
 .readout div { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
 .readout b {
   display: block; font-size: 18px; color: var(--fg); font-weight: 700;
@@ -388,6 +390,9 @@ a { color: var(--proved-text); }
   white-space: nowrap;
 }
 .sig i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+/* A legend entry with a long skill key should shorten, not widen the row. */
+.sig .k { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sig { max-width: 100%; }
 .sig .v { color: var(--fg); font-variant-numeric: tabular-nums; }
 .sig:hover { background: #fff; }
 /* Pressed is a filter, not a verdict, so it reads as a selection: a ring and
@@ -439,10 +444,24 @@ a { color: var(--proved-text); }
   gap: 8px;
 }
 .goal:last-child { border-bottom: 0; }
-.goal-top { display: flex; align-items: baseline; gap: 10px; }
-.goal-top .name { font-weight: 600; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -.01em; }
+/* Wraps. The name, the state chip and the delete control were three
+   unshrinkable children of one flex row, so a long description pushed the
+   chip out of the card instead of moving to the next line. */
+.goal-top { display: flex; align-items: baseline; gap: 6px 10px; flex-wrap: wrap; }
+.goal-top .name {
+  font-weight: 600; font-size: 13.5px; letter-spacing: -.01em;
+  flex: 1 1 12ch; min-width: 0;
+  /* Two lines, then ellipsis - a description is the thing you identify the
+     goal by, so cutting it at one line loses the half that distinguishes
+     two morning routines from each other. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .goal-top .key { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
-.goal-meta { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
+.goal-meta {
+  font-family: var(--mono); font-size: 10.5px; color: var(--dimmer);
+  overflow-wrap: anywhere;
+}
 
 .prog { height: 4px; background: var(--sunk); border-radius: 3px; overflow: hidden; }
 .prog i { display: block; height: 100%; background: var(--proved); border-radius: 3px; transition: width .3s ease-out; }
@@ -478,6 +497,11 @@ a { color: var(--proved-text); }
   color: var(--dim);
   border: 1px solid transparent;
   white-space: nowrap;
+  /* A chip naming a long skill key used to push the card wider than the
+     column. It gives way before the card does. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chip.proved   { background: var(--proved-wash);  color: var(--proved-text);  border-color: var(--proved-edge); }
 .chip.watching { background: var(--watch-wash);   color: var(--watch-text);   border-color: var(--watch-edge); }
@@ -489,8 +513,12 @@ a { color: var(--proved-text); }
 .skills { display: flex; flex-direction: column; }
 .skill {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr) auto;
-  gap: 10px;
+  /* The kind column was a fixed 78px and the label an auto track, so a long
+     key and a long label fought over a width neither could have and the
+     chips rode over the top. Everything that can shrink now may, and the
+     row wraps to two lines before anything overlaps. */
+  grid-template-columns: minmax(58px, auto) minmax(0, 1fr) auto;
+  gap: 6px 10px;
   align-items: center;
   /* Indented by depth in the gate tree. A child is only eligible while its
      parent is open, and that is worth seeing at a glance rather than by
@@ -518,8 +546,16 @@ a { color: var(--proved-text); }
   pointer-events: none;
 }
 .skill .kind { font-family: var(--mono); font-size: 9.5px; color: var(--dimmer); text-transform: uppercase; letter-spacing: .05em; }
-.skill .key { font-family: var(--mono); font-size: 11px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.skill .label { font-size: 11px; color: var(--dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill .key { font-family: var(--mono); font-size: 11px; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill .label { font-size: 11px; color: var(--dimmer); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Narrow: the label drops to its own line under the key rather than being
+   squeezed into a few characters of ellipsis, which told you nothing. */
+@media (max-width: 520px) {
+  .skill { grid-template-columns: minmax(0, 1fr) auto; }
+  .skill .kind { grid-column: 1 / -1; }
+  .skill .label { grid-column: 1 / -1; white-space: normal; }
+}
 
 /* --------------------------------------------------------------- notices */
 
