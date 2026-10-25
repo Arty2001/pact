@@ -1,0 +1,16 @@
+# The index is LF everywhere. Pin it, so a Windows checkout cannot quietly
+# commit CRLF back and turn a one-line change into a whole-file diff.
+* text=auto eol=lf
+
+# Binaries, declared rather than guessed. A flash dump or an .npy that git
+# decides is text once is a diff nobody can read.
+*.bin  binary
+*.npy  binary
+*.wav  binary
+*.png  binary
+*.jpg  binary
+
+# Lockfiles and the generated voice header are machine-written. Collapse them
+# in diffs and keep them out of language stats.
+package-lock.json       linguist-generated=true -diff
+m5stackchan/src/voice.h linguist-generated=true -diff
