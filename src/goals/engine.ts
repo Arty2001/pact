@@ -1,5 +1,6 @@
 import { Logger, newTraceId } from "../log";
 import { evaluate, inWindow } from "./evaluate";
+import { plan } from "./planner";
 import { SCHEMA } from "./schema";
 import type {
   EngineMessage,
@@ -56,7 +57,7 @@ export class Engine implements DurableObject {
 
   constructor(
     private ctx: DurableObjectState,
-    private env: unknown,
+    private env: { NEBIUS_API_KEY?: string },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
     this.log = new Logger("engine");
@@ -74,6 +75,8 @@ export class Engine implements DurableObject {
     if (path === "/state" && request.method === "GET") {
       return Response.json(this.state());
     }
+
+    if (path === "/plan" && request.method === "POST") return this.plan(request);
 
     if (path === "/skills") {
       if (request.method === "GET") return Response.json({ skills: this.skills() });
@@ -121,6 +124,44 @@ export class Engine implements DurableObject {
     }
     await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
   }
+
+  /**
+   * Draft a goal from a sentence. Drafts only; a person presses the button.
+   *
+   * A skill's label IS its detector, so a sentence that reads well but
+   * describes something no camera can see produces a skill that silently
+   * never fires. The cheapest place to catch that is in front of a person,
+   * before it is written down.
+   */
+  private plan = async (request: Request): Promise<Response> => {
+    if (!this.env.NEBIUS_API_KEY) {
+      return Response.json(
+        { error: "the planner needs NEBIUS_API_KEY on the Worker" },
+        { status: 503 },
+      );
+    }
+    const { sentence, tz } = (await request.json()) as { sentence?: string; tz?: string };
+    if (!sentence) return Response.json({ error: "sentence is required" }, { status: 400 });
+
+    const started = Date.now();
+    try {
+      const draft = await plan(this.env.NEBIUS_API_KEY, sentence, this.skills(), tz ?? "UTC");
+      this.log.info("planner.call", {
+        sentence,
+        created: draft.created,
+        reused: draft.reused,
+        ms: Date.now() - started,
+        prompt_tokens: draft.usage.prompt,
+        completion_tokens: draft.usage.completion,
+        reasoning_tokens: draft.usage.reasoning,
+      });
+      return Response.json(draft);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      this.log.error("service.error", { detail, ms: Date.now() - started });
+      return Response.json({ error: detail }, { status: 502 });
+    }
+  };
 
   // ------------------------------------------------------------- websockets
 

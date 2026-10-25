@@ -658,3 +658,154 @@ body.join {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* ===========================================================================
+   Goals.
+
+   The wall is a grid of moving pictures; this page is a ledger. It reuses the
+   bar, the buttons and the palette, but drops the rail: there is nothing to
+   navigate between here, only a list to read top to bottom in the order of
+   who is waiting on whom.
+   =========================================================================== */
+
+.shell-goals { grid-template-columns: 1fr; }
+
+.bar-nav { display: flex; gap: 2px; margin-left: 18px; }
+.bar-nav a {
+  color: var(--dim); text-decoration: none; font-size: 12px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 6px 12px; border-radius: 3px;
+}
+.bar-nav a:hover { color: var(--bone); background: var(--raised); }
+.bar-nav a.on { color: var(--bone); background: var(--raised); }
+
+.goals-main {
+  grid-column: 1 / -1; padding: 28px clamp(16px, 4vw, 48px) 64px;
+  max-width: 1040px; width: 100%; margin: 0 auto; overflow-y: auto;
+}
+.goals-main section { margin-bottom: 40px; }
+
+.sec-head {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--dim); margin: 0 0 14px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--hairline);
+}
+.sec-head .btn { margin-left: auto; }
+.sec-note { text-transform: none; letter-spacing: 0; color: var(--dimmer); font-weight: 400; }
+.btn-sm { padding: 5px 11px; font-size: 11px; }
+.empty { color: var(--dimmer); font-size: 13px; margin: 0; }
+
+/* -- questions ----------------------------------------------------------- */
+
+.qlist, .glist, .slist { list-style: none; margin: 0; padding: 0; }
+
+.qitem {
+  background: var(--panel); border: 1px solid var(--seal); border-radius: 4px;
+  padding: 14px 16px; margin-bottom: 10px;
+}
+.qprompt { color: var(--bone); font-size: 14px; margin-bottom: 10px; }
+.qactions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.qinput {
+  background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
+  border-radius: 3px; padding: 7px 10px; font: inherit; font-size: 12px; width: 170px;
+}
+
+/* -- goals --------------------------------------------------------------- */
+
+.gitem {
+  position: relative; background: var(--panel); border: 1px solid var(--hairline);
+  border-radius: 4px; padding: 15px 16px; margin-bottom: 10px;
+}
+.ghead { display: flex; align-items: baseline; gap: 12px; }
+.ghead b { color: var(--bone); font-size: 15px; font-weight: 500; }
+.gkey { font-family: var(--mono); font-size: 11px; color: var(--dimmer); margin-left: 9px; }
+.gmeta { font-size: 11px; color: var(--dim); margin-top: 4px; font-family: var(--mono); }
+
+.guses { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 11px 0 0; padding: 0; }
+.use {
+  font-family: var(--mono); font-size: 10.5px; padding: 3px 8px; border-radius: 3px;
+  background: var(--raised); color: var(--dim); border: 1px solid transparent; cursor: help;
+}
+.use-gate { border-color: var(--hairline-2); color: var(--bone); }
+.use-discriminating { border-color: var(--seal); }
+
+/* The chip carries the verdict, so its colour is the one thing on this page
+   that must never be ambiguous between "done" and "nearly". */
+.chip {
+  margin-left: auto; font-family: var(--mono); font-size: 10.5px; padding: 3px 9px;
+  border-radius: 3px; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap;
+}
+.chip-pending  { background: var(--raised); color: var(--dim); }
+.chip-active   { background: #2a3340; color: var(--bone); }
+.chip-done     { background: rgba(95,212,168,.14); color: var(--ok); }
+.chip-violated { background: rgba(232,64,42,.16); color: var(--tally); }
+.chip-missed   { background: var(--raised); color: var(--dimmer); }
+
+.strip { display: flex; gap: 3px; margin-top: 11px; }
+.dot { width: 13px; height: 13px; border-radius: 2px; background: var(--raised); }
+.dot-done { background: var(--ok); }
+.dot-violated { background: var(--tally); }
+.dot-active { background: var(--hairline-2); }
+.dot-missed { background: var(--raised); opacity: .5; }
+
+.gdel { position: absolute; top: 12px; right: 12px; opacity: 0; transition: opacity .12s; }
+.gitem:hover .gdel { opacity: 1; }
+
+/* -- skills -------------------------------------------------------------- */
+
+.sitem {
+  display: flex; align-items: center; gap: 11px; padding: 9px 12px;
+  border-bottom: 1px solid var(--hairline); font-size: 12.5px;
+}
+.sitem b { color: var(--bone); font-family: var(--mono); font-size: 11.5px; font-weight: 500; }
+.slabel { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kind {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  padding: 2px 7px; border-radius: 3px; background: var(--raised); color: var(--dim);
+  min-width: 86px; text-align: center;
+}
+.kind-gate { color: var(--bone); }
+.kind-counter, .kind-discriminator { color: var(--seal); }
+.kind-metric { color: var(--dimmer); }
+.shz { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
+
+/* "pending" is not an error. It means perception has not embedded the label
+   yet, and reading it as a failure sends people debugging a wait. */
+.wstate { font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+.wstate-pending  { color: var(--dim); background: var(--raised); }
+.wstate-zeroshot { color: var(--bone); background: var(--raised); }
+.wstate-fitted   { color: var(--ok); background: rgba(95,212,168,.12); }
+
+/* -- perception ---------------------------------------------------------- */
+
+.pstatus {
+  font-family: var(--mono); font-size: 11.5px; padding: 11px 13px;
+  border-radius: 4px; border: 1px solid var(--hairline); background: var(--panel);
+}
+.pstatus-off { color: var(--dim); border-color: var(--hairline); }
+.pstatus-on  { color: var(--ok); border-color: rgba(95,212,168,.3); }
+
+/* -- the new-goal dialog ------------------------------------------------- */
+
+.dlg-wide { max-width: 620px; width: calc(100vw - 32px); }
+.dlg-wide .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.rule { border: 0; border-top: 1px solid var(--hairline); margin: 18px 0; }
+
+.dlg-wide select, .dlg-wide input[type="time"], .dlg-wide input[type="number"] {
+  background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
+  border-radius: 3px; padding: 8px 10px; font: inherit; font-size: 13px; width: 100%;
+}
+.dlg-wide small { display: block; color: var(--dimmer); font-size: 11px; margin-top: 5px; line-height: 1.5; }
+
+.skill-rows { list-style: none; margin: 0 0 9px; padding: 0; }
+.skill-row { display: grid; grid-template-columns: 112px 128px 1fr 104px 26px; gap: 6px; margin-bottom: 6px; }
+.skill-row input, .skill-row select {
+  background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
+  border-radius: 3px; padding: 6px 8px; font: inherit; font-size: 11.5px; min-width: 0;
+}
+.row-drop { padding: 0; min-width: 26px; color: var(--dim); }
+
+@media (max-width: 720px) {
+  .skill-row { grid-template-columns: 1fr 1fr; }
+  .dlg-wide .two { grid-template-columns: 1fr; }
+}

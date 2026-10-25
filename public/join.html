@@ -64,6 +64,11 @@
     </div>
     <button class="btn" id="stop">Stop streaming</button>
     <div class="status live" id="onair-status"></div>
+    <!-- What the motion gate is doing. Visible rather than buried in a log
+         because the gated percentage is the number that tells you whether
+         this device is costing anything, and it is the first thing to check
+         when a room is quiet but the bill is not. -->
+    <div class="status" id="onair-gate">waiting for frames</div>
   </div>
 
 </div>

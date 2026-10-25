@@ -11,6 +11,7 @@
    out — closing the tab is what takes the feed off the wall.
    =========================================================================== */
 
+import { FrameTap } from "./frame-tap.js";
 import { publish } from "./sfu-client.js";
 
 const el = (id) => document.getElementById(id);
@@ -28,6 +29,7 @@ let stream = null;
 let kind = null;
 let session = null; // { pc, sessionId, trackNames }
 let ws = null;
+let tap = null;
 
 // ------------------------------------------------------------------- claim --
 
@@ -168,6 +170,18 @@ async function start() {
     onair.hidden = false;
     el("onair-name").textContent = device.name;
     el("onair-status").textContent = `${device.kind} · ${session.trackNames.length} track(s) · live`;
+
+    // Sampling is deliberately separate from the SFU leg. The wall can be
+    // watching with nobody analysing, and perception can be analysing with
+    // nobody watching; coupling them would break both cases.
+    tap = new FrameTap(preview, device.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"));
+    tap.start();
+    setInterval(() => {
+      if (!tap) return;
+      const { sampled, gated, sent, lastMoved } = tap.stats;
+      el("onair-gate").textContent =
+        `${sent} sent · ${gated} gated (${Math.round((gated / Math.max(sampled, 1)) * 100)}%) · motion ${lastMoved.toFixed(3)}`;
+    }, 1000);
   };
 
   // If the Hub connection drops, the feed is effectively off the wall.
@@ -179,6 +193,8 @@ async function start() {
 // -------------------------------------------------------------------- stop --
 
 function stop() {
+  tap?.stop();
+  tap = null;
   ws?.close();
   session?.pc.close();
   stream?.getTracks().forEach((t) => t.stop());
