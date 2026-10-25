@@ -1,9 +1,16 @@
-# Check every pull request, and deploy main once it passes.
+# Check every pull request. Deploy on demand.
 #
 # The deploy job depends on the check job, so a red build cannot reach
 # pact.lanvar.ai. That ordering is the whole point of the file: with two
 # people merging to main, the thing standing between a typo and production
 # should be a machine rather than whoever pushed last.
+#
+# Deploying is deliberately manual. Releases currently go out with a local
+# `npm run deploy`, so an automatic deploy job would fail on every merge for
+# want of credentials - and a workflow that is always red is a workflow both
+# of us learn to scroll past. Run it from the Actions tab instead, or make it
+# automatic later by adding the two secrets below and putting `push` back on
+# the deploy job's `if`.
 #
 # What this does NOT do is touch the Worker's runtime secrets. REALTIME_APP_ID,
 # REALTIME_APP_SECRET and NEBIUS_API_KEY are set once with `wrangler secret put`
@@ -17,6 +24,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Deploy on demand, from the Actions tab.
+  workflow_dispatch:
 
 # A second push to main while the first is still deploying should win rather
 # than race it. In-progress PR checks are cancelled; in-progress deploys are
@@ -50,7 +59,9 @@ jobs:
 
   deploy:
     needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Manual only, for now. Needs CLOUDFLARE_API_TOKEN and
+    # CLOUDFLARE_ACCOUNT_ID as repository secrets before it will succeed.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Named so the deploy shows up in the repo's Environments tab with a link
     # to the live URL, and so branch protection can require it later.
