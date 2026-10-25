@@ -64,6 +64,8 @@ class Config:
 
     nebius_key: str | None
     teacher_model: str
+    store_path: str
+    retain_days: float
 
     level: Level
     trace_skills: frozenset[str] = field(default_factory=frozenset)
@@ -129,6 +131,8 @@ def load(argv: list[str] | None = None) -> Config:
     add("--idle-hz", type=float, default=_env_float("PACT_IDLE_HZ", DEFAULT_IDLE_HZ))
     add("--max-hz", type=float, default=_env_float("PACT_MAX_HZ", DEFAULT_MAX_HZ))
     add("--motion-threshold", type=float, default=_env_float("PACT_MOTION", 0.012))
+    add("--store", default=_env("PACT_STORE", "traces/perception.db"))
+    add("--retain-days", type=float, default=_env_float("PACT_RETAIN_DAYS", 7.0))
 
     add("--level", choices=LEVELS, default=_env("PACT_LEVEL", "info"))
     add(
@@ -165,6 +169,8 @@ def load(argv: list[str] | None = None) -> Config:
         motion_threshold=a.motion_threshold,
         nebius_key=_env("NEBIUS_API_KEY"),
         teacher_model=_env("PACT_TEACHER_MODEL", "nvidia/Nemotron-3.5-Super-VL") or "",
+        store_path=a.store,
+        retain_days=a.retain_days,
         level=a.level,
         trace_skills=frozenset(a.trace_skill),
     )

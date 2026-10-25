@@ -38,6 +38,7 @@ import io
 import signal
 import sys
 import time
+from collections import deque
 from dataclasses import replace
 from typing import Any
 
@@ -51,6 +52,7 @@ from .gate import MotionGate
 from .ledger import Ledger, decode_weights
 from .log import Logger
 from .machine import Event, Params, State, initial, step
+from .probe import MIN_EXAMPLES, refit
 from .skills import (
     SCORED_KINDS,
     EncoderMismatch,
@@ -60,6 +62,8 @@ from .skills import (
     loosen_for,
     score,
 )
+from .store import Store
+from .teacher import FRAMES_PER_CALL, Teacher
 
 #: Background cosines kept per skill, for calibration. Twenty minutes at
 #: 0.5 Hz, which is enough for a stable quantile without unbounded growth.
@@ -78,6 +82,17 @@ class Runner:
         self.embedder = embedder
         self.ledger = Ledger(cfg.hub, cfg.room, log, cfg.token)
         self.gate = MotionGate(cfg.motion_threshold)
+        self.store = Store(cfg.store_path, retain_days=cfg.retain_days)
+
+        # The teacher is optional. Without a key everything still runs; it
+        # just never escalates, and the mid-band cases go unresolved rather
+        # than failing. A missing credential should degrade, not stop.
+        self.teacher = Teacher(cfg.nebius_key, log, cfg.teacher_model) if cfg.nebius_key else None
+
+        #: Recent frames, so an escalation has something to send. Kept as
+        #: decoded images rather than paths because the source may be a
+        #: socket with nothing on disk behind it.
+        self._recent: deque[tuple[float, Any]] = deque(maxlen=FRAMES_PER_CALL * 3)
 
         self.skills: dict[str, Skill] = {}
         self.states: dict[str, State] = {}
@@ -261,6 +276,13 @@ class Runner:
         embedding = self.embedder.encode_image(image)
         self.log.debug("embed.done", ms=round(embedding.ms, 1), dim=embedding.dim)
 
+        # Both of these exist for the labelling loop rather than for
+        # debugging. The image is what a teacher call sends; the embedding is
+        # what a label is eventually fitted against. Discarding either would
+        # mean an answer taught the system nothing.
+        self._recent.append((now, image))
+        self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id)
+
         eligible = self._eligible()
         for skill in eligible:
             await self._score_one(skill, embedding.vector, now)
@@ -289,6 +311,14 @@ class Runner:
 
         self._remember(skill, e)
         self.log.trace("skill.score", skill=skill.key, score=round(value, 4))
+        state_now = self.states.get(skill.key)
+        self.store.observe(
+            skill.key,
+            now,
+            value,
+            float(np.dot(np.atleast_2d(skill.w)[0], e)) if skill.w is not None else 0.0,
+            state_now.phase if state_now else "idle",
+        )
 
         # An uncalibrated skill must not drive its state machine. With bias at
         # zero and temperature at one, sigmoid of a cosine returns about 0.5
@@ -312,8 +342,123 @@ class Runner:
         state = self.states.get(skill.key, initial(now))
         nxt, event = step(state, value, now, skill.params)
         self.states[skill.key] = nxt
-        if event is not None:
+        if event is None:
+            return
+        if event.kind == "escalate":
+            await self._escalate(skill, event, now)
+            return
+        await self._emit(skill, event)
+
+    async def _escalate(self, skill: Skill, event: Event, now: float) -> None:
+        """
+        Spend a teacher call on a case the thresholds could not settle.
+
+        The verdict does two separate jobs and it is worth keeping them
+        apart. It resolves this occurrence, so the transition goes up marked
+        verdict_by=vlm rather than being lost. And it becomes a label, which
+        is the only reason the same ambiguity costs less next time.
+
+        An UNSURE answer is a real answer, not a failure: it means the frames
+        genuinely do not show it, and the question belongs to a person. A
+        failed call is different and is reported as an error.
+        """
+        if self.teacher is None:
+            self.log.warn(
+                "service.error",
+                skill=skill.key,
+                detail="would escalate, but no NEBIUS_API_KEY",
+            )
             await self._emit(skill, event)
+            return
+
+        frames = [img for _, img in list(self._recent)[-FRAMES_PER_CALL:]]
+        verdict = await asyncio.to_thread(
+            self.teacher.adjudicate, skill.label, frames, skill.classes
+        )
+        if verdict is None:
+            await self._emit(skill, event)
+            return
+
+        label = verdict.label
+        if label is not None:
+            # Attach the label to the frame it describes, not to the moment
+            # the answer came back - the two are seconds apart.
+            frame_ts = self.store.nearest_frame_ts(now, tolerance=30.0)
+            if frame_ts is not None:
+                self.store.label(skill.key, frame_ts, label, "vlm")
+                await self._maybe_refit(skill)
+
+        if label == 1:
+            # The teacher says yes, so credit it as a session the camera
+            # alone could not close. settled_by will read vlm, which is the
+            # whole point of keeping that column.
+            await self._emit(
+                skill,
+                replace(event, kind="entered", reason=f"teacher: {verdict.reason}"[:120]),
+                verdict_by="vlm",
+            )
+            return
+
+        await self._emit(
+            skill,
+            replace(event, kind="rejected", reason=f"teacher: {verdict.reason}"[:120]),
+            verdict_by="vlm" if label == 0 else None,
+        )
+
+    async def _maybe_refit(self, skill: Skill) -> None:
+        """
+        Refit this skill's probe if there are enough labels to try.
+
+        Reported whether or not it helped, and discarded when it does not.
+        A refit that cannot beat zero-shot on frames it never saw is not an
+        improvement, and shipping it anyway would make the holdout number
+        decoration rather than evidence.
+        """
+        if skill.w is None:
+            return
+        examples = self.store.examples(skill.key, self.embedder.encoder_id)
+        if len(examples) < MIN_EXAMPLES:
+            return
+
+        x = np.stack([ex.embedding for ex in examples])
+        y = np.asarray([ex.label for ex in examples])
+        result = await asyncio.to_thread(
+            refit,
+            x,
+            y,
+            np.atleast_2d(skill.w)[0],
+            skill.bias,
+            skill.temperature,
+        )
+
+        self.log.info(
+            "probe.refit",
+            skill=skill.key,
+            n_examples=result.n_examples,
+            holdout_before=round(result.holdout_before, 4),
+            holdout_after=round(result.holdout_after, 4),
+            accepted=result.accepted,
+            why=result.why,
+        )
+        if not result.accepted:
+            return
+
+        self.skills[skill.key] = replace(
+            skill, w=result.w, bias=result.bias, temperature=result.temperature
+        )
+        # The fit chose its own sharpness, so the calibration fitted from
+        # background is superseded here rather than kept alongside.
+        self.calibrated.add(skill.key)
+        await self.ledger.weights(
+            skill.key,
+            result.w,
+            self.embedder.encoder_id,
+            result.bias,
+            result.temperature,
+        )
+        await self.ledger.refit(
+            skill.key, result.n_examples, result.holdout_before, result.holdout_after
+        )
 
     def _remember(self, skill: Skill, e: np.ndarray) -> None:
         """
@@ -355,7 +500,7 @@ class Runner:
         # another minute collecting background before it can score anything.
         self._pending_calibration.append(skill.key)
 
-    async def _emit(self, skill: Skill, event: Event) -> None:
+    async def _emit(self, skill: Skill, event: Event, verdict_by: str | None = None) -> None:
         """
         Send one transition up, and rotate the trace on a session boundary.
 
