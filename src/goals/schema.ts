@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS skills (
   room             TEXT,
   depends_on       TEXT REFERENCES skills(key),
 
+  -- Which kind of picture this question is about: 'camera', 'screen', or
+  -- 'any'. Not decoration. A shared screen and a room camera arrive down the
+  -- same pipe, so without this every skill is scored against every frame and
+  -- "a person at a bathroom sink" quietly calibrates its idea of a normal
+  -- frame against screenshots of a code editor. The scores stay low, so
+  -- nothing looks broken while the thresholds drift.
+  surface          TEXT NOT NULL DEFAULT 'any',
+
   enter_conf       REAL NOT NULL DEFAULT 0.75,
   exit_conf        REAL NOT NULL DEFAULT 0.45,
   dwell_s          REAL NOT NULL DEFAULT 2.0,
@@ -183,3 +191,17 @@ CREATE INDEX IF NOT EXISTS transitions_trace ON transitions (trace_id);
 CREATE INDEX IF NOT EXISTS instances_goal_date ON instances (goal_key, occurrence_on);
 CREATE INDEX IF NOT EXISTS questions_open ON questions (answered_at, asked_at);
 `;
+
+/**
+ * Columns added after the first deploy.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already
+ * exists, so a column added to the statement above never reaches a Durable
+ * Object that has already booted once - and the failure is a confusing "no
+ * such column" at query time rather than at startup. SQLite has no
+ * `ADD COLUMN IF NOT EXISTS`, so each of these is run on its own and the
+ * duplicate-column error is the expected outcome on every boot but the first.
+ */
+export const MIGRATIONS: readonly string[] = [
+  `ALTER TABLE skills ADD COLUMN surface TEXT NOT NULL DEFAULT 'any'`,
+];

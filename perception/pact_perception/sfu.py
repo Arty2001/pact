@@ -246,14 +246,19 @@ class SfuSource:
                 continue
             self._subs[dev_id] = sub
 
-    async def frames(self) -> AsyncIterator[tuple[str, Frame]]:
+    async def frames(self) -> AsyncIterator[tuple[str, str, Frame]]:
         """
         The newest frame from each subscribed device, at the requested rate.
 
-        Yields (room, frame). Sampling by polling `latest` rather than by
-        reading the track slowly is deliberate: the track must be drained at
-        full speed regardless, and this way the rate is a property of what
-        we look at rather than of what the decoder is allowed to do.
+        Yields (room, surface, frame). Sampling by polling `latest` rather
+        than by reading the track slowly is deliberate: the track must be
+        drained at full speed regardless, and this way the rate is a property
+        of what we look at rather than of what the decoder is allowed to do.
+
+        The surface comes off the device the Hub registered, which is the
+        same fact the publisher sends with a relayed frame - the two paths
+        agree because both ultimately read it from the browser that chose a
+        camera or a screen.
         """
         seen: dict[str, int] = {}
         # A deadline, not a delay. Sleeping for the full interval and only
@@ -277,7 +282,8 @@ class SfuSource:
                 if frame is None or seen.get(sub.device.id) == frame.seq:
                     continue
                 seen[sub.device.id] = frame.seq
-                yield sub.device.room, frame
+                surface = "screen" if sub.device.kind == "screen" else "camera"
+                yield sub.device.room, surface, frame
 
     async def aclose(self) -> None:
         self._closed = True

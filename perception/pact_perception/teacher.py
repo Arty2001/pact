@@ -49,7 +49,22 @@ _USD_OUT = 0.90
 #: resolution because the question is "which of these two things is this",
 #: not "read the label on the bottle".
 FRAMES_PER_CALL = 4
-_FRAME_PX = 512
+
+#: Longest edge of a frame sent to the teacher, by surface.
+#:
+#: 512 is right for a camera and quietly wrong for a screen. The question
+#: asked of a camera is "which of these two postures is this", which survives
+#: heavy downsampling. The question asked of a screen is almost always "what
+#: does that text say" - which editor, which document, which site - and at
+#: 512px a 1920px desktop renders body text as a grey smear. The model then
+#: answers UNSURE every time, and the failure reads as a model that cannot do
+#: the task rather than as a picture that never contained the answer.
+#:
+#: 1024 is where screen text becomes reliably legible. It is not free: a
+#: teacher call on a screen costs roughly four times the input tokens of one
+#: on a camera. That is affordable precisely because escalation is rare, and
+#: it would not be if this ran on every frame.
+_FRAME_PX = {"camera": 512, "screen": 1024, "any": 512}
 
 _SYSTEM = (
     "You judge whether a short burst of frames from a fixed camera shows a "
@@ -59,6 +74,35 @@ _SYSTEM = (
     "Reply with exactly one line, no other text:\n"
     "  YES <confidence 0-1> <short reason>\n"
     "  NO <confidence 0-1> <short reason>\n"
+    "  UNSURE <short reason>"
+)
+
+#: The same job, against a shared screen rather than a room.
+#:
+#: A separate prompt rather than a sentence bolted onto the first one,
+#: because almost every instruction differs. The evidence is text and layout
+#: instead of posture and motion; consecutive frames of someone reading are
+#: identical rather than a movement through its arc, so stillness has to be
+#: named as uninformative rather than treated as absence; and the single most
+#: likely wrong answer has to be headed off explicitly - a tab or an icon for
+#: the right application is not the same as the right application being used,
+#: and a model asked "is this person coding" will say yes to a visible editor
+#: icon unless told otherwise.
+_SYSTEM_SCREEN = (
+    "You judge whether screenshots of a person's shared screen show a "
+    "specific activity. You are the tie-breaker for an automated detector "
+    "that could not decide.\n\n"
+    "Read the screen. Window titles, file names, tab labels, menu bars and "
+    "the content itself are all evidence, and they matter more than the "
+    "general look of the application.\n\n"
+    "Two cautions. The frames may be nearly identical, because someone "
+    "reading or thinking does not move - that is not evidence of absence. "
+    "And something merely being OPEN, visible in a tab, or present as an "
+    "icon is not the same as it being WORKED ON; judge what currently has "
+    "focus and fills the screen.\n\n"
+    "Reply with exactly one line, no other text:\n"
+    "  YES <confidence 0-1> <short reason, quoting what you read>\n"
+    "  NO <confidence 0-1> <short reason, quoting what you read>\n"
     "  UNSURE <short reason>"
 )
 
@@ -107,6 +151,8 @@ class Teacher:
         label: str,
         frames: list[Image.Image],
         classes: tuple[str, ...] = (),
+        surface: str = "camera",
+        context: str = "",
     ) -> Verdict | None:
         """
         Ask about one skill. Returns None if the call itself failed.
@@ -114,6 +160,13 @@ class Teacher:
         A failed call is distinct from an UNSURE verdict: the first should be
         retried or reported, the second is a real answer that means the
         question goes to a person.
+
+        `context` is what the gate above this skill was already satisfied
+        about - "a code editor is on screen" when asking whether Python is
+        being written. It is worth the tokens because it narrows a broad
+        question to the one that is actually undecided, and because without
+        it a screen question tends to be answered from the application rather
+        than from the content.
         """
         if not frames:
             return None
@@ -123,13 +176,16 @@ class Teacher:
             if not classes
             else f'These frames show one of: {", ".join(classes)}. Is it "{label}"?'
         )
+        if context:
+            question = f"Already established: {context}.\n{question}"
 
+        px = _FRAME_PX.get(surface, _FRAME_PX["camera"])
         content: list[dict[str, Any]] = [{"type": "text", "text": question}]
         for frame in frames[:FRAMES_PER_CALL]:
             content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{_jpeg_b64(frame)}"},
+                    "image_url": {"url": f"data:image/jpeg;base64,{_jpeg_b64(frame, px)}"},
                 }
             )
 
@@ -142,7 +198,10 @@ class Teacher:
                     "max_tokens": _MIN_MAX_TOKENS,
                     "temperature": 0.1,
                     "messages": [
-                        {"role": "system", "content": _SYSTEM},
+                        {
+                            "role": "system",
+                            "content": _SYSTEM_SCREEN if surface == "screen" else _SYSTEM,
+                        },
                         {"role": "user", "content": content},
                     ],
                 },
@@ -239,9 +298,9 @@ def _parse(text: str) -> tuple[str, float, str]:
     return answer, confidence, reason or first
 
 
-def _jpeg_b64(image: Image.Image) -> str:
+def _jpeg_b64(image: Image.Image, px: int = 512) -> str:
     im = image.convert("RGB")
-    im.thumbnail((_FRAME_PX, _FRAME_PX), Image.Resampling.LANCZOS)
+    im.thumbnail((px, px), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode()

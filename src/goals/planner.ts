@@ -32,9 +32,9 @@ const PLANNER_MODEL = "nvidia/nemotron-3-super-120b-a12b";
  */
 const MAX_TURNS = 6;
 
-const SYSTEM = `You turn a plain sentence about a habit or goal into skills and a goal rule for a camera-based tracker.
+const SYSTEM = `You turn a plain sentence about a habit or goal into skills and a goal rule for a tracker that watches either a ROOM CAMERA or a SHARED SCREEN.
 
-A skill is a single visual question about one frame. Its label becomes the detector directly, with no training, so the label must describe what a camera would LITERALLY SEE - a posture, an object, a place. Never an intention, a feeling, or anything requiring memory of earlier frames.
+A skill is a single visual question about one frame. Its label becomes the detector directly, with no training, so the label must describe what would LITERALLY BE SEEN. Never an intention, a feeling, or anything requiring memory of earlier frames.
 
 ONE FRAME is the whole test. Read your label back and ask whether a single
 photograph could show it. If the answer needs two moments, it is not a label.
@@ -60,7 +60,23 @@ The six kinds:
   discriminator one of K similar things. Use when two things answer the same sentence.
   metric        a number no camera can read, like weight on a bar. It asks the person.
 
-Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer an existing one even if its label is not a perfect match for your phrasing.
+EVERY skill has a surface: "camera" for a room camera, "screen" for a shared screen. Choose by what the goal is actually about. Desk work, studying, coding, writing, reading, email, meetings and screen time are all "screen" goals - a camera pointed at a desk shows a person sitting, which is true whatever they are doing, so it cannot tell study from scrolling. Physical habits, rooms and bodies are "camera".
+
+Screen skills follow one extra rule, and it is the one that decides whether they work.
+
+The detector behind a label CANNOT READ TEXT. It recognises the overall look of a screen - a code editor, a spreadsheet, a video player, a chat app, a slide deck, a terminal. It cannot tell one file from another, Python from JavaScript, or a work document from a personal one. So:
+
+  - a "screen" GATE must name a recognisable kind of screen, not a specific thing:
+      good: "a code editor filling the screen, with a file tree and syntax-highlighted code"
+      bad:  "VS Code with main.py open"      (needs reading)
+  - the CHILD beneath it is where the specific thing goes. It is allowed to be
+    specific, because when it is uncertain a vision-language model that CAN read
+    the screen is asked to settle it:
+      good: "Python source code being edited, with def and import statements visible"
+
+Describe appearance, layout and colour, not brand names. "a dark code editor with a file tree down the left" beats "VS Code".
+
+Screen goals are nearly always an "action" child accumulating time beneath a "screen" gate. Set accumulate true on the child so sessions sum across the day, and set done_min to the number of SECONDS the goal needs - an hour is 3600.
 
 Order, via sequence_index on a use. Most goals do not need it: "twenty squats" is twenty squats whenever they happen. Use it only when an earlier step is a PRECONDITION for a later one being meaningful - reading the weight before counting bench reps, boiling the kettle before the cup is made. An event whose step is not yet due is credited to nothing, so a wrong order silently costs the user their count. When in doubt, leave it out.
 
@@ -68,7 +84,9 @@ Do NOT use sequence_index for the two halves of one repetition. Going down and c
 
 Numbers. If the sentence contains one, it belongs in done_min, and on a counter it belongs in min_count too. "Ten squats" with no min_count settles on the first rep, which is the single commonest way a goal ends up wrong.
 
-Always include exactly one gate. Call create_goal exactly once, last.`;
+Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer an existing one even if its label is not a perfect match for your phrasing. Never reuse a skill whose surface is wrong for this goal.
+
+Always include exactly one gate, and give every non-gate skill a depends_on pointing at it. Call create_goal exactly once, last.`;
 
 const TOOLS: Tool[] = [
   {
@@ -92,6 +110,13 @@ const TOOLS: Tool[] = [
             description: "What a camera would literally see. This text IS the detector.",
           },
           room: { type: "string", description: "bathroom, gym, kitchen, office, ..." },
+          surface: {
+            type: "string",
+            enum: ["camera", "screen"],
+            description:
+              "What this watches. 'screen' for a shared screen, 'camera' for a room camera. " +
+              "A skill is only ever scored against frames from its own surface.",
+          },
           depends_on: {
             type: "string",
             description: "Key of the skill that gates this one. Usually the gate.",
@@ -125,9 +150,10 @@ const TOOLS: Tool[] = [
           done_min: {
             type: "number",
             description:
-              "The number in the sentence. \"Ten squats\" is 10, \"twice a day\" is 2, "+
-              "\"two minutes\" is 120 seconds. Omit ONLY when the sentence has no "+
-              "number at all, which means once is enough.",
+              "The number in the sentence. \"Ten squats\" is 10, \"twice a day\" is 2, " +
+              "\"two minutes\" is 120 seconds. SECONDS for an accumulating action, " +
+              "so an hour is 3600. Omit ONLY when the sentence has no number at all, " +
+              "which means once is enough.",
           },
           window_start: { type: "string", description: "local HH:MM" },
           window_end: { type: "string", description: "local HH:MM, may cross midnight" },
@@ -179,10 +205,21 @@ export interface PlanDraft {
     key: string;
     label: string;
     kind: string;
+    /** "camera" | "screen" | "any". Decides which frames ever score it. */
+    surface: string;
+    /**
+     * The gate above this skill. Carried out of the draft rather than
+     * discarded: without it there is no gate tree, every skill is scored
+     * against every frame, and the two-tier "cheap question, then expensive
+     * question" structure the planner was asked to build does not exist.
+     */
+    dependsOn: string | null;
     role: string;
     classKey: string | null;
     minCount: number | null;
     sequenceIndex: number | null;
+    /** Actions: sum sessions across the day instead of settling on one. */
+    accumulate: boolean;
     isNew: boolean;
   }>;
   reused: number;
@@ -216,7 +253,10 @@ export async function plan(
   ];
 
   const known = new Map(catalogue.map((s) => [s.key, s]));
-  const drafted = new Map<string, { kind: string; label: string }>();
+  const drafted = new Map<
+    string,
+    { kind: string; label: string; surface: string; dependsOn: string | null }
+  >();
   let goal: Record<string, unknown> | null = null;
   const usage = { prompt: 0, completion: 0, reasoning: 0 };
 
@@ -259,6 +299,8 @@ export async function plan(
           drafted.set(key, {
             kind: String(call.args.kind ?? "object"),
             label: String(call.args.label ?? ""),
+            surface: call.args.surface === "screen" ? "screen" : "camera",
+            dependsOn: call.args.depends_on ? String(call.args.depends_on) : null,
           });
         }
         result = JSON.stringify({ ok: true, key, note: "drafted; now call create_goal" });
@@ -294,10 +336,19 @@ export async function plan(
       key,
       label: existing?.label ?? fresh?.label ?? "",
       kind,
+      surface: existing?.surface ?? fresh?.surface ?? "any",
+      dependsOn: existing?.dependsOn ?? fresh?.dependsOn ?? null,
       role: String(u.role ?? "required"),
       classKey: u.class_key === undefined ? null : String(u.class_key),
       minCount,
       sequenceIndex: u.sequence_index === undefined ? null : Number(u.sequence_index),
+      // An accumulating action is the shape nearly every screen goal wants -
+      // "an hour of this today", summed over however many sittings it took -
+      // so it is defaulted on rather than left to be asked for and forgotten.
+      // Without it a goal settles on the first session of any length, which
+      // would credit a full hour for thirty seconds of having the right
+      // window open.
+      accumulate: u.accumulate === undefined ? kind === "action" : Boolean(u.accumulate),
       isNew: existing === undefined,
     };
   });

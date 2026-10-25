@@ -49,6 +49,9 @@ class IncomingFrame:
     seq: int
     ts: float
     jpeg: bytes
+    #: "camera" or "screen". Defaults to camera, because a publisher old
+    #: enough not to send it is old enough to predate screens being watched.
+    surface: str = "camera"
 
 
 class Ledger:
@@ -129,6 +132,7 @@ class Ledger:
                                 seq=int(msg.get("seq", 0)),
                                 ts=float(msg.get("ts", 0)) / 1000.0,
                                 jpeg=base64.b64decode(msg.get("jpegBase64", "")),
+                                surface=str(msg.get("surface") or "camera"),
                             )
             except asyncio.CancelledError:
                 raise

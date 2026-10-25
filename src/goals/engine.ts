@@ -5,7 +5,7 @@ import type { ToolCall } from "./nebius.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
 import { sequence, stepsOf } from "./sequence.ts";
 import { plan } from "./planner.ts";
-import { ADDITIONS, SCHEMA } from "./schema.ts";
+import { ADDITIONS, MIGRATIONS, SCHEMA } from "./schema.ts";
 import type {
   EngineMessage,
   Goal,
@@ -13,6 +13,7 @@ import type {
   Instance,
   PerceptionMessage,
   Skill,
+  Surface,
   Transition,
 } from "./types.ts";
 
@@ -96,12 +97,15 @@ export class Engine implements DurableObject {
     private env: { NEBIUS_API_KEY?: string },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
-    for (const addition of ADDITIONS) {
+    for (const statement of [...ADDITIONS, ...MIGRATIONS]) {
+      // Expected to fail on every boot after the one that applied it, because
+      // SQLite has no ADD COLUMN IF NOT EXISTS. Swallowed rather than probed
+      // for: reading back the table definition to decide would be more code
+      // for the same outcome.
       try {
-        this.ctx.storage.sql.exec(addition);
+        this.ctx.storage.sql.exec(statement);
       } catch {
-        // Already present. This is the expected outcome on every boot after
-        // the one that introduced the column.
+        // Already applied.
       }
     }
     this.log = new Logger("engine");
@@ -435,11 +439,16 @@ export class Engine implements DurableObject {
     }
 
     const seq = Number(request.headers.get("X-Frame-Seq") ?? "0");
+    // The publisher knows whether this is a camera or a shared screen and
+    // nothing downstream can tell from the pixels, so it says so in a header.
+    // An older publisher that sends nothing means "camera", which is what
+    // every publisher was before screens were a thing.
+    const surface = asSurface(request.headers.get("X-Frame-Surface"), "camera");
     this.lastFrameAt.set(room, Date.now());
     const targets = this.perceptionSockets(room);
     if (targets.length > 0) {
       const jpegBase64 = base64(bytes);
-      const msg: EngineMessage = { type: "frame", room, seq, ts: Date.now(), jpegBase64 };
+      const msg: EngineMessage = { type: "frame", room, surface, seq, ts: Date.now(), jpegBase64 };
       for (const ws of targets) this.send(ws, msg);
     }
 
@@ -483,22 +492,27 @@ export class Engine implements DurableObject {
       Number(keep.exit_conf) === exitConf;
     const fit = sameBand ? keep : undefined;
 
+    // Hoisted because the timing defaults depend on it: a screen action wants
+    // a long exit and no cooldown, a camera action the opposite.
+    const surface = asSurface(body.surface ?? null, "any");
+
     this.sql(
       `INSERT OR REPLACE INTO skills
-        (key, kind, label, room, depends_on, enter_conf, exit_conf, dwell_s, exit_s,
+        (key, kind, label, room, surface, depends_on, enter_conf, exit_conf, dwell_s, exit_s,
          cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
          w, encoder_id, dim, bias, temperature, weight_state, n_labels, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       body.key,
       body.kind ?? "object",
       body.label,
       body.room ?? null,
+      surface,
       body.dependsOn ?? null,
       enterConf,
       exitConf,
       body.dwellS ?? defaultDwellS(body.kind ?? "object"),
-      body.exitS ?? defaultExitS(body.kind ?? "object"),
-      body.cooldownS ?? defaultCooldownS(body.kind ?? "object"),
+      body.exitS ?? defaultExitS(body.kind ?? "object", surface),
+      body.cooldownS ?? defaultCooldownS(body.kind ?? "object", surface),
       body.escalateAfterS ?? 60.0,
       body.minCycleS ?? defaultMinCycleS(body.kind ?? "object"),
       body.classes ? JSON.stringify(body.classes) : null,
@@ -1377,12 +1391,25 @@ export class Engine implements DurableObject {
 
 // ------------------------------------------------------------------ mapping
 
+/**
+ * Narrow anything to a surface, with the caller's default for absent.
+ *
+ * The default differs by caller and that is deliberate rather than sloppy. A
+ * frame with no header came from a publisher built before screens existed, so
+ * it is a camera. A skill with no surface was written without an opinion, so
+ * it is `any` and keeps scoring everything exactly as it used to.
+ */
+function asSurface(value: unknown, fallback: Surface): Surface {
+  return value === "camera" || value === "screen" || value === "any" ? value : fallback;
+}
+
 function toSkill(r: Record<string, unknown>): Skill {
   return {
     key: String(r.key),
     kind: r.kind as Skill["kind"],
     label: String(r.label),
     room: r.room === null ? null : String(r.room),
+    surface: asSurface(r.surface, "any"),
     dependsOn: r.depends_on === null ? null : String(r.depends_on),
     enterConf: Number(r.enter_conf),
     exitConf: Number(r.exit_conf),
@@ -1486,13 +1513,34 @@ function defaultDwellS(kind: Skill["kind"]): number {
   return 2;
 }
 
-function defaultExitS(kind: Skill["kind"]): number {
-  return kind === "counter" ? 0.05 : 2;
+/**
+ * How long a skill must stay below `exit_conf` before its session ends.
+ *
+ * Two seconds suits a camera, where dropping out of view really does mean
+ * the thing stopped. It is much too twitchy for a screen, where glancing at
+ * a message or flicking to another tab for a moment is normal inside an hour
+ * of work and should not end the session. Twenty seconds is long enough to
+ * ride out an interruption and short enough that walking away still closes
+ * the session within a sample or two of a slow screen heartbeat.
+ */
+function defaultExitS(kind: Skill["kind"], surface: Surface): number {
+  if (kind === "counter") return 0.3;
+  if (surface === "screen" && (kind === "action" || kind === "object")) return 20;
+  return 2;
 }
 
-function defaultCooldownS(kind: Skill["kind"]): number {
+/**
+ * How long after a session ends before another may start.
+ *
+ * A minute is right for a camera action: it stops one trip to the bathroom
+ * being recorded as three. It is actively harmful for an accumulating screen
+ * goal, where sessions are summed rather than counted - every interruption
+ * would then cost a minute of credit that the person was in fact working
+ * through, and a choppy hour would score as half of one.
+ */
+function defaultCooldownS(kind: Skill["kind"], surface: Surface): number {
   if (kind === "counter") return 0;
-  if (kind === "action") return 60;
+  if (kind === "action") return surface === "screen" ? 0 : 60;
   return 10;
 }
 

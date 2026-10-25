@@ -22,6 +22,22 @@
  */
 export type SkillKind = "gate" | "object" | "action" | "counter" | "discriminator" | "metric";
 
+/**
+ * What a skill is looking at, and what a frame came from.
+ *
+ * A room camera and a shared screen are both just JPEGs by the time they
+ * reach perception, and they reach it down the same socket. The distinction
+ * has to be carried explicitly or it is lost: a screen skill scored against a
+ * bathroom camera is merely wrong, but a camera skill scored against
+ * screenshots also *calibrates* against them, and calibration is what decides
+ * where its thresholds sit. That failure is silent.
+ *
+ * `any` is for skills that genuinely do not care, and is the default so that
+ * every skill written before this distinction existed keeps behaving exactly
+ * as it did.
+ */
+export type Surface = "camera" | "screen" | "any";
+
 /** Kinds perception scores. A metric never reaches the encoder. */
 export const SCORED_KINDS: readonly SkillKind[] = [
   "gate",
@@ -63,6 +79,8 @@ export interface Skill {
   /** What a camera would literally see. This text is the zero-shot weight. */
   label: string;
   room: string | null;
+  /** Camera frames, screen frames, or both. See `Surface`. */
+  surface: Surface;
   /** Self-referencing: the gate tree, written by the planner. */
   dependsOn: string | null;
 
@@ -239,7 +257,15 @@ export interface Transition {
 /** Engine -> perception. The registry, pushed rather than polled for. */
 export type EngineMessage =
   | { type: "registry"; skills: Skill[]; encoderId: string | null }
-  | { type: "frame"; room: string; seq: number; ts: number; jpegBase64: string }
+  | {
+      type: "frame";
+      room: string;
+      /** Where this picture came from, so only matching skills score it. */
+      surface: Surface;
+      seq: number;
+      ts: number;
+      jpegBase64: string;
+    }
   | { type: "rate"; room: string; hz: number }
   /**
    * A person's answer, on its way to becoming a training example.

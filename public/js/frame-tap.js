@@ -36,6 +36,60 @@ const NOISE_FLOOR = 0.08;
 const HEARTBEAT_MS = 30_000;
 
 /**
+ * The same, for a shared screen, and much shorter on purpose.
+ *
+ * The motion gate is built on an assumption that is true of a room and false
+ * of a screen: that stillness means nothing is happening. An empty room is
+ * worth nothing and a motionless screen is worth a great deal, because
+ * reading a document for twenty minutes looks identical to a screensaver and
+ * is exactly the behaviour a goal wants to credit. Gating it would make the
+ * system go quiet during precisely the thing it is supposed to be watching.
+ *
+ * So a screen is never truly gated. It falls back to this slow heartbeat,
+ * which keeps a still screen costing about a fifth of what an active one
+ * does rather than costing nothing and seeing nothing.
+ */
+const SCREEN_IDLE_MS = 5_000;
+
+/**
+ * Longest edge of an uploaded frame, by surface.
+ *
+ * 640 is right for a camera: the encoder works at a few hundred pixels
+ * square, so anything more is bandwidth spent on detail that is resized away
+ * before it is looked at. It is wrong for a screen, and quietly so. The cheap
+ * embedding does not care either way, but escalation does - the teacher's
+ * whole job on a screen is to read what is on it, and at 640px a 1920px
+ * desktop renders body text as a grey smear. The model then answers UNSURE
+ * forever, which reads as a model that cannot do the task rather than as a
+ * picture that never contained the answer.
+ */
+const MAX_EDGE = { camera: 640, screen: 1280 };
+
+/**
+ * JPEG quality, by surface. Screens are cheaper per pixel than photographs -
+ * flat colour and sharp edges compress well - but they are also four times
+ * the area here, so this claws back some of the bandwidth that buys.
+ */
+const QUALITY = { camera: 0.8, screen: 0.7 };
+
+/**
+ * Fraction of changed cells that counts as movement, by surface.
+ *
+ * A camera needs a real threshold because a camera is never quite still:
+ * sensor noise and a flickering light move a few cells constantly, and 0.012
+ * is what separates that from a person crossing the room.
+ *
+ * A screen has no sensor and therefore no noise. A changed cell is a cell
+ * that genuinely changed, so the threshold drops to roughly one cell in a
+ * thousand - about one cell of the 32x32 grid. Keeping the camera's figure
+ * here would classify typing and scrolling as stillness, because editing a
+ * line of text moves a small part of the screen very distinctly rather than
+ * a large part of it faintly, which is the opposite of what the measure was
+ * tuned for.
+ */
+const THRESHOLD = { camera: 0.012, screen: 0.001 };
+
+/**
  * A hidden tab is a stopped tab, and nothing about it looks broken.
  *
  * Chrome clamps setTimeout in a background tab to once a second, then to
@@ -74,10 +128,17 @@ export class FrameTap {
   /**
    * @param {HTMLVideoElement} video  the live preview, already playing
    * @param {string} room             which room these frames belong to
+   * @param {"camera"|"screen"} surface  what is being shared
    */
-  constructor(video, room) {
+  constructor(video, room, surface = "camera") {
     this.video = video;
     this.room = room;
+    /**
+     * Nothing downstream can tell a screenshot from a photograph reliably,
+     * and the whole pipeline behaves differently for each, so the one place
+     * that knows for certain says so rather than letting it be inferred.
+     */
+    this.surface = surface === "screen" ? "screen" : "camera";
 
     this.canvas = document.createElement("canvas");
     this.ctx = this.canvas.getContext("2d", { willReadFrequently: true });
@@ -89,7 +150,7 @@ export class FrameTap {
     this.seq = 0;
     this.timer = null;
     this.undelivered = 0;
-    this.threshold = 0.012;
+    this.threshold = THRESHOLD[this.surface];
 
     /** Requested by perception, which knows what the skills need. */
     this.hz = 0.5;
@@ -173,21 +234,24 @@ export class FrameTap {
     this.prev = cur;
     this.stats.lastMoved = moved;
 
-    const stale = Date.now() - this.lastSentAt > HEARTBEAT_MS;
+    // A still screen is still worth looking at, so its gate is a slowdown
+    // rather than a stop. A still room is worth nothing, so its gate stays
+    // the hard stop it was built to be.
+    const quiet = this.surface === "screen" ? SCREEN_IDLE_MS : HEARTBEAT_MS;
+    const stale = Date.now() - this.lastSentAt > quiet;
     if (moved < this.threshold && !stale) {
       this.stats.gated++;
       return;
     }
 
-    // Cap the long edge. The encoder works at a few hundred pixels square, so
-    // sending 1280x720 would spend bandwidth on detail that is resized away
-    // before it is ever looked at.
-    const scale = Math.min(1, 640 / Math.max(v.videoWidth, v.videoHeight));
+    const scale = Math.min(1, MAX_EDGE[this.surface] / Math.max(v.videoWidth, v.videoHeight));
     this.canvas.width = Math.round(v.videoWidth * scale);
     this.canvas.height = Math.round(v.videoHeight * scale);
     this.ctx.drawImage(v, 0, 0, this.canvas.width, this.canvas.height);
 
-    const blob = await new Promise((r) => this.canvas.toBlob(r, "image/jpeg", 0.8));
+    const blob = await new Promise((r) =>
+      this.canvas.toBlob(r, "image/jpeg", QUALITY[this.surface]),
+    );
     if (!blob) return;
 
     // Dropping a frame beats queueing it. A backlog would deliver pictures of
@@ -213,7 +277,11 @@ export class FrameTap {
     try {
       res = await fetch(`/api/frames/${encodeURIComponent(this.room)}`, {
         method: "POST",
-        headers: { "Content-Type": "image/jpeg", "X-Frame-Seq": String(seq) },
+        headers: {
+          "Content-Type": "image/jpeg",
+          "X-Frame-Seq": String(seq),
+          "X-Frame-Surface": this.surface,
+        },
         body: blob,
       });
     } catch {

@@ -56,6 +56,28 @@ SkillKind = (
 #: no camera can see it, so it never reaches the encoder.
 SCORED_KINDS = frozenset({"gate", "object", "action", "counter", "discriminator"})
 
+#: What a skill is looking at. A room camera and a shared screen arrive down
+#: the same socket and are indistinguishable once they are JPEGs, so the
+#: distinction is carried rather than inferred.
+SURFACES = frozenset({"camera", "screen", "any"})
+
+
+def applies_to(skill: Skill, surface: str) -> bool:
+    """
+    Should this skill score a frame from `surface`?
+
+    The reason this exists is not that a screen skill scored against a camera
+    returns a wrong answer - it returns a low one, which looks fine. It is
+    that every score also feeds calibration, and calibration is what decides
+    where the thresholds sit. Mixing surfaces means a bathroom skill learns
+    its idea of an ordinary frame partly from screenshots, and then drifts in
+    a way nothing reports.
+
+    `any` on either side means no opinion, which is what every skill written
+    before surfaces existed has.
+    """
+    return skill.surface == "any" or surface == "any" or skill.surface == surface
+
 
 def sigmoid(x: np.ndarray | float) -> np.ndarray:
     # Written through tanh rather than exp so a large negative input returns
@@ -85,6 +107,8 @@ class Skill:
     key: str
     kind: str
     label: str
+    #: "camera", "screen", or "any". See `applies_to`.
+    surface: str = "any"
     w: np.ndarray | None = None
     bias: float = 0.0
     temperature: float = 1.0

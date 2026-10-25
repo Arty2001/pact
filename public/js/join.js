@@ -174,7 +174,11 @@ async function start() {
     // Sampling is deliberately separate from the SFU leg. The wall can be
     // watching with nobody analysing, and perception can be analysing with
     // nobody watching; coupling them would break both cases.
-    tap = new FrameTap(preview, device.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"));
+    tap = new FrameTap(
+      preview,
+      device.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+      device.kind === "screen" ? "screen" : "camera",
+    );
     tap.start();
     setInterval(() => {
       if (!tap) return;
