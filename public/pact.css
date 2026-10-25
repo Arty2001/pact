@@ -301,7 +301,9 @@ a { color: var(--proved-text); }
 .stage {
   position: relative;
   background: #070B10;
-  aspect-ratio: 16 / 9;
+  /* No fixed ratio: the wall decides the height, because two panes side by
+     side in a 16/9 box would each be 8:9 and show a slice of a room. */
+  min-height: 220px;
   overflow: hidden;
   /* Inset by a hair so the glass edge stays visible around the frame -
      a dark rectangle flush to the border reads as a hole in the pane. */
@@ -309,6 +311,60 @@ a { color: var(--proved-text); }
   border-radius: calc(var(--r3) - 6px);
 }
 .stage video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* The wall. auto-fit rather than a count, so three cameras on a wide screen
+   sit in a row and the same three stack on a phone without a breakpoint
+   per number. */
+.wall {
+  display: grid;
+  gap: 5px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+.wall:empty { display: none; }
+
+.pane {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #04070A;
+  border-radius: calc(var(--r3) - 8px);
+  overflow: hidden;
+  cursor: pointer;
+}
+/* One pane fills the stage as before; the ratio only matters once there
+   are several and they have to agree on a shape. */
+.wall:has(.pane:only-child) { gap: 0; }
+
+/* Which pane the chart and the count are following. A ring rather than a
+   hue: it is a selection, not a verdict about what the camera saw. */
+.pane.lead { box-shadow: inset 0 0 0 2px var(--proved); }
+
+.pane-name {
+  position: absolute;
+  left: 9px; top: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--on-dark);
+  background: rgba(7, 11, 16, .64);
+  padding: 3px 8px;
+  border-radius: 5px;
+  pointer-events: none;
+  max-width: calc(100% - 18px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Reactions belong to the pane that saw them, which is the whole reason a
+   wall is worth having: two rooms, and you can tell which one counted. */
+.pane-toasts {
+  position: absolute;
+  left: 9px; right: 9px; bottom: 9px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 6px;
+  pointer-events: none;
+}
+.pane-toasts .toast { padding: 7px 11px 7px 9px; }
+.pane-toasts .toast .lead { font-size: 15px; min-width: 16px; }
+.pane-toasts .toast .line { font-size: 11.5px; }
 
 .stage-empty {
   position: absolute; inset: 0;

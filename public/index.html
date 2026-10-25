@@ -66,7 +66,10 @@
       <div class="cams" id="cams"></div>
 
       <div class="stage" id="stage">
-        <video id="feed" autoplay muted playsinline></video>
+        <!-- One pane per camera you have turned on. The chips above are a
+             multi-select, not a switch: watching two rooms at once is the
+             point of a wall. -->
+        <div class="wall" id="wall"></div>
         <div class="stage-empty" id="stage-empty">
           <b>No camera is publishing</b>
           <span>Open <strong>/join</strong> on a phone or laptop and start a camera. It appears here, and perception subscribes to it automatically.</span>

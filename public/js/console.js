@@ -35,6 +35,11 @@ const QUIET_MS = 20000;
 
 let state = { skills: [], goals: [], questions: [], perception: [], rooms: [] };
 let devices = [];
+/** deviceId -> { device, pc, pane, toasts }. Several at once, on purpose. */
+const feeds = new Map();
+/** The pane the chart and the hero count follow. One of them, not all. */
+let leadId = null;
+/** Kept for the places that only ever cared about the followed camera. */
 let current = null; // { device, pc }
 
 /** skillKey -> [{ score, phase }], one series per skill scoring this camera. */
@@ -106,8 +111,11 @@ const TOAST_MS = 4200;
  * moment. Watching your own rep land is the thing the product is for, and
  * a number quietly incrementing in the corner of a video is not that.
  */
-function toast({ kind = "", lead, line, sub = "" }) {
-  const host = $("toasts");
+function toast({ kind = "", lead, line, sub = "", room = null }) {
+  // On the pane that saw it. With two rooms on the wall, "a rep counted" is
+  // only useful if you can tell which room counted it.
+  const feed = room === null ? null : [...feeds.values()].find((f) => f.device.room === room);
+  const host = feed?.toasts ?? $("toasts");
   if (host === null) return;
 
   const el = document.createElement("div");
@@ -120,7 +128,10 @@ function toast({ kind = "", lead, line, sub = "" }) {
 
   // Oldest falls off rather than letting a burst of reps bury the page.
   host.prepend(el);
-  while (host.children.length > 4) host.lastElementChild?.remove();
+  // Fewer on a pane than on the page: a pane is a fraction of the height
+  // and a stack of four would cover the thing being reported on.
+  const cap = host === $("toasts") ? 4 : 2;
+  while (host.children.length > cap) host.lastElementChild?.remove();
 
   requestAnimationFrame(() => el.classList.add("in"));
   const go = () => {
@@ -165,6 +176,7 @@ function announce(list) {
         lead: "+1",
         line: goal ? goal.description : tr.skillKey,
         sub: elsewhere + (progress || tr.skillKey),
+        room: tr.room ?? null,
       });
     } else if (tr.kind === "rejected") {
       // A near-miss is the most useful toast there is: it is the only one
@@ -173,9 +185,9 @@ function announce(list) {
         tr.neededConf > 0
           ? `peak ${num(tr.peak)}, needed ${num(tr.neededConf)}`
           : `held ${ms(tr.heldMs)}, needed ${ms(tr.neededMs)}`;
-      toast({ kind: "near", lead: "—", line: `${tr.skillKey} nearly counted`, sub: elsewhere + why });
+      toast({ kind: "near", lead: "—", line: `${tr.skillKey} nearly counted`, sub: elsewhere + why, room: tr.room ?? null });
     } else if (tr.kind === "escalate") {
-      toast({ kind: "ask", lead: "?", line: `${tr.skillKey} asked for a second opinion`, sub: elsewhere + (tr.reason ?? "") });
+      toast({ kind: "ask", lead: "?", line: `${tr.skillKey} asked for a second opinion`, sub: elsewhere + (tr.reason ?? ""), room: tr.room ?? null });
     }
   }
   announcedUntil = newest;
@@ -951,12 +963,13 @@ function syncLegend(scores) {
 // ------------------------------------------------------------------ video --
 
 /**
- * One pill per camera on the wall, plus a way to add another.
+ * One pill per camera, and the pills are a multi-select.
  *
  * Every camera runs the whole skill set against its own frames, with its own
  * motion gate and its own calibration fitted from its own background - so
- * this strip chooses what to look at, not what is running. Hidden entirely
- * when there is nothing to choose between.
+ * this chooses what to LOOK at, not what is running. Turning two on shows
+ * two, because the question a wall answers is which room something happened
+ * in, and one pane at a time cannot answer it.
  */
 function renderCams() {
   const host = $("cams");
@@ -966,12 +979,20 @@ function renderCams() {
   if (devices.length === 0) return;
 
   for (const d of devices) {
+    const on = feeds.has(d.id);
     const el = document.createElement("button");
     el.type = "button";
-    el.className = "cam" + (current?.device?.id === d.id ? " on" : "");
-    el.setAttribute("aria-pressed", String(current?.device?.id === d.id));
-    el.innerHTML = '<i></i><span>' + esc(d.name) + "</span>";
-    el.addEventListener("click", () => void showCamera(d));
+    el.className = "cam" + (on ? " on" : "");
+    el.setAttribute("aria-pressed", String(on));
+    el.innerHTML = "<i></i><span>" + esc(d.name) + "</span>";
+    el.addEventListener("click", () => {
+      // The last one on stays on. Turning every camera off leaves a stage
+      // saying nothing is publishing while something is, which reads as a
+      // fault rather than as a choice.
+      if (on && feeds.size > 1) dropFeed(d.id);
+      else if (!on) void addFeed(d);
+      else setLead(d.id);
+    });
     host.append(el);
   }
 
@@ -983,253 +1004,88 @@ function renderCams() {
   host.append(add);
 }
 
-async function showCamera(device) {
-  if (current?.device?.id === device.id) return;
-  teardown();
+/** The pane the chart follows. Scores are per camera; a chart is not. */
+function setLead(id) {
+  const feed = feeds.get(id);
+  if (feed === undefined || leadId === id) return;
+  leadId = id;
+  current = { device: feed.device, pc: feed.pc };
+  activeRoom = feed.device.room ?? null;
+  // The old camera's series would otherwise go on drawing beside the new
+  // one's, two rooms on one pair of axes, agreeing about nothing.
+  traces.clear();
+  focusSkill = null;
+  $("cam-name").textContent = feed.device.name;
+  $("cam-meta").textContent = `${feed.device.kind} · ${feed.device.trackNames.length} track`;
+  for (const [fid, f] of feeds) f.pane.classList.toggle("lead", fid === id);
+  renderCams();
+  drawPlot();
+}
+
+async function addFeed(device) {
+  if (feeds.has(device.id)) return;
+
+  const pane = document.createElement("div");
+  pane.className = "pane";
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  const name = document.createElement("span");
+  name.className = "pane-name";
+  name.textContent = device.name;
+  const toasts = document.createElement("div");
+  toasts.className = "pane-toasts";
+  pane.append(video, name, toasts);
+  pane.addEventListener("click", () => setLead(device.id));
+
   try {
     const { pc, stream } = await subscribe(device);
-    current = { device, pc };
-    // Scores are per camera, so switching has to drop the old camera's
-    // series rather than draw two rooms onto one pair of axes.
-    activeRoom = device.room ?? null;
-    traces.clear();
-    focusSkill = null;
-    $("feed").srcObject = stream;
+    video.srcObject = stream;
+    feeds.set(device.id, { device, pc, pane, toasts });
+    $("wall").append(pane);
     $("stage-empty").hidden = true;
     $("hud").hidden = false;
-    $("cam-name").textContent = device.name;
-    $("cam-meta").textContent = `${device.kind} · ${device.trackNames.length} track`;
-    renderCams();
-    drawPlot();
+    if (leadId === null) setLead(device.id);
+    else renderCams();
   } catch {
     // A feed that will not connect should not blank the page; the goal data
     // beside it is still true.
-    $("stage-empty").hidden = false;
+    pane.remove();
+    if (feeds.size === 0) $("stage-empty").hidden = false;
     renderCams();
   }
 }
 
+function dropFeed(id) {
+  const feed = feeds.get(id);
+  if (feed === undefined) return;
+  try {
+    feed.pc?.close();
+  } catch {
+    // Already closed.
+  }
+  feed.pane.remove();
+  feeds.delete(id);
+  if (leadId === id) {
+    leadId = null;
+    const next = [...feeds.keys()][0];
+    if (next !== undefined) setLead(next);
+    else {
+      current = null;
+      activeRoom = null;
+      traces.clear();
+      $("hud").hidden = true;
+      $("stage-empty").hidden = false;
+      drawPlot();
+    }
+  }
+  renderCams();
+}
+
+/** Everything off, for a page that is losing its cameras altogether. */
 function teardown() {
-  current?.pc?.close();
-  current = null;
-  $("feed").srcObject = null;
-}
-
-// --------------------------------------------------------------- speaking --
-
-/**
- * Voice, in and out.
- *
- * Recognition runs in this browser and only the transcript travels, which is
- * the same bargain the motion gate and the encoder make: do the work where
- * the data already is, and send only what it meant. Audio never leaves the
- * device, which is also the only honest answer to what a microphone in your
- * front room is doing.
- */
-const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
-let listener = null;
-/** The button's state: whether the user wants it listening at all. */
-let listening = false;
-/** Whether it is listening right now, which is false while it talks. */
-let deaf = false;
-/** What it last said, and when it stopped saying it. */
-let lastSpoken = "";
-let spokeUntil = 0;
-
-/**
- * A room microphone hears the speaker in the same room.
- *
- * Left running, the assistant transcribes its own reply, treats it as a new
- * question, answers that, and hears itself again. The recogniser is stopped
- * for as long as it is thinking or talking - there is nothing worth hearing
- * in that window anyway, because the person is listening.
- */
-function deafen() {
-  deaf = true;
-  try {
-    listener?.stop();
-  } catch {
-    // Already stopped; the onend handler will not restart while deaf.
-  }
-}
-
-function undeafen() {
-  deaf = false;
-  if (!listening || listener === null) return;
-  try {
-    listener.start();
-  } catch {
-    // Already running, which is the harmless half of this race.
-  }
-}
-
-/**
- * Did we just say this?
- *
- * Belt and braces for the moment between the speaker finishing and the
- * recogniser being told to listen again, where a reverberant room can still
- * deliver the tail of our own sentence.
- */
-function isOwnEcho(text) {
-  if (Date.now() - spokeUntil > 1500) return false;
-  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
-  const said = norm(lastSpoken);
-  const got = norm(text);
-  return got.length > 0 && (said.includes(got) || got.includes(said.slice(0, 40)));
-}
-
-function setAiState(text, thinking = false) {
-  $("ai-state").textContent = text;
-  $("ai").classList.toggle("thinking", thinking);
-}
-
-function showExchange(heard, say, ui = {}) {
-  const h = $("ai-heard");
-  h.hidden = !heard;
-  if (heard) h.textContent = heard;
-  $("ai-said").textContent = say;
-  $("ai").dataset.tone = ui.tone ?? "calm";
-  applyUi(ui);
-}
-
-/**
- * The page rearranging itself around what was just said.
- *
- * Only ever moves attention - focus a goal, narrow the chart, hold a line.
- * Nothing the assistant says can change what the ledger recorded, so the
- * worst this can do is look at the wrong thing.
- */
-function applyUi(ui) {
-  if (ui.focusGoal) {
-    focusGoal = ui.focusGoal;
-    renderGoals();
-    renderTally();
-  }
-  if (ui.focusSkill && traces.has(ui.focusSkill)) {
-    focusSkill = ui.focusSkill;
-    drawPlot();
-  }
-  if (ui.banner) $("ai-said").textContent = ui.banner;
-}
-
-function speak(text) {
-  const synth = globalThis.speechSynthesis;
-  if (!synth || !text) return;
-  synth.cancel();
-  lastSpoken = text;
-  deafen();
-
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = 1.04;
-  u.pitch = 1;
-
-  const done = () => {
-    spokeUntil = Date.now();
-    // A short wait before listening again: a speaker does not stop dead, and
-    // the first thing a mic hears after it is the end of our own sentence
-    // coming back off the walls.
-    setTimeout(undeafen, 450);
-  };
-  u.onend = done;
-  u.onerror = done;
-  // Some browsers never fire onend. Falling back on a length estimate is
-  // worse than a real event and far better than staying deaf forever.
-  setTimeout(done, 1200 + text.length * 70);
-
-  synth.speak(u);
-}
-
-async function ask(text, { aloud = true } = {}) {
-  if (!text.trim()) return;
-  showExchange(text, "…");
-  setAiState("thinking", true);
-  try {
-    const res = await fetch("/api/engine/assistant", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, room: activeRoom }),
-    });
-    const { say = "I lost that one.", ui = {} } = await res.json().catch(() => ({}));
-    showExchange(text, say, ui);
-    if (aloud && say) speak(say);
-    else undeafen();
-  } catch {
-    showExchange(text, "I could not reach the engine.");
-    undeafen();
-  } finally {
-    setAiState(listening ? "listening" : "idle", false);
-  }
-}
-
-function startListening() {
-  if (!Speech || listening) return;
-  listener = new Speech();
-  listener.lang = "en-US";
-  listener.interimResults = true;
-  listener.continuous = false;
-
-  listener.onresult = (e) => {
-    const last = e.results[e.results.length - 1];
-    const text = last[0].transcript.trim();
-    if (deaf || isOwnEcho(text)) return;
-    // Interim results stream into the "you" line, so the band reacts while
-    // you are still talking rather than after you stop.
-    $("ai-heard").hidden = false;
-    $("ai-heard").textContent = text;
-    if (last.isFinal) {
-      // Deaf from the moment there is something to answer: thinking and
-      // speaking are both windows where the only voice is ours.
-      deafen();
-      void ask(text);
-    }
-  };
-  listener.onerror = (e) => {
-    // "no-speech" and "aborted" are what a quiet room and our own stop()
-    // produce. Neither is a reason to turn the microphone off.
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    stopListening();
-  };
-  listener.onend = () => {
-    // Chrome ends a non-continuous session on every pause. Restart while the
-    // button is still pressed, or one sentence is all you ever get - but not
-    // while we are talking, which is the whole point.
-    if (listening && !deaf) {
-      try {
-        listener.start();
-      } catch {
-        stopListening();
-      }
-    }
-  };
-
-  listening = true;
-  $("mic").setAttribute("aria-pressed", "true");
-  setAiState("listening");
-  try {
-    listener.start();
-  } catch {
-    stopListening();
-  }
-}
-
-function stopListening() {
-  listening = false;
-  deaf = false;
-  $("mic").setAttribute("aria-pressed", "false");
-  setAiState("idle");
-  try {
-    listener?.stop();
-  } catch {
-    // Already stopped; nothing to undo.
-  }
-  listener = null;
-}
-
-if (Speech === null) {
-  $("mic").disabled = true;
-  $("mic").title = "This browser has no speech recognition. Chrome does.";
-} else {
-  $("mic").addEventListener("click", () => (listening ? stopListening() : startListening()));
+  for (const id of [...feeds.keys()]) dropFeed(id);
 }
 
 // ---------------------------------------------------------------- sockets --
@@ -1298,13 +1154,18 @@ function hubSocket() {
     else return;
 
     renderMeta();
+    // Anything that has gone off the wall takes its pane with it; anything
+    // new waits to be turned on, except when nothing is on at all.
+    for (const id of [...feeds.keys()]) {
+      if (!devices.some((d) => d.id === id)) dropFeed(id);
+    }
     if (devices.length === 0) {
       teardown();
       $("stage-empty").hidden = false;
       $("hud").hidden = true;
       renderCams();
-    } else if (!current || !devices.some((d) => d.id === current.device.id)) {
-      void showCamera(devices[0]);
+    } else if (feeds.size === 0) {
+      void addFeed(devices[0]);
     } else {
       renderCams();
     }
