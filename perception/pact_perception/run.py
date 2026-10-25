@@ -39,7 +39,7 @@ import signal
 import sys
 import time
 from collections import deque
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -75,33 +75,46 @@ _CALIBRATION_WINDOW = 600
 _CALIBRATE_AFTER = 60
 
 
+@dataclass
+class Room:
+    """
+    Everything that is per-camera rather than per-skill.
+
+    One worker watches the whole wall - it connects with room "*" and the
+    Engine fans every camera's frames to it - so none of this can be global.
+    Two cameras sharing one set of state machines would interleave their
+    scores into the same dwell timers and credit a session that neither
+    camera actually saw. The skills and their weights ARE shared, which is
+    the point of the design; what is not shared is where each camera
+    currently is in its own state machine.
+    """
+
+    gate: MotionGate
+    states: dict[str, State] = field(default_factory=dict)
+    history: dict[str, list[float]] = field(default_factory=dict)
+    calibrated: set[str] = field(default_factory=set)
+    warming: set[str] = field(default_factory=set)
+    recent: deque[tuple[float, Any]] = field(
+        default_factory=lambda: deque(maxlen=FRAMES_PER_CALL * 3)
+    )
+
+
 class Runner:
     def __init__(self, cfg: Config, log: Logger, embedder: Embedder) -> None:
         self.cfg = cfg
         self.log = log
         self.embedder = embedder
         self.ledger = Ledger(cfg.hub, cfg.room, log, cfg.token)
-        self.gate = MotionGate(cfg.motion_threshold)
         self.store = Store(cfg.store_path, retain_days=cfg.retain_days)
+        #: room name -> its own gate, state machines and recent frames.
+        self.rooms: dict[str, Room] = {}
 
         # The teacher is optional. Without a key everything still runs; it
         # just never escalates, and the mid-band cases go unresolved rather
         # than failing. A missing credential should degrade, not stop.
         self.teacher = Teacher(cfg.nebius_key, log, cfg.teacher_model) if cfg.nebius_key else None
 
-        #: Recent frames, so an escalation has something to send. Kept as
-        #: decoded images rather than paths because the source may be a
-        #: socket with nothing on disk behind it.
-        self._recent: deque[tuple[float, Any]] = deque(maxlen=FRAMES_PER_CALL * 3)
-
         self.skills: dict[str, Skill] = {}
-        self.states: dict[str, State] = {}
-        #: Rolling background cosines per skill, for fitting bias/temperature.
-        self.history: dict[str, list[float]] = {}
-        self.calibrated: set[str] = set()
-        #: Skills we have announced we are collecting background for, so the
-        #: notice appears once rather than per frame.
-        self._warming: set[str] = set()
         #: Keys whose freshly fitted calibration still has to be sent up.
         #: Queued because _remember runs inside the scoring path and must not
         #: await on a socket.
@@ -158,9 +171,10 @@ class Runner:
             )
 
         self.skills = fresh
-        for key in list(self.states):
-            if key not in fresh:
-                del self.states[key]
+        for room in self.rooms.values():
+            for key in list(room.states):
+                if key not in fresh:
+                    del room.states[key]
 
         # Anything with no vector, or one fitted elsewhere, needs its label
         # embedded. Queued rather than done here because this callback runs
@@ -218,7 +232,16 @@ class Runner:
 
     # -------------------------------------------------------------- scoring
 
-    def _eligible(self) -> list[Skill]:
+    def room(self, name: str) -> Room:
+        """The state for one camera, created the first time it sends a frame."""
+        room = self.rooms.get(name)
+        if room is None:
+            room = Room(gate=MotionGate(self.cfg.motion_threshold))
+            self.rooms[name] = room
+            self.log.info("service.start", detail="watching", room=name)
+        return room
+
+    def _eligible(self, room: Room) -> list[Skill]:
         """
         Skills whose gate chain is open.
 
@@ -235,7 +258,7 @@ class Runner:
             open_chain = True
             hops = 0
             while parent and hops < 8:
-                st = self.states.get(parent)
+                st = room.states.get(parent)
                 if st is None or st.phase != "active":
                     open_chain = False
                     break
@@ -253,18 +276,21 @@ class Runner:
             hz = max(hz, need)
         return min(hz, self.cfg.max_hz)
 
-    async def _on_frame(self, image: Any, seq: int, now: float, source: str) -> float:
+    async def _on_frame(
+        self, image: Any, seq: int, now: float, source: str, room_name: str
+    ) -> float:
         """Score one frame. Returns the sample rate the next one should use."""
-        self.log.debug("frame.sampled", seq=seq, source=source)
+        room = self.room(room_name)
+        self.log.debug("frame.sampled", seq=seq, source=source, room=room_name)
 
-        motion = self.gate.check(image)
+        motion = room.gate.check(image)
         # A motion gate cannot see a person standing still, and that is
         # exactly when it matters most: once a session is open, frames are
         # what decide when it ends. Gating them would let the score sag
         # unobserved and then report a near-miss for a thing that was in
         # fact happening the whole time. So the gate only guards the idle
         # case, which is the case it was there to make cheap.
-        busy = any(st.phase != "idle" for st in self.states.values())
+        busy = any(st.phase != "idle" for st in room.states.values())
         if not motion.passed and not busy:
             # The cheapest possible outcome: no embedding, no scores, nothing
             # sent. An empty room should cost nothing.
@@ -280,15 +306,16 @@ class Runner:
         # debugging. The image is what a teacher call sends; the embedding is
         # what a label is eventually fitted against. Discarding either would
         # mean an answer taught the system nothing.
-        self._recent.append((now, image))
+        room.recent.append((now, image))
         self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id)
 
-        eligible = self._eligible()
-        for skill in eligible:
-            await self._score_one(skill, embedding.vector, now)
-        return self._rate(self._eligible())
+        for skill in self._eligible(room):
+            await self._score_one(skill, embedding.vector, now, room, room_name)
+        return self._rate(self._eligible(room))
 
-    async def _score_one(self, skill: Skill, e: np.ndarray, now: float) -> None:
+    async def _score_one(
+        self, skill: Skill, e: np.ndarray, now: float, room: Room, room_name: str
+    ) -> None:
         try:
             if skill.kind == "discriminator":
                 dist = discriminate(skill, e, self.embedder.encoder_id)
@@ -309,9 +336,9 @@ class Runner:
             self.log.warn("service.error", skill=skill.key, detail=str(err))
             return
 
-        self._remember(skill, e)
+        self._remember(skill, e, room)
         self.log.trace("skill.score", skill=skill.key, score=round(value, 4))
-        state_now = self.states.get(skill.key)
+        state_now = room.states.get(skill.key)
         self.store.observe(
             skill.key,
             now,
@@ -328,9 +355,9 @@ class Runner:
         # seen. Observed for real: a session opened at 0.506 before the first
         # calibration landed, then could not close because the post-fit scores
         # straddled exit_conf. Collect the background first, then start.
-        if skill.kind != "discriminator" and skill.key not in self.calibrated:
-            if skill.key not in self._warming:
-                self._warming.add(skill.key)
+        if skill.kind != "discriminator" and skill.key not in room.calibrated:
+            if skill.key not in room.warming:
+                room.warming.add(skill.key)
                 self.log.info(
                     "service.start",
                     detail="calibrating",
@@ -339,17 +366,19 @@ class Runner:
                 )
             return
 
-        state = self.states.get(skill.key, initial(now))
+        state = room.states.get(skill.key, initial(now))
         nxt, event = step(state, value, now, skill.params)
-        self.states[skill.key] = nxt
+        room.states[skill.key] = nxt
         if event is None:
             return
         if event.kind == "escalate":
-            await self._escalate(skill, event, now)
+            await self._escalate(skill, event, now, room, room_name)
             return
-        await self._emit(skill, event)
+        await self._emit(skill, event, room_name=room_name)
 
-    async def _escalate(self, skill: Skill, event: Event, now: float) -> None:
+    async def _escalate(
+        self, skill: Skill, event: Event, now: float, room: Room, room_name: str
+    ) -> None:
         """
         Spend a teacher call on a case the thresholds could not settle.
 
@@ -368,15 +397,15 @@ class Runner:
                 skill=skill.key,
                 detail="would escalate, but no NEBIUS_API_KEY",
             )
-            await self._emit(skill, event)
+            await self._emit(skill, event, room_name=room_name)
             return
 
-        frames = [img for _, img in list(self._recent)[-FRAMES_PER_CALL:]]
+        frames = [img for _, img in list(room.recent)[-FRAMES_PER_CALL:]]
         verdict = await asyncio.to_thread(
             self.teacher.adjudicate, skill.label, frames, skill.classes
         )
         if verdict is None:
-            await self._emit(skill, event)
+            await self._emit(skill, event, room_name=room_name)
             return
 
         label = verdict.label
@@ -396,6 +425,7 @@ class Runner:
                 skill,
                 replace(event, kind="entered", reason=f"teacher: {verdict.reason}"[:120]),
                 verdict_by="vlm",
+                room_name=room_name,
             )
             return
 
@@ -403,6 +433,7 @@ class Runner:
             skill,
             replace(event, kind="rejected", reason=f"teacher: {verdict.reason}"[:120]),
             verdict_by="vlm" if label == 0 else None,
+            room_name=room_name,
         )
 
     async def _maybe_refit(self, skill: Skill) -> None:
@@ -448,7 +479,8 @@ class Runner:
         )
         # The fit chose its own sharpness, so the calibration fitted from
         # background is superseded here rather than kept alongside.
-        self.calibrated.add(skill.key)
+        for r in self.rooms.values():
+            r.calibrated.add(skill.key)
         await self.ledger.weights(
             skill.key,
             result.w,
@@ -460,7 +492,7 @@ class Runner:
             skill.key, result.n_examples, result.holdout_before, result.holdout_after
         )
 
-    def _remember(self, skill: Skill, e: np.ndarray) -> None:
+    def _remember(self, skill: Skill, e: np.ndarray, room: Room) -> None:
         """
         Keep this skill's raw cosines, and fit the calibration once there are
         enough of them.
@@ -472,12 +504,12 @@ class Runner:
         if skill.w is None or skill.kind == "discriminator":
             return
         cos = float(np.dot(skill.w, e))
-        hist = self.history.setdefault(skill.key, [])
+        hist = room.history.setdefault(skill.key, [])
         hist.append(cos)
         if len(hist) > _CALIBRATION_WINDOW:
             del hist[0 : len(hist) - _CALIBRATION_WINDOW]
 
-        if len(hist) < _CALIBRATE_AFTER or skill.key in self.calibrated:
+        if len(hist) < _CALIBRATE_AFTER or skill.key in room.calibrated:
             return
         bias, temperature = calibrate(
             np.asarray(hist),
@@ -485,8 +517,8 @@ class Runner:
             exit_conf=skill.params.exit_conf,
         )
         self.skills[skill.key] = replace(skill, bias=bias, temperature=temperature)
-        self.calibrated.add(skill.key)
-        self._warming.discard(skill.key)
+        room.calibrated.add(skill.key)
+        room.warming.discard(skill.key)
         self.log.info(
             "probe.refit",
             skill=skill.key,
@@ -500,9 +532,20 @@ class Runner:
         # another minute collecting background before it can score anything.
         self._pending_calibration.append(skill.key)
 
-    async def _emit(self, skill: Skill, event: Event, verdict_by: str | None = None) -> None:
+    async def _emit(
+        self,
+        skill: Skill,
+        event: Event,
+        verdict_by: str | None = None,
+        room_name: str | None = None,
+    ) -> None:
         """
         Send one transition up, and rotate the trace on a session boundary.
+
+        `room_name` is the camera this happened in, which is not the same as
+        the worker's own room: a worker watching the whole wall registers as
+        "*", and recording every transition against "*" would lose which
+        camera actually saw it.
 
         A gate opening starts a span and a gate closing ends one, which is
         what makes grepping a single trace id reconstruct a whole story
@@ -537,7 +580,7 @@ class Runner:
                 "skillKey": skill.key,
                 "kind": event.kind,
                 "at": int(event.at * 1000),
-                "room": self.cfg.room,
+                "room": room_name or self.cfg.room,
                 "traceId": self.log.trace_id,
                 "score": event.score,
                 "reason": event.reason,
@@ -563,7 +606,7 @@ class Runner:
             await self._flush_calibration()
             with Image.open(io.BytesIO(frame.jpeg)) as im:
                 image = im.convert("RGB")
-            await self._on_frame(image, frame.seq, frame.ts or time.time(), "relay")
+            await self._on_frame(image, frame.seq, frame.ts or time.time(), "relay", frame.room)
 
     async def run_local(self, source: Any) -> None:
         """We own the clock: a folder or a camera, paced by the skills."""
@@ -580,7 +623,9 @@ class Runner:
             async for frame in source.frames():
                 await self._fill_weights()
                 await self._flush_calibration()
-                hz = await self._on_frame(frame.image, frame.seq, frame.ts, source.name)
+                hz = await self._on_frame(
+                    frame.image, frame.seq, frame.ts, source.name, self.cfg.room
+                )
                 source.set_rate(hz)
         finally:
             socket.cancel()

@@ -51,9 +51,7 @@ def main() -> int:
 
     def save(frame: np.ndarray) -> None:
         nonlocal n
-        Image.fromarray(frame.clip(0, 255).astype("uint8")).save(
-            out / f"{n:04d}.jpg", quality=92
-        )
+        Image.fromarray(frame.clip(0, 255).astype("uint8")).save(out / f"{n:04d}.jpg", quality=92)
         n += 1
 
     def ordinary(i: int) -> np.ndarray:

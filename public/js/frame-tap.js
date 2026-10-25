@@ -67,7 +67,7 @@ export class FrameTap {
     /** Requested by perception, which knows what the skills need. */
     this.hz = 0.5;
 
-    this.stats = { sampled: 0, gated: 0, sent: 0, lastMoved: 0 };
+    this.stats = { sampled: 0, gated: 0, sent: 0, lastMoved: 0, delivered: 0 };
     this.lastSentAt = 0;
   }
 
@@ -79,6 +79,19 @@ export class FrameTap {
   stop() {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+  }
+
+  /**
+   * True once several posts in a row have reached nobody.
+   *
+   * Worth surfacing rather than only backing off quietly. Publishing and
+   * analysing are separate things that can each be up without the other, so
+   * "my camera is on the wall" tells you nothing about whether anything is
+   * watching it, and a goal that silently never advances is the single most
+   * confusing way for this system to fail.
+   */
+  get unwatched() {
+    return this.undelivered >= IDLE_AFTER_UNDELIVERED;
   }
 
   /** Perception asks for a rate; the browser owns the clock and obeys. */
@@ -146,6 +159,7 @@ export class FrameTap {
     }
     const { delivered } = await res.json();
     this.stats.sent++;
+    this.stats.delivered = delivered;
     this.undelivered = delivered > 0 ? 0 : this.undelivered + 1;
   }
 

@@ -194,16 +194,35 @@ function renderPerception() {
   const workers = state.perception ?? [];
   el("stat-watching").textContent = String(workers.length);
   const box = el("perception");
+  const banner = el("nowatch");
+
   if (workers.length === 0) {
     box.className = "pstatus pstatus-off";
-    box.textContent =
-      "No perception worker connected. Goals will record nothing until one dials in.";
+    box.textContent = "Nothing connected.";
+
+    // The failure this exists for: a camera publishing happily to the wall
+    // while no worker is scoring its frames. Every goal stays pending, and
+    // without this there is nothing on screen that says why.
+    banner.hidden = false;
+    banner.innerHTML =
+      "<b>The watcher is offline.</b> Cameras on the wall are still publishing, " +
+      "but nothing is scoring their frames, so no goal can advance. " +
+      "This is a service that should be running continuously - if you are " +
+      "seeing this, it needs restarting.";
     return;
   }
+
+  banner.hidden = true;
   box.className = "pstatus pstatus-on";
-  box.textContent = workers
-    .map((w) => `${w.room} · ${w.encoderId} · ${w.dim}-d`)
-    .join("   ");
+  box.textContent = workers.map((w) => `${w.room} · ${w.encoderId} · ${w.dim}-d`).join("   ");
+
+  // A skill with no vector means perception has not embedded its label yet.
+  // Brief and normal after creating a goal; permanent if the encoder failed
+  // to load, which is worth distinguishing from "nothing is happening".
+  const pending = (state.skills ?? []).filter((s) => s.weightState === "pending");
+  if (pending.length > 0) {
+    box.textContent += `   ·   embedding ${pending.length} new skill(s)`;
+  }
 }
 
 // --------------------------------------------------------------- actions --

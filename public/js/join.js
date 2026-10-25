@@ -179,7 +179,19 @@ async function start() {
     setInterval(() => {
       if (!tap) return;
       const { sampled, gated, sent, lastMoved } = tap.stats;
-      el("onair-gate").textContent =
+      const gate = el("onair-gate");
+      if (tap.unwatched) {
+        // The feed is on the wall and nothing is analysing it. Say so, and
+        // say what to do, because every other signal on this page looks
+        // healthy and the goal just never advances.
+        gate.className = "status err";
+        gate.textContent =
+          "No perception worker is connected, so these frames are being discarded. " +
+          `Start one with:  --room ${tap.room} --hub ${location.origin}`;
+        return;
+      }
+      gate.className = "status";
+      gate.textContent =
         `${sent} sent · ${gated} gated (${Math.round((gated / Math.max(sampled, 1)) * 100)}%) · motion ${lastMoved.toFixed(3)}`;
     }, 1000);
   };

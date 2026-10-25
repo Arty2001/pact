@@ -15,7 +15,7 @@ The teacher itself is verified separately against the live model.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -24,7 +24,7 @@ from PIL import Image
 
 from pact_perception.config import Config
 from pact_perception.log import Logger
-from pact_perception.machine import Event, Params
+from pact_perception.machine import Event, Params, initial
 from pact_perception.skills import Skill
 from pact_perception.teacher import Verdict
 
@@ -146,10 +146,13 @@ def an_escalation(now: float = 100.0) -> Event:
     )
 
 
+ROOM = "bathroom"
+
+
 def stash_frame(runner: Any, now: float) -> None:
     """A frame in the ring and its embedding in the store, as the loop would."""
     image = Image.new("RGB", (32, 32), "white")
-    runner._recent.append((now, image))
+    runner.room(ROOM).recent.append((now, image))
     runner.store.remember_frame(now, np.eye(DIM)[0], ENCODER)
     runner.store.commit()
 
@@ -163,7 +166,7 @@ def test_a_yes_credits_the_session_and_marks_it_vlm(tmp_path):
     skill = a_skill()
     stash_frame(r, 100.0)
 
-    asyncio.run(r._escalate(skill, an_escalation(), 100.0))
+    asyncio.run(r._escalate(skill, an_escalation(), 100.0, r.room(ROOM), ROOM))
 
     assert teacher.calls, "the teacher was not called"
     assert len(r.sent) == 1
@@ -177,7 +180,7 @@ def test_a_no_rejects_it_and_still_marks_it_vlm(tmp_path):
     r = runner_with(tmp_path, FakeTeacher(verdict("NO")))
     stash_frame(r, 100.0)
 
-    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
 
     assert r.sent[0]["kind"] == "rejected"
     assert r.sent[0]["verdictBy"] == "vlm", "a confident no is still the teacher's call"
@@ -191,7 +194,7 @@ def test_unsure_is_an_answer_not_a_verdict(tmp_path):
     r = runner_with(tmp_path, FakeTeacher(verdict("UNSURE")))
     stash_frame(r, 100.0)
 
-    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
 
     assert r.sent[0]["kind"] == "rejected"
     assert r.sent[0]["verdictBy"] is None
@@ -202,7 +205,7 @@ def test_a_yes_and_a_no_are_written_down_as_labels(tmp_path):
     for answer, expected in (("YES", 1), ("NO", 0)):
         r = runner_with(tmp_path / answer, FakeTeacher(verdict(answer)))
         stash_frame(r, 100.0)
-        asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+        asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
 
         rows = r.store.examples("applied_to_face", ENCODER)
         assert len(rows) == 1, f"{answer} should have produced exactly one label"
@@ -213,7 +216,7 @@ def test_a_yes_and_a_no_are_written_down_as_labels(tmp_path):
 def test_unsure_is_not_written_down(tmp_path):
     r = runner_with(tmp_path, FakeTeacher(verdict("UNSURE")))
     stash_frame(r, 100.0)
-    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
     assert r.store.examples("applied_to_face", ENCODER) == []
 
 
@@ -225,7 +228,7 @@ def test_a_failed_call_still_emits_the_transition(tmp_path):
     r = runner_with(tmp_path, FakeTeacher(None))
     stash_frame(r, 100.0)
 
-    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
 
     assert len(r.sent) == 1
     assert r.sent[0]["kind"] == "escalate"
@@ -237,7 +240,7 @@ def test_no_api_key_degrades_rather_than_crashing(tmp_path):
     r = runner_with(tmp_path, None, key=None)
     stash_frame(r, 100.0)
 
-    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
 
     assert len(r.sent) == 1
     assert r.sent[0]["kind"] == "escalate"
@@ -249,7 +252,7 @@ def test_the_teacher_gets_the_most_recent_frames(tmp_path):
     for i in range(10):
         stash_frame(r, 100.0 + i)
 
-    asyncio.run(r._escalate(a_skill(), an_escalation(109.0), 109.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(109.0), 109.0, r.room(ROOM), ROOM))
 
     _, n_frames = teacher.calls[0]
     assert 1 <= n_frames <= 4, "four frames, not the whole ring"
@@ -265,7 +268,7 @@ def test_a_label_attaches_to_a_frame_not_to_the_answer_time(tmp_path):
     stash_frame(r, 100.0)
 
     # The answer lands 8 seconds later, as a real call would.
-    asyncio.run(r._escalate(a_skill(), an_escalation(108.0), 108.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(108.0), 108.0, r.room(ROOM), ROOM))
 
     rows = r.store.examples("applied_to_face", ENCODER)
     assert len(rows) == 1, "the label must still find its frame"
@@ -277,7 +280,7 @@ def test_a_stale_answer_is_not_attached_to_an_unrelated_frame(tmp_path):
     stash_frame(r, 100.0)
 
     # Ten minutes later is not the same event.
-    asyncio.run(r._escalate(a_skill(), an_escalation(700.0), 700.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(700.0), 700.0, r.room(ROOM), ROOM))
 
     assert r.store.examples("applied_to_face", ENCODER) == []
 
@@ -287,5 +290,39 @@ def test_every_verdict_emits_exactly_one_transition(tmp_path, answer):
     """One event per escalation. Two would double-count; none would lose it."""
     r = runner_with(tmp_path / answer, FakeTeacher(verdict(answer)))
     stash_frame(r, 100.0)
-    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0))
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
     assert len(r.sent) == 1
+
+
+def test_two_cameras_do_not_share_state_machines(tmp_path):
+    """
+    One worker watches the whole wall, so this has to hold.
+
+    Two cameras scoring the same skill must each keep their own dwell timer.
+    Sharing them would let frames from a kitchen advance a candidacy that a
+    bathroom started, and credit a session neither camera actually saw.
+    """
+    r = runner_with(tmp_path, FakeTeacher(verdict("YES")))
+    kitchen, bathroom = r.room("kitchen"), r.room("bathroom")
+
+    assert kitchen is not bathroom
+    assert kitchen.states is not bathroom.states
+    assert kitchen.gate is not bathroom.gate, "a shared gate would diff across cameras"
+
+    kitchen.states["applied_to_face"] = initial(0.0)
+    assert "applied_to_face" not in bathroom.states
+
+
+def test_a_transition_records_the_camera_not_the_worker(tmp_path):
+    """
+    A worker watching the wall registers as "*". Recording every transition
+    against "*" would lose which camera actually saw it, which is the one
+    thing the ledger cannot reconstruct afterwards.
+    """
+    r = runner_with(tmp_path, FakeTeacher(verdict("YES")))
+    r.cfg = replace(r.cfg, room="*")
+    stash_frame(r, 100.0)
+
+    asyncio.run(r._escalate(a_skill(), an_escalation(), 100.0, r.room(ROOM), ROOM))
+
+    assert r.sent[0]["room"] == ROOM

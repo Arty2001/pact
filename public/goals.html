@@ -37,6 +37,11 @@
 
   <main class="goals-main">
 
+    <!-- Nothing below this matters if no perception worker is running: every
+         goal sits at pending forever and every other signal looks healthy.
+         So it goes above the goals rather than under them. -->
+    <div id="nowatch" class="nowatch" hidden></div>
+
     <!-- Questions come first on the page because they are the only thing
          here that is waiting on the person reading it. Everything else is a
          record; this is a request. -->
