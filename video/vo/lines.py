@@ -22,34 +22,28 @@ LINES: list[tuple[str, str]] = [
     (
         "b1",
         "Everyone has goals. "
-        "The hard part was never deciding to achieve something. "
-        "It's always been being able to keep track of them. "
-        "So for the Nebius and NVIDIA hackathon, we wanted to create a personal AI "
-        "assistant that tracks them, and makes sure you're on top of your goals. "
-        "But we soon realized that sending several frames of our day into any "
-        "frontier model, consistently, runs hundreds of dollars a day, per camera. "
-        "So we built Pact. A carefully designed system that keeps track of your "
-        "goals for you, nearly free.",
+        "The hard part was never deciding. It's keeping track. "
+        "So for the Nebius and NVIDIA hackathon, we built a personal assistant "
+        "that watches, and keeps you on top of them. "
+        "But sending frames of your day into a frontier model "
+        "runs hundreds of dollars a day, per camera. "
+        "So Pact is designed to do it for almost nothing.",
     ),
     (
         "b2",
-        "You start off with a goal. "
-        "Like, I want to do twenty pushups every morning.",
+        "You start with a goal. Type it, or say it out loud. "
+        "I want to do twenty pushups every morning.",
     ),
     (
         "b3",
-        "Nemotron breaks your goal into sub-goals. "
-        "Goals that are essentially super easy to classify. "
-        "So twenty pushups every morning becomes a few small things "
-        "a camera can watch for. "
+        "Nemotron breaks it into sub-goals. "
         "Someone in a room. Someone in a pushup position. Twenty of them, before noon. "
-        "And each sub-goal is really just a label for our small encoder. "
-        "Because here's the thing. A camera gives you pixels, and a sub-goal is words. "
-        "Those two don't compare. Unless you put them in the same space. "
-        "That's what the NVIDIA encoder does. It turns the frame into a list of numbers, "
-        "and it turns the sentence into a list of numbers of exactly the same kind. "
+        "But a camera gives you pixels, and a sub-goal is words. "
+        "Those don't compare. Unless you put them in the same space. "
+        "That's the NVIDIA encoder. It turns the frame into a list of numbers, "
+        "and turns the sentence into a list of numbers of exactly the same kind. "
         "Two points on one map. "
-        "So asking whether this is a pushup is just asking how close they are.",
+        "And asking whether this is a pushup is just asking how close they are.",
     ),
     (
         "b4",
