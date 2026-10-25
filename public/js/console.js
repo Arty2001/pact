@@ -973,7 +973,10 @@ function engineSocket() {
       // on the alarm. Every console shows the same exchange, but only the
       // one that asked says it out loud, or a turn is spoken twice.
       showExchange(msg.heard ?? "", msg.say ?? "", msg.ui ?? {});
-      if (!msg.heard) speak(msg.say ?? "");
+      // Unprompted, and a camera is publishing: that device is in the room
+      // and says it. A nudge about the bathroom is no use on a laptop in
+      // another room, and two surfaces saying it is worse than one.
+      if (!msg.heard && devices.length === 0) speak(msg.say ?? "");
     } else if (msg.type === "events") {
       renderEvents(msg.events ?? []);
     }

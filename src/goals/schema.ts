@@ -35,6 +35,7 @@ export const ADDITIONS: readonly string[] = [
   "ALTER TABLE skills ADD COLUMN min_cycle_s REAL NOT NULL DEFAULT 0.0",
   "ALTER TABLE transitions ADD COLUMN needed_conf REAL",
   "ALTER TABLE goals ADD COLUMN sequence_window_s REAL NOT NULL DEFAULT 600",
+  "ALTER TABLE instances ADD COLUMN nudged_at INTEGER",
 ];
 
 export const SCHEMA = `
@@ -117,6 +118,10 @@ CREATE TABLE IF NOT EXISTS instances (
   -- Frozen at creation. This is what makes a progression work: raising next
   -- week's target must not retroactively raise this week's.
   target_min    REAL,
+  -- When this occurrence was last spoken about unprompted. One nudge per
+  -- occurrence: saying it every time someone walks past the sink is how an
+  -- assistant gets switched off.
+  nudged_at     INTEGER,
   settled_at    INTEGER,
   settled_by    TEXT,
   created_at    INTEGER NOT NULL,

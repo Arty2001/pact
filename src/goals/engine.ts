@@ -630,7 +630,118 @@ export class Engine implements DurableObject {
     }
 
     for (const goal of this.goalsUsing(t.skillKey)) this.settleIfDue(goal, log);
+    this.missedChance(t, log);
     this.broadcastWatchers();
+  }
+
+  /**
+   * A gate closing is an opportunity closing.
+   *
+   * evaluate() skips gates on purpose - a gate is a precondition, not a
+   * sub-goal - which means an unmet goal reads as "not yet" forever and
+   * nothing can tell "you haven't done it" apart from "you were standing
+   * right there and didn't". The difference is the whole product: a tracker
+   * that notices what you did NOT do is a different thing from one that logs
+   * what you did.
+   *
+   * One gate is usually shared by several goals, which is the useful part.
+   * Walking out of the bathroom closes the chance at moisturiser and floss
+   * and brushing together, so they are collected and spoken as one sentence
+   * rather than three.
+   */
+  private missedChance(t: Transition, log: Logger): void {
+    if (t.kind !== "exited") return;
+
+    const behind = this.rows<Record<string, unknown>>(
+      `SELECT g.* FROM goals g
+       JOIN goal_skills gs ON gs.goal_key = g.key
+       WHERE gs.skill_key = ? AND gs.role = 'gate'`,
+      t.skillKey,
+    ).map(toGoal);
+    if (behind.length === 0) return;
+
+    const missed: Array<{ goal: Goal; instance: Instance }> = [];
+    for (const goal of behind) {
+      // A limit is not an opportunity. Leaving the room without breaking it
+      // is the goal, and congratulating someone for that is noise.
+      if (goal.type === "limit") continue;
+      const instance = this.ensureInstance(goal);
+      if (instance.state === "done" || instance.nudgedAt !== null) continue;
+      if (!this.insideWindow(goal, Date.now())) continue;
+      missed.push({ goal, instance });
+    }
+    if (missed.length === 0) return;
+
+    // Marked before speaking, not after. The model call takes a second and
+    // another transition can arrive inside it, and saying it twice is worse
+    // than not saying it at all.
+    for (const m of missed) {
+      this.sql("UPDATE instances SET nudged_at = ? WHERE id = ?", Date.now(), m.instance.id);
+    }
+    log.info("goal.evaluate", {
+      goal: missed.map((m) => m.goal.key).join(","),
+      detail: `chance closed: ${t.skillKey} ended`,
+    });
+
+    const list = missed
+      .map((m) => `"${m.goal.description}" (${m.instance.observed} of ${m.goal.doneMin ?? 1})`)
+      .join(", ");
+    this.sayUnprompted(
+      `The person has just finished being where ${t.skillKey} applies, and left ` +
+        `without completing: ${list}. Tell them, in ONE short sentence, warmly ` +
+        `and without nagging. Mention every one of them in that sentence. Do ` +
+        `not offer to set a reminder unless they ask.`,
+      { focusGoal: missed[0].goal.key, tone: "nudge" },
+      log,
+    );
+  }
+
+  /**
+   * Say something nobody asked for.
+   *
+   * The same turn a microphone would produce, with the ledger standing in
+   * for the question. It goes out on the watcher socket with an empty
+   * `heard`, which is how every console knows to speak it rather than only
+   * show it.
+   */
+  private sayUnprompted(prompt: string, ui: UiIntent, log: Logger): void {
+    const key = this.env.NEBIUS_API_KEY;
+    if (!key) return;
+    const goals = this.goals();
+    const work = (async () => {
+      try {
+        const turn = await converse(key, ASSISTANT_MODEL, prompt, {
+          now: Date.now(),
+          tz: goals[0]?.tz ?? "UTC",
+          goals: goals.map((goal) => ({
+            goal,
+            instance: this.instances(goal.key)[0] ?? null,
+            uses: this.links(goal.key).map((l) => l.skillKey),
+          })),
+          skills: this.skills(),
+          recent: this.transitionsSince(
+            this.skills().map((s) => s.key),
+            Date.now() - 60 * 60 * 1000,
+          ),
+          questions: this.openQuestions().map((q) => ({
+            id: q.id,
+            skillKey: q.skillKey,
+            prompt: q.prompt,
+          })),
+          room: [...this.lastFrameAt.keys()][0] ?? null,
+        });
+        log.info("question.asked", { detail: "unprompted", prompt: turn.say });
+        this.toWatchers({
+          type: "assistant",
+          heard: "",
+          say: turn.say,
+          ui: { ...ui, ...turn.ui },
+        });
+      } catch (err) {
+        log.error("service.error", { detail: `unprompted: ${String(err).slice(0, 160)}` });
+      }
+    })();
+    this.ctx.waitUntil(work);
   }
 
   private settleIfDue(goal: Goal, log: Logger): void {
@@ -696,6 +807,18 @@ export class Engine implements DurableObject {
       verdict.observed,
       instance.id,
     );
+    if (state === "violated" && instance.nudgedAt === null) {
+      // A limit is the one goal where the interesting moment is the failure,
+      // and it was only ever turning a chip red.
+      this.sql("UPDATE instances SET nudged_at = ? WHERE id = ?", Date.now(), instance.id);
+      this.sayUnprompted(
+        `The limit "${goal.description}" has just been broken, right now. Say ` +
+          `so in ONE short sentence. Be direct, not scolding.`,
+        { focusGoal: goal.key, tone: "alert" },
+        log,
+      );
+    }
+
     log.info("goal.settle", {
       goal: goal.key,
       state,
@@ -1285,6 +1408,7 @@ function toInstance(r: Record<string, unknown>): Instance {
     targetMin: r.target_min === null ? null : Number(r.target_min),
     settledAt: r.settled_at === null ? null : Number(r.settled_at),
     settledBy: r.settled_by === null ? null : (r.settled_by as Instance["settledBy"]),
+    nudgedAt: r.nudged_at === null || r.nudged_at === undefined ? null : Number(r.nudged_at),
     createdAt: Number(r.created_at),
   };
 }

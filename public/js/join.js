@@ -357,3 +357,31 @@ if (Speech === null) {
 } else {
   el("listen").addEventListener("click", () => (open ? hush() : listen()));
 }
+
+/*
+ * Unprompted speech, heard where it matters.
+ *
+ * A nudge about the bathroom is useless on a laptop in another room, and
+ * this device is the one that is actually there. It listens to the Engine
+ * for a turn with no `heard` - the mark of something nobody asked for - and
+ * says it. The console shows the same line and stays quiet while a camera
+ * is publishing, so it is spoken once.
+ */
+function hearEngine() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/api/engine/ws`);
+  ws.onmessage = (e) => {
+    let msg;
+    try {
+      msg = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (msg.type !== "assistant" || msg.heard) return;
+    showSaid(msg.say ?? "");
+    speak(msg.say ?? "");
+  };
+  ws.onclose = () => setTimeout(hearEngine, 3000);
+}
+
+hearEngine();

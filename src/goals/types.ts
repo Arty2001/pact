@@ -180,6 +180,8 @@ export interface Instance {
   targetMin: number | null;
   settledAt: number | null;
   settledBy: SettledBy | null;
+  /** When this occurrence was last spoken about without being asked. */
+  nudgedAt: number | null;
   createdAt: number;
 }
 
