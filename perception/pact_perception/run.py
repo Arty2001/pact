@@ -968,11 +968,25 @@ class Runner:
         should not drop the video, and losing one camera should not stop the
         others.
         """
-        from .sfu import SfuSource
+        from .sfu import STALL_AFTER_S, SfuSource
 
         source = SfuSource(self.cfg.hub, self.log, hz=self.cfg.idle_hz)
         engine = asyncio.create_task(self._hold_socket())
         embed = asyncio.create_task(self._embed_labels())
+
+        async def sweep() -> None:
+            """
+            Rebuild a stalled subscription even while the Hub is silent.
+
+            reconcile() knows how to drop a dead feed, but it only runs when
+            the wall changes - and a feed dying is not a change the Hub can
+            see, because the publisher is still connected to it. Without this
+            the repair waits for somebody to open or close a camera.
+            """
+            while True:
+                await asyncio.sleep(STALL_AFTER_S / 2)
+                with contextlib.suppress(Exception):
+                    await source.reconcile(source.known())
 
         async def follow() -> None:
             while True:
@@ -991,6 +1005,7 @@ class Runner:
                     await asyncio.sleep(3.0)
 
         watch = asyncio.create_task(follow())
+        repair = asyncio.create_task(sweep())
         try:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._ready.wait(), timeout=15.0)
@@ -1005,7 +1020,7 @@ class Runner:
                 # on one clock, so the fastest room sets the pace.
                 source.set_rate(hz)
         finally:
-            for task in (engine, watch, embed):
+            for task in (engine, watch, embed, repair):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task

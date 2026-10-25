@@ -797,7 +797,11 @@ function requestPlot() {
 function quietBecause() {
   if ((state.perception ?? []).length === 0) return "no watcher is connected";
   if (devices.length === 0) return "no camera is publishing";
-  if (lastScoreAt === 0) return "waiting for the first frame";
+  if (lastScoreAt === 0) {
+    return devices.length > 0
+      ? "connected, waiting for the first scored frame"
+      : "waiting for a camera";
+  }
   if (Date.now() - lastScoreAt <= QUIET_MS) return "warming up";
 
   // A watcher that has never reported on this room is not watching it, which
@@ -1230,11 +1234,63 @@ if (Speech === null) {
 
 // ---------------------------------------------------------------- sockets --
 
+/*
+ * Both sockets recover from `onclose`, which assumes the browser is told.
+ * A half-open socket is never told: the connection is gone and the event
+ * never fires, so the page waits for a channel that is already dead. It
+ * looks from here exactly like a quiet system, which is the whole problem.
+ *
+ * So each one is watched. Silence alone is not evidence - a wall changes
+ * rarely and a still room scores nothing - but silence past the point where
+ * something should have arrived is worth spending a reconnect on. Closing is
+ * all that happens here; the existing onclose handler does the reopening, so
+ * there is one path back up rather than two.
+ */
+
+/** Any message at all, per socket. Not scores - liveness, not activity. */
+let engineSeenAt = Date.now();
+let hubSeenAt = Date.now();
+let engineWs = null;
+let hubWs = null;
+
+/**
+ * Long enough that a genuinely idle minute does not cause churn, short
+ * enough that nobody stands in front of a camera for a minute wondering.
+ */
+const ENGINE_SILENCE_MS = 35000;
+/** The Hub speaks only when the wall changes, so it is allowed much longer. */
+const HUB_SILENCE_MS = 150000;
+
+setInterval(() => {
+  // Only suspect the engine socket while something should be reporting on
+  // it. With nothing publishing, silence is the correct and expected state
+  // and reconnecting into it achieves nothing but churn.
+  if (devices.length > 0 && Date.now() - engineSeenAt > ENGINE_SILENCE_MS) {
+    engineSeenAt = Date.now();
+    try {
+      engineWs?.close();
+    } catch {
+      // Already closing; onclose still runs and reopens.
+    }
+  }
+  if (Date.now() - hubSeenAt > HUB_SILENCE_MS) {
+    hubSeenAt = Date.now();
+    try {
+      hubWs?.close();
+    } catch {
+      // Same.
+    }
+  }
+}, 5000);
+
 function hubSocket() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/hub/ws`);
+  hubWs = ws;
+  hubSeenAt = Date.now();
 
   ws.onmessage = (e) => {
+    hubSeenAt = Date.now();
     const msg = JSON.parse(e.data);
     if (msg.type === "state") devices = msg.devices;
     else if (msg.type === "up") devices = [...devices.filter((d) => d.id !== msg.device.id), msg.device];
@@ -1259,8 +1315,11 @@ function hubSocket() {
 function engineSocket() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/engine/ws`);
+  engineWs = ws;
+  engineSeenAt = Date.now();
 
   ws.onmessage = (e) => {
+    engineSeenAt = Date.now();
     const msg = JSON.parse(e.data);
     if (msg.type === "changed") {
       void load();

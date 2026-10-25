@@ -436,10 +436,31 @@ if (Speech === null) {
  * says it. The console shows the same line and stays quiet while a camera
  * is publishing, so it is spoken once.
  */
+let engineSeenAt = Date.now();
+let engineWs = null;
+
+// This tab stays open for a whole workout, which is long enough for a socket
+// to die quietly - and a nudge that never arrives is indistinguishable from
+// a nudge nobody sent. Ten minutes of silence is reason enough to rebuild
+// it; closing is all that happens here, and onclose does the reopening.
+setInterval(() => {
+  if (Date.now() - engineSeenAt > 600000) {
+    engineSeenAt = Date.now();
+    try {
+      engineWs?.close();
+    } catch {
+      // Already closing.
+    }
+  }
+}, 15000);
+
 function hearEngine() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/engine/ws`);
+  engineWs = ws;
+  engineSeenAt = Date.now();
   ws.onmessage = (e) => {
+    engineSeenAt = Date.now();
     let msg;
     try {
       msg = JSON.parse(e.data);
