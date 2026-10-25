@@ -753,3 +753,121 @@ body.join {
 }
 
 .status.live { color: var(--proved-text); }
+
+/* ============================================================== reactions
+
+   A total in the corner cannot tell you the moment, and the moment is what
+   someone is watching for. These say what just happened, once, and leave.
+
+   They sit ON the camera rather than on the page, because the thing that
+   earned the count is in that frame - and with a second camera on the wall,
+   which one saw it is the first question.
+   ============================================================== */
+
+.toasts {
+  position: absolute;
+  left: clamp(10px, 1.6vw, 18px);
+  bottom: clamp(10px, 1.6vw, 18px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 7px;
+  pointer-events: none;
+  max-width: min(330px, 62%);
+}
+
+/* Dark glass: these are over video now, so the page's plate would be the
+   wrong way round and would blow a hole in the frame. */
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 14px 9px 11px;
+  border-radius: var(--r);
+  background: rgba(7, 11, 16, .72);
+  backdrop-filter: saturate(150%) blur(16px);
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+  border: 1px solid rgba(255, 255, 255, .13);
+  border-left: 3px solid rgba(255, 255, 255, .3);
+  box-shadow: 0 8px 24px -8px rgba(0, 0, 0, .6);
+  pointer-events: auto;
+  cursor: pointer;
+  /* Enters from the left and slightly small, because a reaction should
+     arrive rather than appear. Both animate on the compositor. */
+  opacity: 0;
+  transform: translateX(-12px) scale(.97);
+  transition: opacity .2s ease-out, transform .3s cubic-bezier(.22, 1, .36, 1);
+}
+.toast.in { opacity: 1; transform: none; }
+
+.toast .lead {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -.04em;
+  line-height: 1;
+  color: var(--on-dark-dim);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+  min-width: 20px;
+  text-align: center;
+}
+.toast .body { display: grid; gap: 2px; min-width: 0; }
+.toast .line {
+  font-size: 12.5px; font-weight: 600; letter-spacing: -.01em; color: var(--on-dark);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.toast .sub {
+  font-family: var(--mono); font-size: 10px; color: var(--on-dark-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Hue on the edge and the numeral only. The plate stays neutral so a burst
+   of reps does not turn the bottom of the frame into a colour wash. */
+.toast.good { border-left-color: var(--proved); }
+.toast.good .lead { color: var(--proved-on-dark); }
+.toast.done { border-left-color: var(--proved); background: rgba(118, 185, 0, .22); }
+.toast.done .lead { color: var(--proved-on-dark); }
+.toast.near { border-left-color: var(--pending); }
+.toast.near .lead { color: var(--pending); }
+.toast.ask  { border-left-color: var(--watch); }
+.toast.ask .lead { color: #A99BFF; }
+.toast.bad  { border-left-color: var(--bad); background: rgba(224, 36, 36, .2); }
+.toast.bad .lead { color: #FF8F8F; }
+
+/* The count reacting to its own increment. Brief, and only on change. */
+@keyframes bump { 50% { transform: scale(1.085); } }
+.tally .n.bump { animation: bump .34s cubic-bezier(.22, 1, .36, 1); }
+
+/* ------------------------------------------------------- deleting a goal */
+
+.goal { position: relative; cursor: pointer; }
+.goal.on { background: var(--glass-hi); }
+.goal.on .goal-top .name { color: var(--fg); }
+
+.kill {
+  margin-left: auto;
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dimmer);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s, color .12s, background .12s;
+  flex: none;
+}
+.goal:hover .kill, .kill:focus-visible { opacity: 1; }
+.kill:hover { color: var(--bad-text); background: var(--bad-wash); }
+/* Armed is a different word, not just a different colour: the second press
+   is the destructive one and it should not look like the first. */
+.kill.armed {
+  opacity: 1;
+  color: var(--bad-text);
+  background: var(--bad-wash);
+  border-color: var(--bad-edge);
+}

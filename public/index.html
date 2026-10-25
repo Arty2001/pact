@@ -53,7 +53,12 @@
           <button class="btn primary" id="add-camera">Add a camera</button>
         </div>
         <div class="hud" id="hud" hidden>
-          <div class="hud-top">
+          <!-- Reactions land on the camera that saw it. A count rising in a
+             corner of the page does not say which camera earned it, and
+             with two on the wall that is the first thing you want to know. -->
+        <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+        <div class="hud-top">
             <div class="where"><b id="cam-name">—</b><span id="cam-meta">—</span></div>
             <div class="tally">
               <span class="n" id="tally-n">0</span>

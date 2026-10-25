@@ -117,12 +117,6 @@ export class Engine implements DurableObject {
       if (request.method === "POST") return this.createGoal(request);
     }
 
-    const goalMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)$/);
-    if (goalMatch && request.method === "DELETE") {
-      this.sql("DELETE FROM goals WHERE key = ?", goalMatch[1]);
-      return Response.json({ ok: true });
-    }
-
     // Today's tally, cleared. An occurrence is keyed by date, so a count
     // from a run that is now known to have been wrong sits on screen until
     // midnight with no way to say so - which is its own kind of lying about
@@ -132,6 +126,15 @@ export class Engine implements DurableObject {
       this.sql("DELETE FROM instances WHERE goal_key = ?", resetMatch[1]);
       this.log.info("goal.evaluate", { goal: resetMatch[1], detail: "instances cleared" });
       this.broadcastWatchers();
+      return Response.json({ ok: true });
+    }
+
+    // Ordered above the goal delete deliberately: its path pattern
+    // allows slashes, so it matches this one too and would answer it
+    // by deleting nothing and reporting ok.
+    const goalMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)$/);
+    if (goalMatch && request.method === "DELETE") {
+      this.sql("DELETE FROM goals WHERE key = ?", goalMatch[1]);
       return Response.json({ ok: true });
     }
 

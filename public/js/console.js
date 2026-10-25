@@ -36,6 +36,17 @@ let focusSkill = null;
 let activeRoom = null;
 let lastFrameAt = 0;
 let lastScoreAt = 0;
+/** Which goal the hero count is following, or null for whatever leads. */
+let focusGoal = null;
+/**
+ * Transitions already announced, by arrival time.
+ *
+ * Seeded to now on first paint, because a console opening on a day that
+ * already happened must not replay forty of them at once.
+ */
+let announcedUntil = Date.now();
+/** goalKey -> last seen instance state, to notice the moment one settles. */
+const goalWas = new Map();
 
 /**
  * A stable colour per skill.
@@ -73,6 +84,108 @@ setInterval(() => {
   }
 }, 1000);
 
+// ------------------------------------------------------------------ toast --
+
+/** How long a reaction stays up. Long enough to read mid-rep, not longer. */
+const TOAST_MS = 4200;
+
+/**
+ * Say what just happened, where it happened.
+ *
+ * The count in the corner is a total, and a total cannot tell you the
+ * moment. Watching your own rep land is the thing the product is for, and
+ * a number quietly incrementing in the corner of a video is not that.
+ */
+function toast({ kind = "", lead, line, sub = "" }) {
+  const host = $("toasts");
+  if (host === null) return;
+
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`;
+  el.innerHTML =
+    (lead ? `<b class="lead">${esc(lead)}</b>` : "") +
+    `<span class="body"><span class="line">${esc(line)}</span>` +
+    (sub ? `<span class="sub">${esc(sub)}</span>` : "") +
+    "</span>";
+
+  // Oldest falls off rather than letting a burst of reps bury the page.
+  host.prepend(el);
+  while (host.children.length > 4) host.lastElementChild?.remove();
+
+  requestAnimationFrame(() => el.classList.add("in"));
+  const go = () => {
+    el.classList.remove("in");
+    el.addEventListener("transitionend", () => el.remove(), { once: true });
+    // A removed transition still has to clear if the viewer is reduced-motion.
+    setTimeout(() => el.remove(), 400);
+  };
+  const timer = setTimeout(go, TOAST_MS);
+  el.addEventListener("click", () => {
+    clearTimeout(timer);
+    go();
+  });
+}
+
+/** The goal a skill belongs to, for naming a count in human terms. */
+function goalFor(skillKey) {
+  return (state.goals ?? []).find((g) =>
+    (g.uses ?? []).some((u) => u.skillKey === skillKey),
+  );
+}
+
+function announce(list) {
+  let newest = announcedUntil;
+  // Oldest first, so a burst reads in the order it happened.
+  for (const tr of [...list].sort((a, b) => a.at - b.at)) {
+    if (tr.at <= announcedUntil) continue;
+    newest = Math.max(newest, tr.at);
+
+    const goal = goalFor(tr.skillKey);
+    const inst = (goal?.instances ?? [])[0];
+    const progress =
+      inst && inst.targetMin ? `${fmt(inst.observed)} of ${fmt(inst.targetMin)}` : "";
+    // The reaction sits on the camera being watched, so one from a different
+    // camera has to say so or it reads as this camera's.
+    const elsewhere =
+      tr.room && activeRoom && tr.room !== activeRoom ? `${tr.room} · ` : "";
+
+    if (tr.kind === "entered") {
+      toast({
+        kind: "good",
+        lead: "+1",
+        line: goal ? goal.description : tr.skillKey,
+        sub: elsewhere + (progress || tr.skillKey),
+      });
+    } else if (tr.kind === "rejected") {
+      // A near-miss is the most useful toast there is: it is the only one
+      // that tells you to change something.
+      const why =
+        tr.neededConf > 0
+          ? `peak ${num(tr.peak)}, needed ${num(tr.neededConf)}`
+          : `held ${ms(tr.heldMs)}, needed ${ms(tr.neededMs)}`;
+      toast({ kind: "near", lead: "—", line: `${tr.skillKey} nearly counted`, sub: elsewhere + why });
+    } else if (tr.kind === "escalate") {
+      toast({ kind: "ask", lead: "?", line: `${tr.skillKey} asked for a second opinion`, sub: elsewhere + (tr.reason ?? "") });
+    }
+  }
+  announcedUntil = newest;
+}
+
+/** A goal crossing into done is the one moment worth more than a line. */
+function announceGoals() {
+  for (const g of state.goals ?? []) {
+    const now = (g.instances ?? [])[0]?.state ?? "pending";
+    const before = goalWas.get(g.key);
+    goalWas.set(g.key, now);
+    if (before === undefined || before === now) continue;
+    if (now === "done") {
+      toast({ kind: "done", lead: "✓", line: g.description, sub: "settled by camera" });
+    } else if (now === "violated") {
+      toast({ kind: "bad", lead: "!", line: g.description, sub: "limit broken" });
+    }
+  }
+}
+
 // ------------------------------------------------------------------ state --
 
 async function load() {
@@ -83,6 +196,7 @@ async function load() {
 }
 
 function renderAll() {
+  announceGoals();
   renderGoals();
   renderSkills();
   renderQuestions();
@@ -147,13 +261,22 @@ function notice(kind, title, body) {
 function renderGoals() {
   const goals = state.goals ?? [];
   const host = $("goals");
-  if (goals.length === 0) return;
+  if (goals.length === 0) {
+    host.replaceChildren(
+      Object.assign(document.createElement("div"), {
+        className: "empty",
+        textContent:
+          "No goals yet. A goal is a sentence plus the things a camera would have to see for it to be true.",
+      }),
+    );
+    return;
+  }
 
   host.replaceChildren(
     ...goals.map((g) => {
       const today = (g.instances ?? [])[0];
       const el = document.createElement("div");
-      el.className = `goal is-${today?.state ?? "pending"}`;
+      el.className = `goal is-${today?.state ?? "pending"}${focusGoal === g.key ? " on" : ""}`;
 
       const pct =
         today && today.targetMin
@@ -169,6 +292,7 @@ function renderGoals() {
         <div class="goal-top">
           <span class="name">${esc(g.description)}</span>
           <span class="chip ${chipFor(g, today)}">${esc(stateLabel(g, today))}</span>
+          <button class="kill" type="button" title="Delete this goal">×</button>
         </div>
         <div class="goal-meta">${esc(g.cadence)} · ${esc(win)} · <span class="mono">${esc(obs)}</span></div>
         <div class="prog"><i style="width:${pct}%"></i></div>
@@ -194,6 +318,30 @@ function renderGoals() {
         uses.append(c);
       }
 
+      // Two presses, not a modal. Deleting a goal takes its history with
+      // it, so it should not happen on one stray click - but a dialog for
+      // every small destructive act trains people to dismiss dialogs.
+      const kill = el.querySelector(".kill");
+      kill.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (kill.dataset.armed !== "1") {
+          kill.dataset.armed = "1";
+          kill.textContent = "delete?";
+          kill.classList.add("armed");
+          setTimeout(() => {
+            kill.dataset.armed = "";
+            kill.textContent = "×";
+            kill.classList.remove("armed");
+          }, 3000);
+          return;
+        }
+        kill.textContent = "…";
+        await fetch(`/api/engine/goals/${g.key}`, { method: "DELETE" });
+        if (focusGoal === g.key) focusGoal = null;
+        goalWas.delete(g.key);
+        void load();
+      });
+
       // Fourteen days. A faint cell for a day with nothing, never an empty
       // hole: absence should read as texture rather than a broken chain.
       const streak = el.querySelector(".streak");
@@ -212,7 +360,9 @@ function renderGoals() {
           return s && (s.kind === "counter" || s.kind === "action");
         });
         focusSkill = counter?.skillKey ?? null;
+        focusGoal = focusGoal === g.key ? null : g.key;
         drawPlot();
+        renderGoals();
         renderTally();
       });
 
@@ -297,15 +447,27 @@ function renderTally() {
   const goals = state.goals ?? [];
   // Show whatever is furthest along today; a page opening on zeroes shows
   // nothing about what the product does.
+  // Whichever goal you last pressed, else whatever is furthest along. The
+  // hero used to always pick the leader, which made one goal look like the
+  // only one there was however many you had.
+  const rows = goals.map((g) => ({ g, i: (g.instances ?? [])[0] })).filter((x) => x.i);
   const best =
-    goals
-      .map((g) => ({ g, i: (g.instances ?? [])[0] }))
-      .filter((x) => x.i)
-      .sort((a, b) => (b.i.observed ?? 0) - (a.i.observed ?? 0))[0] ?? null;
+    rows.find((x) => x.g.key === focusGoal) ??
+    rows.sort((a, b) => (b.i.observed ?? 0) - (a.i.observed ?? 0))[0] ??
+    null;
 
   if (!best) return;
   const { g, i } = best;
-  $("tally-n").textContent = fmt(i.observed);
+  // The count reacting to its own change, so an increment is something you
+  // see happen rather than something you notice later.
+  const n = $("tally-n");
+  const next = fmt(i.observed);
+  if (n.textContent !== next && n.textContent !== "0" && n.textContent !== "") {
+    n.classList.remove("bump");
+    void n.offsetWidth;
+    n.classList.add("bump");
+  }
+  n.textContent = next;
   $("tally-sub").textContent = i.targetMin
     ? `of ${fmt(i.targetMin)}${i.settledBy ? ` · proved by ${i.settledBy}` : ""}`
     : i.state;
@@ -319,6 +481,7 @@ function renderEvents(list) {
   const host = $("events");
   eventsSeen = list.length;
   renderMeta();
+  announce(list);
   if (list.length === 0) return;
   host.replaceChildren(
     ...list.slice(0, 40).map((t) => {
