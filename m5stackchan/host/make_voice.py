@@ -38,6 +38,15 @@ LINES = [
     ("DONE",    "All done. Thank you.",                              4),
 ]
 
+# Lines the tracker itself uses, outside the scripted test. Separate list
+# because these are triggered by what the robot sees, not by a schedule.
+CUES = [
+    ("HELLO",  "I can see you."),
+    ("PROMPT", "Stand in front of me, and walk slowly to your left, "
+               "then to your right."),
+    ("LOST",   "I have lost you."),
+]
+
 
 def synth(text, path):
     """Windows SAPI to a 16 kHz mono WAV."""
@@ -86,7 +95,15 @@ def main():
         chunks.append((sym, text, hold, pcm))
         print(f"  {sym:<6} {len(pcm) / RATE:5.2f}s  {len(pcm) / 1024:6.1f} KB  {text}")
 
-    total = sum(len(c[3]) for c in chunks)
+    extra = []
+    for sym, text in CUES:
+        wav = os.path.join(tmp, f"{sym}.wav")
+        synth(text, wav)
+        pcm = to_u8(wav)
+        extra.append((sym, text, 0, pcm))
+        print(f"  {sym:<6} {len(pcm) / RATE:5.2f}s  {len(pcm) / 1024:6.1f} KB  {text}")
+
+    total = sum(len(c[3]) for c in chunks + extra)
     print(f"\ntotal {total / 1024:.1f} KB")
 
     with open(OUT, "w", newline="\n") as f:
@@ -108,7 +125,7 @@ def main():
                 "#pragma once\n\n#include <stdint.h>\n\n"
                 f"#define VOICE_RATE {RATE}\n\n")
 
-        for sym, text, hold, pcm in chunks:
+        for sym, text, hold, pcm in chunks + extra:
             f.write(f"/* \"{text}\" */\n")
             f.write(f"static const uint8_t kVoice{sym}[] = {{\n")
             for i in range(0, len(pcm), 20):
