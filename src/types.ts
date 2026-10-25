@@ -11,6 +11,19 @@ export type DeviceKind = "camera" | "screen" | "bridge";
 export interface Device {
   id: string;
   name: string;
+  /**
+   * The slug a goal's skills are scoped to, and the key every score is
+   * reported under.
+   *
+   * Derived from the name rather than the id, so re-joining with the same
+   * device name lands in the same room and keeps the calibration fitted
+   * from that room's background - which is what reconnecting a phone is
+   * expected to do. Set by the Hub so there is one definition of it: the
+   * browser and perception both need this slug, and three independent
+   * implementations of one rule is three chances to disagree about which
+   * camera a score belongs to.
+   */
+  room: string;
   kind: DeviceKind;
   sfuSessionId: string;
   trackNames: string[];
@@ -24,7 +37,11 @@ export type ServerMessage =
   | { type: "down"; id: string };
 
 /** Client -> Hub. Only publishers send anything. */
-export type ClientMessage = { type: "publish"; device: Device };
+/**
+ * A publisher announcing itself. It does not send `room` - the Hub stamps
+ * that - so saying it does would be a type that lies about the wire.
+ */
+export type ClientMessage = { type: "publish"; device: Omit<Device, "room"> };
 
 export interface Env {
   HUB: DurableObjectNamespace;

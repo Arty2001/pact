@@ -1,3 +1,4 @@
+import { roomOf } from "./room.ts";
 import type { ClientMessage, Device, Env, ServerMessage } from "./types.ts";
 
 /** Claim codes are short-lived on purpose: scan it now or get a new one. */
@@ -89,12 +90,13 @@ export class Hub implements DurableObject {
     }
 
     if (msg.type === "publish") {
+      // Stamped here rather than taken from the publisher, so every reader
+      // sees the same slug for the same camera and nobody has to re-derive
+      // it. A publisher that sends its own is ignored.
+      const device: Device = { ...msg.device, room: roomOf(msg.device) };
       // This socket is now the liveness signal for this device.
-      ws.serializeAttachment({
-        role: "publisher",
-        device: msg.device,
-      } satisfies SocketMeta);
-      this.broadcast({ type: "up", device: msg.device }, ws);
+      ws.serializeAttachment({ role: "publisher", device } satisfies SocketMeta);
+      this.broadcast({ type: "up", device }, ws);
     }
   }
 

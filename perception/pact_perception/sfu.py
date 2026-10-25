@@ -30,12 +30,12 @@ import asyncio
 import contextlib
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
+from .device import Device
 from .log import Logger
 from .sources import Frame
 
@@ -46,27 +46,6 @@ _ICE = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:stun.cloudflare.com:
 _FIRST_FRAME_TIMEOUT_S = 20.0
 
 
-@dataclass(frozen=True, slots=True)
-class Device:
-    """One live publisher, as the Hub describes it."""
-
-    id: str
-    name: str
-    kind: str
-    session_id: str
-    track_names: tuple[str, ...]
-
-    @property
-    def room(self) -> str:
-        """
-        The slug a goal's skills are scoped to.
-
-        Derived from the name rather than the id so that re-joining with the
-        same device name lands in the same room and keeps its calibration,
-        which is what someone reconnecting a phone actually expects.
-        """
-        slug = "".join(c if c.isalnum() else "-" for c in self.name.lower())
-        return "-".join(p for p in slug.split("-") if p) or self.id[:8]
 
 
 class SfuSubscription:
@@ -314,4 +293,5 @@ def _device(d: dict[str, Any]) -> Device:
         kind=str(d.get("kind", "camera")),
         session_id=str(d.get("sfuSessionId", "")),
         track_names=tuple(str(t) for t in d.get("trackNames", [])),
+        given_room=str(d.get("room") or ""),
     )

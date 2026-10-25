@@ -1,0 +1,52 @@
+[
+  [
+    "Living Room",
+    "lv1",
+    "living-room"
+  ],
+  [
+    "Desk",
+    "d1",
+    "desk"
+  ],
+  [
+    "Kitchen  Counter",
+    "k1",
+    "kitchen-counter"
+  ],
+  [
+    "Ben's Phone",
+    "b1",
+    "ben-s-phone"
+  ],
+  [
+    "  Garage  ",
+    "g1",
+    "garage"
+  ],
+  [
+    "Cam #2",
+    "c1",
+    "cam-2"
+  ],
+  [
+    "",
+    "abcdefghijk",
+    "abcdefgh"
+  ],
+  [
+    "!!!",
+    "zyxwvutsrq",
+    "zyxwvuts"
+  ],
+  [
+    "Caf\u00e9",
+    "f1",
+    "caf"
+  ],
+  [
+    "UPPER",
+    "u1",
+    "upper"
+  ]
+]
