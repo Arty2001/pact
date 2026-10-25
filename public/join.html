@@ -87,6 +87,21 @@
          when a room is quiet but the bill is not. -->
     <div class="status" id="onair-gate">waiting for frames</div>
 
+    <!-- The mic lives here, on the device that is already in the room with
+         you. Recognition runs in this tab and only the transcript leaves, so
+         the audio never crosses the network at all. -->
+    <div class="talk" id="talk">
+      <button class="btn pick wide" id="listen" type="button" aria-pressed="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="7" y="2.5" width="6" height="9.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5" fill="none" stroke="currentColor"
+                stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <span id="listen-label">Talk to Pact</span>
+      </button>
+      <div class="said" id="said" hidden></div>
+    </div>
+
     <button class="btn wide" id="stop">Stop streaming</button>
   </div>
 

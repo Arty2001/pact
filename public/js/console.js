@@ -780,6 +780,143 @@ function teardown() {
   $("feed").srcObject = null;
 }
 
+// --------------------------------------------------------------- speaking --
+
+/**
+ * Voice, in and out.
+ *
+ * Recognition runs in this browser and only the transcript travels, which is
+ * the same bargain the motion gate and the encoder make: do the work where
+ * the data already is, and send only what it meant. Audio never leaves the
+ * device, which is also the only honest answer to what a microphone in your
+ * front room is doing.
+ */
+const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
+let listener = null;
+let listening = false;
+
+function setAiState(text, thinking = false) {
+  $("ai-state").textContent = text;
+  $("ai").classList.toggle("thinking", thinking);
+}
+
+function showExchange(heard, say, ui = {}) {
+  const h = $("ai-heard");
+  h.hidden = !heard;
+  if (heard) h.textContent = heard;
+  $("ai-said").textContent = say;
+  $("ai").dataset.tone = ui.tone ?? "calm";
+  applyUi(ui);
+}
+
+/**
+ * The page rearranging itself around what was just said.
+ *
+ * Only ever moves attention - focus a goal, narrow the chart, hold a line.
+ * Nothing the assistant says can change what the ledger recorded, so the
+ * worst this can do is look at the wrong thing.
+ */
+function applyUi(ui) {
+  if (ui.focusGoal) {
+    focusGoal = ui.focusGoal;
+    renderGoals();
+    renderTally();
+  }
+  if (ui.focusSkill && traces.has(ui.focusSkill)) {
+    focusSkill = ui.focusSkill;
+    drawPlot();
+  }
+  if (ui.banner) $("ai-said").textContent = ui.banner;
+}
+
+function speak(text) {
+  const synth = globalThis.speechSynthesis;
+  if (!synth || !text) return;
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.04;
+  u.pitch = 1;
+  synth.speak(u);
+}
+
+async function ask(text, { aloud = true } = {}) {
+  if (!text.trim()) return;
+  showExchange(text, "…");
+  setAiState("thinking", true);
+  try {
+    const res = await fetch("/api/engine/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, room: activeRoom }),
+    });
+    const { say = "I lost that one.", ui = {} } = await res.json().catch(() => ({}));
+    showExchange(text, say, ui);
+    if (aloud) speak(say);
+  } catch {
+    showExchange(text, "I could not reach the engine.");
+  } finally {
+    setAiState(listening ? "listening" : "idle", false);
+  }
+}
+
+function startListening() {
+  if (!Speech || listening) return;
+  listener = new Speech();
+  listener.lang = "en-US";
+  listener.interimResults = true;
+  listener.continuous = false;
+
+  listener.onresult = (e) => {
+    const last = e.results[e.results.length - 1];
+    const text = last[0].transcript.trim();
+    // Interim results stream into the "you" line, so the band reacts while
+    // you are still talking rather than after you stop.
+    $("ai-heard").hidden = false;
+    $("ai-heard").textContent = text;
+    if (last.isFinal) void ask(text);
+  };
+  listener.onerror = () => stopListening();
+  listener.onend = () => {
+    // Chrome ends a non-continuous session on every pause. Restart while the
+    // button is still pressed, or one sentence is all you ever get.
+    if (listening) {
+      try {
+        listener.start();
+      } catch {
+        stopListening();
+      }
+    }
+  };
+
+  listening = true;
+  $("mic").setAttribute("aria-pressed", "true");
+  setAiState("listening");
+  try {
+    listener.start();
+  } catch {
+    stopListening();
+  }
+}
+
+function stopListening() {
+  listening = false;
+  $("mic").setAttribute("aria-pressed", "false");
+  setAiState("idle");
+  try {
+    listener?.stop();
+  } catch {
+    // Already stopped; nothing to undo.
+  }
+  listener = null;
+}
+
+if (Speech === null) {
+  $("mic").disabled = true;
+  $("mic").title = "This browser has no speech recognition. Chrome does.";
+} else {
+  $("mic").addEventListener("click", () => (listening ? stopListening() : startListening()));
+}
+
 // ---------------------------------------------------------------- sockets --
 
 function hubSocket() {
@@ -831,6 +968,12 @@ function engineSocket() {
       drawPlot();
       renderLegend(msg.scores ?? {});
       renderNotices();
+    } else if (msg.type === "assistant") {
+      // Another surface spoke - the phone in the room, or a reminder firing
+      // on the alarm. Every console shows the same exchange, but only the
+      // one that asked says it out loud, or a turn is spoken twice.
+      showExchange(msg.heard ?? "", msg.say ?? "", msg.ui ?? {});
+      if (!msg.heard) speak(msg.say ?? "");
     } else if (msg.type === "events") {
       renderEvents(msg.events ?? []);
     }

@@ -167,6 +167,9 @@ class Runner:
         #: Queued because _remember runs inside the scoring path and must not
         #: await on a socket.
         self._pending_calibration: list[str] = []
+        #: Skills that gained a label and may now be worth refitting. Queued
+        #: because labels arrive on the socket task and a refit is not quick.
+        self._pending_labels: list[str] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
@@ -177,6 +180,7 @@ class Runner:
         self._registry_changed = asyncio.Event()
 
         self.ledger.on_registry(self._on_registry)
+        self.ledger.on_label(self._on_label)
 
     # ---------------------------------------------------------- the registry
 
@@ -256,6 +260,33 @@ class Runner:
         self._ready.set()
         self._registry_changed.set()
 
+    def _on_label(self, skill_key: str, at: float, label: int, source: str) -> None:
+        """
+        Record an answer against the frame it was about.
+
+        Attached by proximity, because an answer arrives seconds after the
+        thing it describes and nobody hands it a frame timestamp. A label
+        with no frame within the tolerance is dropped rather than pinned to
+        whatever happened to be nearest, which would teach the skill a
+        picture of something else.
+        """
+        skill = self.skills.get(skill_key)
+        if skill is None:
+            return
+        frame_ts = self.store.nearest_frame_ts(at, tolerance=30.0)
+        if frame_ts is None:
+            self.log.warn(
+                "question.answered",
+                skill=skill_key,
+                detail="no frame near that moment; label dropped",
+            )
+            return
+        self.store.label(skill_key, frame_ts, label, source)
+        self.log.info(
+            "question.answered", skill=skill_key, detail=f"labelled {label} by {source}"
+        )
+        self._pending_labels.append(skill_key)
+
     async def _flush_calibration(self) -> None:
         while self._pending_calibration:
             skill = self.skills.get(self._pending_calibration.pop())
@@ -282,6 +313,12 @@ class Runner:
             await self._registry_changed.wait()
             self._registry_changed.clear()
             await self._fill_weights()
+
+    async def _flush_labels(self) -> None:
+        while self._pending_labels:
+            skill = self.skills.get(self._pending_labels.pop())
+            if skill is not None:
+                await self._maybe_refit(skill)
 
     async def _fill_weights(self) -> None:
         """Embed the labels of skills that have no usable vector yet."""
@@ -812,6 +849,7 @@ class Runner:
                 await asyncio.wait_for(self._ready.wait(), timeout=15.0)
             async for room_name, frame in source.frames():
                 await self._flush_calibration()
+                await self._flush_labels()
                 hz = await self._on_frame(frame.image, frame.seq, frame.ts, source.name, room_name)
                 # One rate for the whole source: it polls every subscription
                 # on one clock, so the fastest room sets the pace.
@@ -829,6 +867,7 @@ class Runner:
         try:
             async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
                 await self._flush_calibration()
+                await self._flush_labels()
                 with Image.open(io.BytesIO(frame.jpeg)) as im:
                     image = im.convert("RGB")
                 await self._on_frame(
@@ -854,6 +893,7 @@ class Runner:
 
             async for frame in source.frames():
                 await self._flush_calibration()
+                await self._flush_labels()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, self.cfg.room
                 )

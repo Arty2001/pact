@@ -252,3 +252,108 @@ if (!navigator.mediaDevices?.getDisplayMedia) {
 
 gate.hidden = false;
 checkConfig().then((ok) => ok && checkClaim());
+
+// ------------------------------------------------------------------ voice --
+
+/*
+ * Talking to Pact from the device already in the room.
+ *
+ * Recognition runs here and only the transcript is sent, so the audio never
+ * crosses the network - the same bargain the motion gate makes with frames
+ * and the encoder makes with pixels. It also means this works from across
+ * the room, mid-set, which a button on a laptop at a desk does not.
+ */
+
+const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
+let heard = null;
+let open = false;
+
+function speak(text) {
+  const synth = globalThis.speechSynthesis;
+  if (!synth || !text) return;
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.04;
+  synth.speak(u);
+}
+
+function showSaid(text, muted = false) {
+  const box = el("said");
+  box.hidden = !text;
+  box.textContent = text;
+  box.classList.toggle("muted", muted);
+}
+
+async function askPact(text) {
+  if (!text.trim()) return;
+  showSaid("…", true);
+  try {
+    const res = await fetch("/api/engine/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const { say: reply = "I lost that one." } = await res.json().catch(() => ({}));
+    showSaid(reply);
+    // Spoken here, by the device in the room. The console shows the same
+    // exchange but stays quiet, or every answer arrives twice.
+    speak(reply);
+  } catch {
+    showSaid("Could not reach the engine.", true);
+  }
+}
+
+function listen() {
+  if (!Speech || open) return;
+  heard = new Speech();
+  heard.lang = "en-US";
+  heard.interimResults = true;
+  heard.continuous = false;
+
+  heard.onresult = (e) => {
+    const last = e.results[e.results.length - 1];
+    const text = last[0].transcript.trim();
+    showSaid(text, true);
+    if (last.isFinal) void askPact(text);
+  };
+  heard.onerror = () => hush();
+  heard.onend = () => {
+    // Chrome ends the session on every pause, so it has to be restarted
+    // while the button is still on or you get exactly one sentence.
+    if (open) {
+      try {
+        heard.start();
+      } catch {
+        hush();
+      }
+    }
+  };
+
+  open = true;
+  el("listen").setAttribute("aria-pressed", "true");
+  el("listen-label").textContent = "Listening — tap to stop";
+  try {
+    heard.start();
+  } catch {
+    hush();
+  }
+}
+
+function hush() {
+  open = false;
+  el("listen").setAttribute("aria-pressed", "false");
+  el("listen-label").textContent = "Talk to Pact";
+  try {
+    heard?.stop();
+  } catch {
+    // Already stopped.
+  }
+  heard = null;
+}
+
+if (Speech === null) {
+  el("listen").disabled = true;
+  el("listen-label").textContent = "No speech recognition here";
+} else {
+  el("listen").addEventListener("click", () => (open ? hush() : listen()));
+}

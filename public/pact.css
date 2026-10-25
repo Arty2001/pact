@@ -871,3 +871,124 @@ body.join {
   background: var(--bad-wash);
   border-color: var(--bad-edge);
 }
+
+/* ============================================================== assistant
+
+   Above everything, because it is the thing that knows why the rest is on
+   screen. One line at rest; it grows only when it has both halves of an
+   exchange to show. Nothing here blinks or breathes while idle - a surface
+   that demands attention when it has nothing to say is the reason people
+   turn assistants off.
+   ============================================================== */
+
+.ai {
+  max-width: 1480px;
+  margin: clamp(14px, 2.4vw, 24px) auto 0;
+  padding: 0 clamp(14px, 2.4vw, 24px);
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+.ai::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.ai-body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 11px 16px;
+  border-radius: var(--r2);
+  background: var(--glass);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+  border: 1px solid var(--glass-top);
+  box-shadow: var(--lift), var(--inner);
+  transition: border-color .2s, box-shadow .2s;
+}
+.ai .heard {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dimmer);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ai .heard::before { content: "you  "; color: var(--dim); }
+.ai .said {
+  font-size: 14.5px;
+  font-weight: 500;
+  letter-spacing: -.012em;
+  color: var(--fg);
+  text-wrap: pretty;
+}
+
+/* Tone is the assistant's own urgency, and it only ever touches the edge.
+   A nudge that recoloured the whole band would read as an error. */
+.ai[data-tone="nudge"] .ai-body { border-color: var(--pending-edge); box-shadow: var(--lift), inset 3px 0 0 var(--pending); }
+.ai[data-tone="alert"] .ai-body { border-color: var(--bad-edge);     box-shadow: var(--lift), inset 3px 0 0 var(--bad); }
+.ai.thinking .ai-body { border-color: var(--watch-edge); }
+.ai.thinking .said { color: var(--dim); }
+
+.ai-state {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dimmer);
+  min-width: 56px;
+  text-align: right;
+}
+@media (max-width: 680px) { .ai-state { display: none; } }
+
+/* The mic. Pressed is a state you can see from across a room, because that
+   is exactly where you will be standing when you use it. */
+.mic {
+  flex: none;
+  width: 42px; height: 42px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--glass-hi);
+  color: var(--dim);
+  cursor: pointer;
+  box-shadow: var(--lift);
+  transition: background .15s, color .15s, border-color .15s, transform .15s;
+}
+.mic svg { width: 20px; height: 20px; }
+.mic:hover { background: #fff; color: var(--fg); }
+.mic[aria-pressed="true"] {
+  background: var(--proved);
+  border-color: var(--proved);
+  color: #0A1400;
+  box-shadow: 0 0 0 4px var(--proved-wash), var(--lift);
+}
+.mic[aria-pressed="true"] svg { animation: listen 1.6s ease-in-out infinite; }
+@keyframes listen { 0%,100% { transform: scale(1); } 50% { transform: scale(1.12); } }
+.mic:disabled { opacity: .4; cursor: default; }
+
+/* --------------------------------------------------------- talking to it */
+
+.talk { display: grid; gap: 9px; }
+.talk .btn[aria-pressed="true"] {
+  background: var(--proved);
+  border-color: var(--proved);
+  color: #0A1400;
+  box-shadow: 0 0 0 4px var(--proved-wash), var(--lift);
+}
+.talk .btn[aria-pressed="true"] svg { animation: listen 1.6s ease-in-out infinite; }
+
+/* The reply, which is the only place on this page the assistant has a
+   voice in writing. Quiet while it is still your own words coming back. */
+.said {
+  padding: 11px 13px;
+  border-radius: var(--r);
+  background: var(--sunk);
+  border: 1px solid var(--hair);
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+.said.muted { color: var(--dim); font-family: var(--mono); font-size: 12px; }

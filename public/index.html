@@ -32,6 +32,26 @@
   </div>
 </header>
 
+<!-- The assistant sits above everything, because it is the thing that knows
+     why any of the rest is on screen. Collapsed to a single line until it has
+     something to say, so a quiet system looks quiet. -->
+<section class="ai" id="ai" data-tone="calm">
+  <button class="mic" id="mic" type="button" aria-pressed="false" title="Hold to talk, or click to toggle">
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="7" y="2.5" width="6" height="9.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5" fill="none" stroke="currentColor"
+            stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+  </button>
+
+  <div class="ai-body">
+    <div class="heard" id="ai-heard" hidden></div>
+    <div class="said" id="ai-said">Ask me how you're doing.</div>
+  </div>
+
+  <span class="ai-state" id="ai-state">idle</span>
+</section>
+
 <main class="page">
 
   <!-- ------------------------------------------------------------ left -->

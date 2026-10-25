@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS instances (
   UNIQUE (goal_key, occurrence_on)
 );
 
+-- A nudge with a time on it. The only row in this schema about the future,
+-- which is why the Engine has an alarm and the Hub does not.
+CREATE TABLE IF NOT EXISTS reminders (
+  id       TEXT PRIMARY KEY,
+  at       INTEGER NOT NULL,
+  text     TEXT NOT NULL,
+  goal_key TEXT,
+  done     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS reminders_due ON reminders (done, at);
+
 CREATE TABLE IF NOT EXISTS questions (
   id             TEXT PRIMARY KEY,
   instance_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,

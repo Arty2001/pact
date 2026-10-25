@@ -238,7 +238,16 @@ export interface Transition {
 export type EngineMessage =
   | { type: "registry"; skills: Skill[]; encoderId: string | null }
   | { type: "frame"; room: string; seq: number; ts: number; jpegBase64: string }
-  | { type: "rate"; room: string; hz: number };
+  | { type: "rate"; room: string; hz: number }
+  /**
+   * A person's answer, on its way to becoming a training example.
+   *
+   * The answer is decided here and the embedding it describes lives in
+   * perception, so the label has to travel. `at` is the moment being
+   * labelled, not the moment the answer arrived - the two are seconds apart
+   * and the frame belongs to the first one.
+   */
+  | { type: "label"; room: string; skillKey: string; at: number; label: 0 | 1; source: string };
 
 /** Perception -> Engine. */
 export type PerceptionMessage =

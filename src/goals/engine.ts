@@ -1,4 +1,7 @@
 import { Logger, newTraceId } from "../log.ts";
+import { converse } from "./assistant.ts";
+import type { UiIntent } from "./assistant.ts";
+import type { ToolCall } from "./nebius.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
 import { sequence, stepsOf } from "./sequence.ts";
 import { plan } from "./planner.ts";
@@ -53,6 +56,9 @@ const TICK_MS = 15 * 60 * 1000;
  */
 const WINDOW_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
+/** The same planner model. It already knows the vocabulary of this system. */
+const ASSISTANT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+
 export class Engine implements DurableObject {
   private log: Logger;
 
@@ -106,6 +112,7 @@ export class Engine implements DurableObject {
     }
 
     if (path === "/plan" && request.method === "POST") return this.plan(request);
+    if (path === "/assistant" && request.method === "POST") return this.assistant(request);
 
     if (path === "/skills") {
       if (request.method === "GET") return Response.json({ skills: this.skills() });
@@ -212,7 +219,30 @@ export class Engine implements DurableObject {
     for (const goal of this.goals()) {
       this.ensureInstance(goal);
     }
-    await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+
+    // Anything due gets said once and marked, rather than deleted: a nudge
+    // that fired is a thing that happened, and the ledger keeps those.
+    const due = this.rows<{ id: string; text: string; goal_key: string | null }>(
+      "SELECT id, text, goal_key FROM reminders WHERE done = 0 AND at <= ?",
+      Date.now(),
+    );
+    for (const r of due) {
+      this.sql("UPDATE reminders SET done = 1 WHERE id = ?", r.id);
+      this.log.info("question.asked", { detail: "reminder", prompt: r.text });
+      this.toWatchers({
+        type: "assistant",
+        heard: "",
+        say: r.text,
+        ui: { banner: r.text, tone: "nudge", focusGoal: r.goal_key ?? undefined },
+      });
+    }
+
+    // The next wake is whichever comes first: the regular tick, or a nudge.
+    const next = this.rows<{ at: number }>(
+      "SELECT at FROM reminders WHERE done = 0 ORDER BY at LIMIT 1",
+    )[0]?.at;
+    const tick = Date.now() + TICK_MS;
+    await this.ctx.storage.setAlarm(next !== undefined ? Math.min(next, tick) : tick);
   }
 
   /**
@@ -754,6 +784,169 @@ export class Engine implements DurableObject {
     ).filter((t) => this.insideWindow(goal, t.at));
     const out = sequence(links, transitions, goal.sequenceWindowS);
     return { waitingOn: out.cursor, passes: out.completions };
+  }
+
+  // ------------------------------------------------------------- assistant
+
+  /**
+   * One spoken turn.
+   *
+   * Everything it is allowed to change it changes through here, never
+   * itself: the model returns tool calls and this applies them. A turn that
+   * could write to the ledger directly would be a turn nobody could replay,
+   * and replaying the ledger is the only reason any of this is trustworthy.
+   */
+  private assistant = async (request: Request): Promise<Response> => {
+    const body = (await request.json().catch(() => ({}))) as {
+      text?: string;
+      room?: string;
+    };
+    const text = (body.text ?? "").trim();
+    if (!text) return Response.json({ error: "nothing said" }, { status: 400 });
+
+    const key = this.env.NEBIUS_API_KEY;
+    if (!key) {
+      return Response.json(
+        { say: "I have no key to think with. Set NEBIUS_API_KEY and I will be back." },
+        { status: 200 },
+      );
+    }
+
+    const log = this.log.span(newTraceId());
+    const since = Date.now() - 60 * 60 * 1000;
+    const goals = this.goals();
+    const recent = this.transitionsSince(
+      this.skills().map((s) => s.key),
+      since,
+    );
+
+    log.info("question.asked", { detail: "heard", text });
+
+    let turn;
+    try {
+      turn = await converse(key, ASSISTANT_MODEL, text, {
+        now: Date.now(),
+        tz: goals[0]?.tz ?? "UTC",
+        goals: goals.map((goal) => ({
+          goal,
+          instance: this.instances(goal.key)[0] ?? null,
+          uses: this.links(goal.key).map((l) => l.skillKey),
+        })),
+        skills: this.skills(),
+        recent,
+        questions: this.openQuestions().map((q) => ({
+          id: q.id,
+          skillKey: q.skillKey,
+          prompt: q.prompt,
+        })),
+        room: [...this.lastFrameAt.keys()][0] ?? null,
+      });
+    } catch (err) {
+      log.error("service.error", { detail: `assistant: ${String(err).slice(0, 200)}` });
+      return Response.json({ say: "I could not reach my own head just then." });
+    }
+
+    const applied = this.applyActions(turn.actions, log);
+    log.info("question.answered", {
+      detail: "said",
+      say: turn.say,
+      actions: applied.join(",") || "none",
+      tokens: turn.usage.prompt + turn.usage.completion,
+    });
+
+    // Every watching console follows the same turn, so the UI rearranges
+    // around what was said rather than around what was clicked.
+    this.toWatchers({ type: "assistant", heard: text, say: turn.say, ui: turn.ui });
+    return Response.json({ say: turn.say, ui: turn.ui, applied });
+  };
+
+  /** What the model asked for, done by the only thing allowed to do it. */
+  private applyActions(actions: ToolCall[], log: Logger): string[] {
+    const done: string[] = [];
+    for (const call of actions) {
+      const a = call.args;
+      if (call.name === "label_frame") {
+        const skillKey = String(a.skill_key ?? "");
+        if (!skillKey) continue;
+        // "That one" means the last thing that happened, and the model is
+        // being asked to recall an epoch millisecond to say so. It gets it
+        // wrong, and a label pinned to the wrong second teaches the skill a
+        // picture of something else - so the moment is resolved here, from
+        // the ledger, and the model's guess is only a fallback.
+        const last = this.rows<{ at: number }>(
+          "SELECT at FROM transitions WHERE skill_key = ? ORDER BY at DESC LIMIT 1",
+          skillKey,
+        )[0]?.at;
+        const guess = Number(a.at ?? 0);
+        const plausible = guess > Date.now() - WINDOW_LOOKBACK_MS && guess <= Date.now();
+        const at = last ?? (plausible ? guess : Date.now());
+        // Down to perception, which holds the embedding the label describes.
+        // A label with nothing to attach to is dropped there rather than
+        // pinned to whatever frame happened to be nearest.
+        const room = [...this.lastFrameAt.keys()][0] ?? "";
+        for (const ws of this.perceptionSockets(room)) {
+          this.send(ws, {
+            type: "label",
+            room,
+            skillKey,
+            at,
+            label: a.happened === true ? 1 : 0,
+            source: "human",
+          });
+        }
+        log.info("question.answered", {
+          skill: skillKey,
+          detail: `labelled ${a.happened === true ? 1 : 0} by voice`,
+        });
+        done.push(`label_frame ${skillKey}`);
+      } else if (call.name === "answer_question") {
+        const id = String(a.id ?? "");
+        const value = String(a.value ?? "");
+        if (!id) continue;
+        // A model will invent an id rather than admit there is no question,
+        // and an UPDATE on one that does not exist succeeds at changing
+        // nothing - so it would be reported as done and nobody would know.
+        const real = this.rows<{ id: string }>(
+          "SELECT id FROM questions WHERE id = ? AND answered_at IS NULL",
+          id,
+        )[0];
+        if (real === undefined) {
+          log.warn("question.answered", {
+            detail: `no open question "${id}"; answer discarded`,
+          });
+          continue;
+        }
+        this.sql(
+          "UPDATE questions SET answer = ?, answered_at = ? WHERE id = ?",
+          value,
+          Date.now(),
+          id,
+        );
+        log.info("question.answered", { detail: `by voice: ${value}`, instance: id });
+        done.push(`answer_question ${id}`);
+      } else if (call.name === "remind") {
+        const at = Date.now() + Math.max(Number(a.in_minutes ?? 0), 0) * 60_000;
+        this.sql(
+          "INSERT OR REPLACE INTO reminders (id, at, text, goal_key, done) VALUES (?,?,?,?,0)",
+          crypto.randomUUID(),
+          at,
+          String(a.text ?? ""),
+          a.goal_key === undefined ? null : String(a.goal_key),
+        );
+        void this.ctx.storage.setAlarm(at);
+        done.push(`remind +${Number(a.in_minutes ?? 0)}m`);
+      } else if (call.name === "propose_adjustment") {
+        // Proposed, never applied. The one tool that can quietly make the
+        // system wrong does not get to do it without being told yes.
+        log.warn("skill.rejected", {
+          skill: String(a.skill_key ?? ""),
+          detail: `proposed: ${String(a.why ?? "")}`.slice(0, 160),
+        });
+        done.push(`proposed ${String(a.skill_key ?? "")}`);
+      }
+    }
+    if (done.length > 0) this.broadcastWatchers();
+    return done;
   }
 
   // --------------------------------------------------------------- reading
