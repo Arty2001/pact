@@ -58,6 +58,17 @@ const TICK_MS = 15 * 60 * 1000;
 const WINDOW_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Longest stretch one spoken correction may relabel, in minutes.
+ *
+ * Four hours is generous for "I was on that all morning" and still bounded.
+ * The cap is not about the person being wrong, it is about the model turning
+ * a vague phrase into a number: there is no sentence a person would say that
+ * should rewrite a whole day of frames, and a correction that did would be
+ * unrecoverable because nothing records what the labels used to be.
+ */
+const MAX_CORRECTION_MIN = 240;
+
+/**
  * How long a transition is kept.
  *
  * Longer than the 24-hour evaluation window, because the console shows a
@@ -394,14 +405,40 @@ export class Engine implements DurableObject {
     }
 
     if (msg.type === "refit") {
-      this.sql("UPDATE skills SET weight_state = 'fitted' WHERE key = ?", msg.skillKey);
+      const accepted = msg.accepted !== false;
+      // Only a kept fit changes the row. A declined one still gets reported,
+      // because "I tried and it did not help" is the honest answer to a
+      // correction and marking it fitted anyway would be a lie in the one
+      // column that says how far a skill has come.
+      if (accepted) {
+        this.sql("UPDATE skills SET weight_state = 'fitted' WHERE key = ?", msg.skillKey);
+      }
       this.log.info("probe.refit", {
         skill: msg.skillKey,
         n_examples: msg.nExamples,
         holdout_before: msg.holdoutBefore,
         holdout_after: msg.holdoutAfter,
+        accepted,
       });
       this.broadcastWatchers();
+
+      // Say it out loud. A correction that teaches something and then
+      // reports it only to a log is indistinguishable, to the person who
+      // just spoke, from one that was ignored - and "did that do anything?"
+      // is the entire question they are asking. The numbers are the answer:
+      // the after figure is measured on frames the fit never saw, so it is
+      // evidence rather than encouragement.
+      const before = Math.round(msg.holdoutBefore * 100);
+      const after = Math.round(msg.holdoutAfter * 100);
+      const say = accepted
+        ? `Learned ${msg.skillKey} from ${msg.nExamples} examples. On frames I hadn't seen, ${before} percent right before, ${after} after.`
+        : `I tried to learn ${msg.skillKey} from ${msg.nExamples} examples and it didn't beat what I had, so I kept the old one.`;
+      this.toWatchers({
+        type: "assistant",
+        heard: "",
+        say,
+        ui: { focusSkill: msg.skillKey, banner: say, tone: "calm" },
+      });
     }
   }
 
@@ -1041,24 +1078,38 @@ export class Engine implements DurableObject {
         )[0]?.at;
         const guess = Number(a.at ?? 0);
         const plausible = guess > Date.now() - WINDOW_LOOKBACK_MS && guess <= Date.now();
-        const at = last ?? (plausible ? guess : Date.now());
-        // Down to perception, which holds the embedding the label describes.
-        // A label with nothing to attach to is dropped there rather than
-        // pinned to whatever frame happened to be nearest.
+
+        // A correction about something that was MISSED cannot be anchored to
+        // the last transition, because the complaint is precisely that there
+        // was no transition. Clamped rather than trusted: a model that reads
+        // "all morning" as 6000 minutes would otherwise relabel days of
+        // frames from one sentence.
+        const minutes = Math.min(Math.max(Number(a.minutes_back ?? 0), 0), MAX_CORRECTION_MIN);
+        const window = minutes > 0;
+        const to = window ? Date.now() : (last ?? (plausible ? guess : Date.now()));
+        const from = window ? to - minutes * 60_000 : to;
+
+        // Down to perception, which holds the embeddings the label
+        // describes. Labels with nothing to attach to are dropped there
+        // rather than pinned to whatever frames happened to be nearest.
         const room = [...this.lastFrameAt.keys()][0] ?? "";
         for (const ws of this.perceptionSockets(room)) {
           this.send(ws, {
             type: "label",
             room,
             skillKey,
-            at,
+            at: to,
+            from,
+            to,
             label: a.happened === true ? 1 : 0,
             source: "human",
           });
         }
         log.info("question.answered", {
           skill: skillKey,
-          detail: `labelled ${a.happened === true ? 1 : 0} by voice`,
+          detail: window
+            ? `corrected ${a.happened === true ? 1 : 0} over ${minutes}m by voice`
+            : `labelled ${a.happened === true ? 1 : 0} by voice`,
         });
         done.push(`label_frame ${skillKey}`);
       } else if (call.name === "answer_question") {

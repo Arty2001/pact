@@ -157,6 +157,64 @@ class Store:
             for label, source, blob, dim in rows
         ]
 
+    def frames_between(self, start: float, end: float, limit: int = 2000) -> list[float]:
+        """
+        Every stored frame inside a stretch of time, oldest first.
+
+        This is what makes a spoken correction worth more than a nod. "I was
+        reading for twenty minutes" is one sentence and several hundred
+        frames, and several hundred is the quantity a refit has always needed
+        and almost never had - the ordinary loop only ever produces a label
+        when something was noticed, which is exactly not the case being
+        corrected.
+        """
+        rows = self.db.execute(
+            "SELECT ts FROM frames WHERE ts >= ? AND ts <= ? ORDER BY ts LIMIT ?",
+            (start, end, limit),
+        ).fetchall()
+        return [float(r[0]) for r in rows]
+
+    def labelled_ts(self, skill_key: str) -> set[float]:
+        """Frames this skill already has an example for."""
+        rows = self.db.execute(
+            "SELECT frame_ts FROM training_examples WHERE skill_key = ?", (skill_key,)
+        ).fetchall()
+        return {float(r[0]) for r in rows}
+
+    def quiet_frames(
+        self, skill_key: str, start: float, end: float, limit: int, margin: float = 300.0
+    ) -> list[float]:
+        """
+        Frames from outside a window, least like this skill first.
+
+        A fit needs both answers. A correction only ever supplies one of them
+        - nobody volunteers "and I was NOT doing it at 14:32" - so the
+        opposite examples have to be found rather than told, and the honest
+        place to look is where this skill already scored lowest.
+
+        Two things keep that from being circular. The ordering uses the raw
+        cosine, which is what the skill thought BEFORE any of this, so a
+        frame is chosen for looking unlike the skill rather than for
+        agreeing with it. And `margin` holds the selection well clear of the
+        window's edges, because the minutes either side of a correction are
+        the ones most likely to be the same activity half-started.
+
+        These are assumed, not observed, and that is the weakest link in the
+        whole loop. It is survivable only because the refit tests itself on
+        frames it did not train on and discards itself when it fails, so a
+        bad draw costs a rejected refit rather than a corrupted skill.
+        """
+        rows = self.db.execute(
+            """SELECT f.ts FROM frames f
+               LEFT JOIN observations o
+                 ON o.ts = f.ts AND o.skill_key = ?
+               WHERE f.ts < ? OR f.ts > ?
+               ORDER BY COALESCE(o.cos, -1e9) ASC
+               LIMIT ?""",
+            (skill_key, start - margin, end + margin, limit),
+        ).fetchall()
+        return [float(r[0]) for r in rows]
+
     def cosines(self, skill_key: str, limit: int = 600) -> np.ndarray:
         rows = self.db.execute(
             "SELECT cos FROM observations WHERE skill_key = ? ORDER BY ts DESC LIMIT ?",

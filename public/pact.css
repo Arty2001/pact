@@ -619,7 +619,7 @@ input:hover, select:hover { border-color: var(--dimmer); }
 .rows { display: grid; gap: 6px; }
 .row {
   display: grid;
-  grid-template-columns: 108px 128px minmax(0, 1fr) 100px 26px;
+  grid-template-columns: 108px 84px 128px minmax(0, 1fr) 100px 26px;
   gap: 6px;
 }
 @media (max-width: 640px) { .row { grid-template-columns: 1fr 1fr; } }
