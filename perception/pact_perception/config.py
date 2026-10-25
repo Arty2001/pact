@@ -76,6 +76,16 @@ class Config:
     retain_days: float
 
     level: Level
+
+    #: What a locally driven source is looking at. Only consulted for folder
+    #: and camera runs: a relayed or SFU frame carries its own surface,
+    #: because the publisher is the one party that knows for certain.
+    #:
+    #: It belongs up beside `source`, and sits here because a dataclass field
+    #: with a default cannot precede one without. A default is worth that:
+    #: every existing caller means "camera", which is what they all were
+    #: before a screen was something this could watch.
+    surface: str = "camera"
     trace_skills: frozenset[str] = field(default_factory=frozenset)
 
     @property
@@ -132,6 +142,14 @@ def load(argv: list[str] | None = None) -> Config:
         help="Replay the folder forever. What a demo wants; a tuning run does not.",
     )
 
+    add(
+        "--surface",
+        choices=("camera", "screen", "any"),
+        default=_env("PACT_SURFACE", "camera"),
+        help="What a --source folder or --source camera run is looking at. "
+        "Relayed frames carry their own and ignore this.",
+    )
+
     add("--embed", choices=("local", "remote", "stub"), default=_env("PACT_EMBED", "local"))
     add("--embed-url", default=_env("PACT_EMBED_URL"))
     add("--model-version", default=_env("PACT_MODEL", "c-radio_v3-b"))
@@ -175,6 +193,7 @@ def load(argv: list[str] | None = None) -> Config:
         folder=a.folder,
         camera_index=a.camera_index,
         loop_folder=a.loop_folder,
+        surface=a.surface,
         embed=a.embed,
         embed_url=a.embed_url,
         model_version=a.model_version,

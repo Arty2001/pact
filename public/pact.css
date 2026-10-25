@@ -767,6 +767,11 @@ body.join {
 .kind-gate { color: var(--bone); }
 .kind-counter, .kind-discriminator { color: var(--seal); }
 .kind-metric { color: var(--dimmer); }
+/* A screen skill is worth picking out of a list of camera ones: pair it with
+   a camera publisher and it simply never scores, which looks identical to a
+   detector that does not work. */
+.kind-screen { color: var(--seal); }
+.kind-camera { color: var(--dim); }
 .shz { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
 
 /* "pending" is not an error. It means perception has not embedded the label
@@ -798,7 +803,7 @@ body.join {
 .dlg-wide small { display: block; color: var(--dimmer); font-size: 11px; margin-top: 5px; line-height: 1.5; }
 
 .skill-rows { list-style: none; margin: 0 0 9px; padding: 0; }
-.skill-row { display: grid; grid-template-columns: 112px 128px 1fr 104px 26px; gap: 6px; margin-bottom: 6px; }
+.skill-row { display: grid; grid-template-columns: 112px 86px 128px 1fr 104px 26px; gap: 6px; margin-bottom: 6px; }
 .skill-row input, .skill-row select {
   background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
   border-radius: 3px; padding: 6px 8px; font: inherit; font-size: 11.5px; min-width: 0;
