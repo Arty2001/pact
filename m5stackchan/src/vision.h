@@ -79,6 +79,30 @@ bool vision_look(motion_t *out);
 void vision_forget(void);
 
 /**
+ * Slide the room model instead of throwing it away.
+ *
+ * The model describes the room as seen from one direction, so turning the
+ * head invalidates it - and relearning from scratch after every move left
+ * the robot blind for a second or so each time. That is why following
+ * someone walking felt like it was always a step behind: the loop spent
+ * most of its time not looking.
+ *
+ * It does not have to be thrown away. Turning the head slides the picture
+ * by a known amount, and that amount is now MEASURED at boot rather than
+ * asserted, so the model can be slid to match and keeps everything it had
+ * learned about the overlapping part of the room. Only the strip that
+ * swung in from off-frame is genuinely unknown, and that is seeded from the
+ * new view.
+ *
+ * This is the one place self-motion is compensated rather than avoided.
+ * Earlier attempts at that were wrong because they predicted the shift from
+ * a COMMANDED move the rate limiter had not finished; the caller here
+ * passes a shift derived from servo positions read back after the head
+ * stopped, times a gain measured on this hardware.
+ */
+void vision_reframe(float dx_cells, float dy_cells);
+
+/**
  * Keep the current frame, to measure against after the head moves.
  *
  * This pair is how the robot works out its own control gain instead of
@@ -127,6 +151,16 @@ bool vision_jpeg(uint8_t **out, size_t *len, int quality);
 
 /** Print what the detector currently sees. */
 void vision_debug_grid(void);
+
+/**
+ * Stream a frame, the foreground mask, and the decision to the host.
+ *
+ * Numbers alone could not tell whether a 500-cell blob was a person or a
+ * broken model. This emits the picture WITH what the detector made of it,
+ * from the running tracker rather than a separate capture build, so the two
+ * cannot disagree. Costs a JPEG encode, so call it occasionally.
+ */
+void vision_debug_stream(int quality, int yaw, int pit);
 
 #ifdef __cplusplus
 }

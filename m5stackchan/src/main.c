@@ -53,7 +53,7 @@
 
 /* Fraction of the measured error corrected per move. Below 1 so the head
    converges smoothly instead of overshooting and hunting. */
-#define GAIN 0.55f
+#define GAIN 0.8f
 
 /* Offsets smaller than this are already being looked at. Wider on pitch,
    because the useful pitch band is narrow and a person is tall. */
@@ -91,7 +91,7 @@
 /* After the servos report arrival the head is still settling, and so is
    auto-exposure. Short, because this is a real settle and not a guess
    standing in for compensation. */
-#define SETTLE_MS 200
+#define SETTLE_MS 90
 
 /* Give up waiting for arrival after this, so a stalled axis cannot wedge
    the loop. */
@@ -107,7 +107,7 @@ static const float kSearchDeg[] = {0, -25, 25, -50, 50, -75, 75};
 #define SEARCH_N ((int)(sizeof(kSearchDeg) / sizeof(kSearchDeg[0])))
 #define DEG_PER_UNIT 0.293f
 
-#define GRID_EVERY_US 5000000
+#define GRID_EVERY_US 2500000
 
 /* Measured at boot: grid cells the picture slides per servo unit. */
 static float s_cells_per_unit_x = FALLBACK_CELLS_PER_UNIT_X;
@@ -129,10 +129,29 @@ static float s_cells_per_unit_y = FALLBACK_CELLS_PER_UNIT_Y;
  * head_is_moving() only knows about the setpoint, and position noise alone
  * can look settled in the middle of a long travel.
  */
+static int64_t s_settle_us;   /* how long the last move took to come to rest */
+
+/**
+ * Drive the head to its target, wait for the servos to report arrival, and
+ * SLIDE the room model to match instead of discarding it.
+ *
+ * Discarding it cost a relearn after every single move - about a second of
+ * blindness each time, which is most of the loop. Following someone walking
+ * was never going to work while the robot spent most of its time not
+ * looking.
+ *
+ * The shift comes from servo positions read back AFTER the head stopped,
+ * times a gain measured on this hardware at boot. That is the difference
+ * from the earlier attempts at motion compensation, which predicted the
+ * shift from a commanded move the rate limiter had not finished executing
+ * and were wrong in a different way each time.
+ */
 static void move_and_settle(void)
 {
-    vision_forget();   /* the room model describes a different direction */
+    const int yaw0 = scs_read_pos(SCS_ID_YAW);
+    const int pit0 = scs_read_pos(SCS_ID_PITCH);
 
+    const int64_t t0 = esp_timer_get_time();
     const int64_t deadline = esp_timer_get_time() + ARRIVE_TIMEOUT_MS * 1000;
     int stable = 0;
     int last_y = -1, last_p = -1;
@@ -151,14 +170,23 @@ static void move_and_settle(void)
         last_p = p;
 
         if (!head_is_moving() && dy <= 2 && dp <= 2) {
-            if (++stable >= 3) break;
+            if (++stable >= 2) break;
         } else {
             stable = 0;
         }
     }
 
     vTaskDelay(pdMS_TO_TICKS(SETTLE_MS));
-    vision_forget();   /* and relearn the room from where we ended up */
+
+    const int yaw1 = scs_read_pos(SCS_ID_YAW);
+    const int pit1 = scs_read_pos(SCS_ID_PITCH);
+    if (yaw0 >= 0 && pit0 >= 0 && yaw1 >= 0 && pit1 >= 0) {
+        vision_reframe((float)(yaw1 - yaw0) * s_cells_per_unit_x,
+                       (float)(pit1 - pit0) * s_cells_per_unit_y);
+    } else {
+        vision_forget();   /* no idea how far it went: start clean */
+    }
+    s_settle_us = esp_timer_get_time() - t0;
 }
 
 /**
@@ -199,6 +227,7 @@ static void measure_gain(void)
             vision_snapshot();
             head_nudge_units(is_yaw ? want : 0, is_yaw ? 0 : want);
             move_and_settle();
+            vision_forget();   /* probe moves are large; relearn properly */
             const int after = scs_read_pos(id);
 
             /* Divide by what the servo ACTUALLY did, not what it was asked
@@ -325,6 +354,9 @@ void app_main(void)
     int search_step = -1;
     int64_t search_until = 0;
     int64_t next_grid = esp_timer_get_time() + GRID_EVERY_US;
+    const int64_t run_t0 = esp_timer_get_time();
+    int64_t looks = 0, look_total_us = 0;
+    (void)look_total_us;
 
     while (1) {
         const int64_t now = esp_timer_get_time();
@@ -334,7 +366,15 @@ void app_main(void)
         motion_t m;
         bool acted = false;
 
-        if (eyes && vision_look(&m) && m.valid && m.cells >= MIN_CELLS) {
+        /* Time the look itself. "It feels slow" is not actionable; a
+           millisecond count per phase is. */
+        const int64_t look_t0 = esp_timer_get_time();
+        const bool looked = eyes && vision_look(&m);
+        const int64_t look_us = esp_timer_get_time() - look_t0;
+        looks++;
+        look_total_us += look_us;
+
+        if (looked && m.valid && m.cells >= MIN_CELLS) {
             const bool off_x = (m.x > DEADBAND_X || m.x < -DEADBAND_X);
             const bool off_y = (m.y > DEADBAND_Y || m.y < -DEADBAND_Y);
 
@@ -369,7 +409,23 @@ void app_main(void)
                 float hx = 0.0f, hy = 0.0f;
                 head_position(&hx, &hy);
                 const int cur = (int)(hx * (float)(yaw_travel / 2));
-                head_nudge_units((seen_yaw + units) - cur, 0);
+
+                /* Bring pitch back to level on the way.
+                 *
+                 * Searching used to sweep yaw alone, so a pitch that had
+                 * been driven into its stop stayed there - and from the
+                 * ceiling there is no one to see, so nothing could ever pull
+                 * it back down. That is a trap, and it is what "it keeps
+                 * looking up" has meant every time. Whatever else goes
+                 * wrong, giving up on finding someone now also means
+                 * returning to where people actually are. */
+                const int pit_now = scs_read_pos(SCS_ID_PITCH);
+                int pit_lo = 0, pit_hi = 0, ylo = 0, yhi = 0;
+                head_limits_units(&ylo, &yhi, &pit_lo, &pit_hi);
+                const int d_pit = (pit_now >= 0)
+                                  ? ((pit_lo + pit_hi) / 2) - pit_now : 0;
+
+                head_nudge_units((seen_yaw + units) - cur, d_pit);
                 printf("  looking %+.0f deg\n", (double)kSearchDeg[search_step]);
                 search_step++;
                 move_and_settle();
@@ -383,7 +439,8 @@ void app_main(void)
 
         if (eyes && now >= next_grid) {
             next_grid = now + GRID_EVERY_US;
-            vision_debug_grid();
+            vision_debug_stream(40, scs_read_pos(SCS_ID_YAW),
+                                scs_read_pos(SCS_ID_PITCH));
         }
 
         head_tick();

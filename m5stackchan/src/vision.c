@@ -3,35 +3,58 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <stdlib.h>
+
 #include "esp_camera.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "vision";
 
-/* Coarse grid. 20x15 on QVGA is 16x16 px cells: enough to say where a
-   person is, cheap enough to be free. */
-#define GW 20
-#define GH 15
+/* Detector grid. 40x30 on QVGA gives 8x8 pixel cells.
+ *
+ * Four times finer than the 20x15 this started with, because that was too
+ * coarse for the actual job: someone standing across the room covered only
+ * 8-12 cells, barely above the noise floor, and a single cell spanned 2.5
+ * degrees so the aim could not be more precise than that either. Each cell
+ * still averages 16 samples - the sampling step halves with the cell size -
+ * so the per-cell noise is unchanged. */
+#define GW 40
+#define GH 30
 #define GN (GW * GH)
 
-/* How far a cell must sit from the background model to count as part of a
-   person. Chosen by scoring against recorded footage, not by feel: at 12,
-   719 frames of empty room produced zero detections while a person was
-   found in about 80% of frames. */
-#define FG_THRESHOLD 12
+/* Floor for how far a cell must sit from the background model to count as
+   part of a person, and for how much it must change to count as moving.
+   From scoring against recorded footage of a bright room: at 12, 719 frames
+   of empty room produced zero detections while a person was found in about
+   80% of frames.
+ *
+ * A FLOOR, not the value. Sensor noise depends heavily on the scene - the
+ * same thresholds that were right for a sunlit kitchen lit 280 of 1200
+ * cells on dark curtains, because in low light the sensor gains up and
+ * every cell dances. A fixed threshold has to be wrong in one direction or
+ * the other, so the real threshold is measured from the frame itself each
+ * time, and these only stop it dropping absurdly low in a flat scene. */
+#define FG_FLOOR   12
+#define MOVE_FLOOR 10
 
-/* How much a cell must change frame-to-frame to count as having moved. */
-#define MOVE_THRESHOLD 10
+/* How many times the measured noise level a change must exceed. */
+#define NOISE_MULTIPLE 4
 
-/* How long a cell stays protected after it last moved, in frames. At the
-   ~4 fps this loop runs, 150 frames is a little over half a minute - long
-   enough for someone to stand still, short enough that a misread corrects
-   itself rather than becoming permanent. */
-#define MOVE_HOLD 150
+/* How long a cell stays protected after it last moved.
+ *
+ * In MICROSECONDS, not frames. Counted in frames this silently depends on
+ * how fast the loop happens to run, so tripling the frame rate would have
+ * cut how long someone can stand still before the room absorbs them -
+ * a coupling between two things that have no business being related. */
+#define MOVE_HOLD_US 30000000
 
-/* Smallest blob that counts as a person. Below this it is sensor noise:
-   measured, an empty room never exceeded 5 connected cells. */
-#define MIN_CELLS 8
+/* Smallest blob that counts as a person, in cells of the 40x30 grid.
+   Scaled from the 20x15 measurement where an empty room never exceeded 5
+   connected cells and a person across the room ran 8-12; four times the
+   cells means four times both. Verified against the device's own
+   empty-room reporting after the change. */
+#define MIN_CELLS 28
 
 /* How fast the background learns. Cells that look like background follow
    the room quickly; cells held by recent motion barely move, so a person
@@ -53,7 +76,10 @@ static const char *TAG = "vision";
 #define LEARN_WARMUP 0.3f
 
 static float   s_bg[GN];
-static int32_t s_last_move[GN];
+static int64_t s_last_move[GN];
+/* Set whenever the model is dropped: the next grab must discard the frames
+   the driver queued while the head was moving. */
+static bool    s_need_drain;
 static uint8_t s_prev[GN];
 static uint8_t s_snap[GN];
 static bool    s_have_snap;
@@ -65,6 +91,7 @@ static int     s_w, s_h;
    detector actually saw rather than a fresh frame that may differ. */
 static bool    s_last_fg[GN];
 static int     s_last_cells;
+static int     s_last_thr;
 static float   s_last_x, s_last_y;
 static bool    s_last_valid;
 
@@ -140,6 +167,69 @@ void vision_forget(void)
        robot silently fell back to assumed constants every boot. */
     s_learning   = true;
     s_frame      = 0;
+    s_need_drain = true;
+    s_last_valid = false;
+    s_last_cells = 0;
+    memset(s_last_fg, 0, sizeof(s_last_fg));
+}
+
+static bool grab_grid(uint8_t *grid);
+
+void vision_reframe(float dx_cells, float dy_cells)
+{
+    /* Nothing learned yet, or a shift so large that almost nothing overlaps
+       - relearning is cheaper and safer than sliding in mostly-unknown
+       cells. */
+    const int dx = (int)(dx_cells + (dx_cells >= 0 ? 0.5f : -0.5f));
+    const int dy = (int)(dy_cells + (dy_cells >= 0 ? 0.5f : -0.5f));
+    if (s_learning || dx <= -GW || dx >= GW || dy <= -GH || dy >= GH) {
+        vision_forget();
+        return;
+    }
+
+    /* A fresh view to seed whatever swung in from off-frame, and to be the
+       reference the next frame is differenced against. Taken first, because
+       the queued frames still show where the head used to point. */
+    s_need_drain = true;
+    static uint8_t fresh[GN];
+    if (!grab_grid(fresh)) { vision_forget(); return; }
+
+    static float   bg2[GN];
+    static int64_t mv2[GN];
+    const int64_t long_ago = INT64_MIN / 2;
+
+    for (int y = 0; y < GH; y++) {
+        for (int x = 0; x < GW; x++) {
+            const int i = y * GW + x;
+            /* Cell (x,y) now shows what used to be at (x-dx, y-dy). */
+            const int sx = x - dx, sy = y - dy;
+            if (sx < 0 || sx >= GW || sy < 0 || sy >= GH) {
+                bg2[i] = (float)fresh[i];   /* new ground: assume background */
+                mv2[i] = long_ago;          /* and nothing has moved in it */
+            } else {
+                const int j = sy * GW + sx;
+                bg2[i] = s_bg[j];
+                /* The brightness model slides, the motion history does NOT.
+                 *
+                 * Carrying protection across a move compounds: each slide
+                 * misaligns edges by a fraction of a cell, protected cells
+                 * are never corrected, and the error grows with every move.
+                 * Measured live, the blob went 29 -> 92 -> 282 -> 443 -> 592
+                 * cells over consecutive moves until half the frame counted
+                 * as a person and drove the head into its pitch stop.
+                 *
+                 * Dropping it costs nothing real. Protection exists to keep
+                 * someone standing still from dissolving - but if the head
+                 * just moved, it moved BECAUSE they moved, so they will
+                 * register again within a frame or two and earn it back. */
+                mv2[i] = long_ago;
+            }
+        }
+    }
+
+    memcpy(s_bg, bg2, sizeof(s_bg));
+    memcpy(s_last_move, mv2, sizeof(s_last_move));
+    memcpy(s_prev, fresh, sizeof(s_prev));
     s_last_valid = false;
     s_last_cells = 0;
     memset(s_last_fg, 0, sizeof(s_last_fg));
@@ -151,16 +241,24 @@ void vision_forget(void)
  * Get a frame that is actually current.
  *
  * The driver keeps fb_count buffers filled continuously, so a frame handed
- * back right after a pause can have been exposed before it. Discarding the
- * queued ones first makes sure what comes back was exposed after this call
- * rather than during the move that preceded it.
+ * back right after a pause can have been exposed before the pause. The
+ * queued ones therefore have to go - but ONLY after the head has moved.
+ *
+ * Draining on every single look, which is what this used to do, cost three
+ * sensor frames per look instead of one and held the whole tracking loop to
+ * a third of the rate the camera could sustain. While the head is still,
+ * consecutive frames are all equally current and there is nothing stale to
+ * throw away.
  */
 static camera_fb_t *grab_fresh(void)
 {
-    for (int i = 0; i < 2; i++) {
-        camera_fb_t *stale = esp_camera_fb_get();
-        if (!stale) return NULL;
-        esp_camera_fb_return(stale);
+    if (s_need_drain) {
+        for (int i = 0; i < 2; i++) {
+            camera_fb_t *stale = esp_camera_fb_get();
+            if (!stale) return NULL;
+            esp_camera_fb_return(stale);
+        }
+        s_need_drain = false;
     }
     return esp_camera_fb_get();
 }
@@ -176,8 +274,8 @@ static void sample(const camera_fb_t *fb, uint8_t *grid)
         for (int gx = 0; gx < GW; gx++) {
             uint32_t sum = 0;
             int n = 0;
-            for (int y = gy * ch; y < (gy + 1) * ch; y += 4) {
-                for (int x = gx * cw; x < (gx + 1) * cw; x += 4) {
+            for (int y = gy * ch; y < (gy + 1) * ch; y += 2) {
+                for (int x = gx * cw; x < (gx + 1) * cw; x += 2) {
                     const uint16_t p = px[y * fb->width + x];
                     const int r = (p >> 11) & 0x1F;
                     const int g = (p >> 5) & 0x3F;
@@ -225,6 +323,24 @@ static int median_of(const int16_t *d, int n)
         if (seen * 2 >= n) return v - 256;
     }
     return 0;
+}
+
+/**
+ * Spread of a set of differences, measured robustly.
+ *
+ * Median absolute deviation rather than a standard deviation, for the same
+ * reason the median is used to remove global drift: a person can cover a
+ * third of the frame, and a measure that they can drag along with them
+ * would raise the threshold until they no longer register.
+ */
+static int mad_of(const int16_t *d, int n, int med)
+{
+    static int16_t dev[GN];
+    for (int i = 0; i < n; i++) {
+        const int v = d[i] - med;
+        dev[i] = (int16_t)(v < 0 ? -v : v);
+    }
+    return median_of(dev, n);
 }
 
 /* ------------------------------------------------------------------ blob -- */
@@ -309,12 +425,13 @@ bool vision_look(motion_t *out)
 
     static uint8_t grid[GN];
     if (!grab_grid(grid)) return false;
+    const int64_t now_us = esp_timer_get_time();
 
     /* First frame after forgetting: seed the model and the motion history. */
     if (s_frame == 0) {
         for (int i = 0; i < GN; i++) {
             s_bg[i] = (float)grid[i];
-            s_last_move[i] = -MOVE_HOLD * 4;
+            s_last_move[i] = INT64_MIN / 2;
         }
         memcpy(s_prev, grid, sizeof(grid));
         s_frame = 1;
@@ -325,10 +442,12 @@ bool vision_look(motion_t *out)
     static int16_t d[GN];
     for (int i = 0; i < GN; i++) d[i] = (int16_t)((int)grid[i] - (int)s_prev[i]);
     const int dmed = median_of(d, GN);
+    int move_thr = NOISE_MULTIPLE * mad_of(d, GN, dmed);
+    if (move_thr < MOVE_FLOOR) move_thr = MOVE_FLOOR;
     for (int i = 0; i < GN; i++) {
         int m = d[i] - dmed;
         if (m < 0) m = -m;
-        if (m >= MOVE_THRESHOLD) s_last_move[i] = s_frame;
+        if (m >= move_thr) s_last_move[i] = now_us;
     }
     memcpy(s_prev, grid, sizeof(grid));
 
@@ -336,6 +455,9 @@ bool vision_look(motion_t *out)
     static int16_t b[GN];
     for (int i = 0; i < GN; i++) b[i] = (int16_t)((float)grid[i] - s_bg[i]);
     const int bmed = median_of(b, GN);
+    int fg_thr = NOISE_MULTIPLE * mad_of(b, GN, bmed);
+    if (fg_thr < FG_FLOOR) fg_thr = FG_FLOOR;
+    s_last_thr = fg_thr;
 
     static bool fg[GN];
     for (int i = 0; i < GN; i++) {
@@ -344,7 +466,7 @@ bool vision_look(motion_t *out)
         /* Foreground only while it has moved recently. A cell that differs
            from the background but has been perfectly still for a long time
            is a modelling error, not a person, and is let go below. */
-        fg[i] = (m >= FG_THRESHOLD) && ((s_frame - s_last_move[i]) < MOVE_HOLD);
+        fg[i] = (m >= fg_thr) && ((now_us - s_last_move[i]) < MOVE_HOLD_US);
     }
 
     for (int i = 0; i < GN; i++) {
@@ -366,6 +488,18 @@ bool vision_look(motion_t *out)
     const int cells = largest_blob(fg, &x, &y);
     s_last_cells = cells;
     if (cells < MIN_CELLS) return true;
+
+    /* Nobody fills a third of the room. A blob this large means the model
+       has gone wrong, and acting on it is worse than seeing nothing: its
+       centroid sits near the frame centre with total confidence and walks
+       the head into a stop. Throw the model away and learn the room again. */
+    if (cells > (GN * 35) / 100) {
+        ESP_LOGW(TAG, "blob is %d of %d cells - model is wrong, relearning",
+                 cells, GN);
+        vision_forget();
+        s_last_cells = 0;
+        return true;
+    }
 
     out->x = x;
     out->y = y;
@@ -498,4 +632,43 @@ void vision_debug_grid(void)
         printf("|\n");
     }
     printf("--ENDGRID\n");
+}
+
+void vision_debug_stream(int quality, int yaw, int pit)
+{
+    static const char kB64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    uint8_t *jpg = NULL;
+    size_t len = 0;
+    if (!vision_capture(&jpg, &len, quality, NULL)) {
+        if (jpg) free(jpg);
+        return;
+    }
+
+    printf("--F 0 %lld %d %d %d %d %d %d\n",
+           (long long)esp_timer_get_time(), GW, GH, yaw, pit, yaw, pit);
+    printf("D %d %.3f %.3f\n", s_last_cells,
+           (double)s_last_x, (double)s_last_y);
+
+    /* The mask as one character per cell: cheap to send, and readable in a
+       raw log without any tooling. */
+    printf("M ");
+    for (int i = 0; i < GN; i++) putchar(s_last_fg[i] ? '#' : '.');
+    putchar('\n');
+
+    printf("J %u\n", (unsigned)len);
+    for (size_t i = 0; i < len; i += 3) {
+        const uint32_t a = jpg[i];
+        const uint32_t b = (i + 1 < len) ? jpg[i + 1] : 0;
+        const uint32_t c = (i + 2 < len) ? jpg[i + 2] : 0;
+        const uint32_t w = (a << 16) | (b << 8) | c;
+        putchar(kB64[(w >> 18) & 63]);
+        putchar(kB64[(w >> 12) & 63]);
+        putchar((i + 1 < len) ? kB64[(w >> 6) & 63] : '=');
+        putchar((i + 2 < len) ? kB64[w & 63] : '=');
+        if ((i / 3) % 19 == 18) putchar('\n');
+    }
+    printf("\n--E\n");
+    free(jpg);
 }
