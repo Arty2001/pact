@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS transitions (
   duration_ms INTEGER,
   held_ms     INTEGER,
   needed_ms   INTEGER,
+  needed_conf REAL,
   peak        REAL,
   count       INTEGER,
   class_key   TEXT,

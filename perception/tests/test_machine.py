@@ -218,3 +218,37 @@ def test_default_params_keep_a_gap_between_the_thresholds():
     """
     p = Params()
     assert p.exit_conf < p.enter_conf
+
+
+def test_a_rejection_says_which_constraint_actually_failed():
+    """
+    The most useful line in the system must not lie about why.
+
+    Two near-misses look identical if you only record held_ms and needed_ms:
+    one never held long enough, the other held plenty long but never reached
+    enter_conf. They want opposite fixes - a shorter dwell versus a lower
+    threshold - so a rejection that reports "before dwell" when dwell was
+    satisfied sends you tuning the wrong number. This was a real bug, caught
+    by a run whose rejection read held_ms=3008 needed_ms=2000.
+    """
+    p = Params(enter_conf=0.75, exit_conf=0.45, dwell_s=2.0, escalate_after_s=999.0)
+
+    # Ran out of time: crossed enter, dropped away after 1s.
+    _, quick = run([0.9, 0.9, 0.2, 0.2], p)
+    assert len(quick) == 1
+    assert quick[0].held_ms < quick[0].needed_ms
+    assert quick[0].reason == "dropped below exit before dwell"
+    assert quick[0].needed_conf == 0.0
+
+    # Sagged: crossed enter once, then sat mid-band well past dwell before
+    # falling away. Note the peak is 0.9 and that is not a contradiction -
+    # crossing enter is how it became a candidate at all, so the peak can
+    # never be the thing that failed. What failed is where the score was when
+    # dwell elapsed.
+    _, slow = run([0.9] + [0.6] * 10 + [0.2, 0.2], p)
+    assert len(slow) == 1
+    assert slow[0].held_ms > slow[0].needed_ms, "dwell was satisfied"
+    assert slow[0].reason == "held past dwell but sagged below enter"
+    assert slow[0].needed_conf == 0.75, "and it says what the score had to beat"
+    assert slow[0].peak >= 0.75, "the peak cleared enter; that was never the problem"
+    assert slow[0].score < p.exit_conf

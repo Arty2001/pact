@@ -380,8 +380,8 @@ export class Engine implements DurableObject {
     this.sql(
       `INSERT INTO transitions
         (skill_key, kind, at, room, trace_id, score, reason, dwell_ms, duration_ms,
-         held_ms, needed_ms, peak, count, class_key, p1, p2, margin, verdict_by)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         held_ms, needed_ms, needed_conf, peak, count, class_key, p1, p2, margin, verdict_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       t.skillKey,
       t.kind,
       t.at,
@@ -393,6 +393,7 @@ export class Engine implements DurableObject {
       t.durationMs ?? null,
       t.heldMs ?? null,
       t.neededMs ?? null,
+      t.neededConf ?? null,
       t.peak ?? null,
       t.count ?? null,
       t.classKey ?? null,
@@ -409,6 +410,8 @@ export class Engine implements DurableObject {
         peak: t.peak,
         held_ms: t.heldMs,
         needed_ms: t.neededMs,
+        needed_conf: t.neededConf,
+        reason: t.reason,
       });
     } else {
       log.info("skill.transition", {

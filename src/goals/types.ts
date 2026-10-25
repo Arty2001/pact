@@ -202,6 +202,12 @@ export interface Transition {
   durationMs?: number;
   heldMs?: number;
   neededMs?: number;
+  /**
+   * On a rejection where dwell was satisfied, the confidence the score had to
+   * reach. Zero when duration was the binding constraint. The two want
+   * opposite fixes, so the field is what makes them distinguishable.
+   */
+  neededConf?: number;
   peak?: number;
   count?: number;
 

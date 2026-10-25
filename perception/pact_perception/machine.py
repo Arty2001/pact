@@ -97,6 +97,9 @@ class Event:
     dwell_ms: int = 0
     held_ms: int = 0
     needed_ms: int = 0
+    #: On a rejection where dwell WAS satisfied, the confidence the peak
+    #: needed to reach. Zero when duration was the binding constraint.
+    needed_conf: float = 0.0
     peak: float = 0.0
     duration_ms: int = 0
     count: int = 0
@@ -131,16 +134,39 @@ def step(state: State, score: float, now: float, p: Params) -> tuple[State, Even
     if state.phase == "candidate":
         held = now - state.since
         if score < p.exit_conf:
+            # Two different near-misses, and conflating them makes the most
+            # useful line in the system lie about why.
+            #
+            # Ran out of time: it never held above exit for dwell_s at all.
+            # The fix is a shorter dwell.
+            #
+            # Sagged: it held well past dwell, but every time dwell had
+            # elapsed the score had already fallen back into the band between
+            # exit and enter, so promotion could not fire. The peak is no
+            # help in telling these apart - entering candidacy requires
+            # crossing enter_conf, so the peak always clears it. The fix here
+            # is a lower enter_conf or a better probe, which is the opposite
+            # of the first case.
+            dwell_met = held >= p.dwell_s
+            reason = (
+                "held past dwell but sagged below enter"
+                if dwell_met
+                else "dropped below exit before dwell"
+            )
             return (
                 State(phase="idle", since=now, count=state.count),
                 Event(
                     kind="rejected",
                     at=now,
                     score=score,
-                    reason="dropped below exit before dwell",
+                    reason=reason,
                     peak=state.peak,
                     held_ms=_ms(held),
                     needed_ms=_ms(p.dwell_s),
+                    # What the peak would have had to reach. Zero when dwell
+                    # was the binding constraint, so the two cases stay
+                    # distinguishable from the fields alone.
+                    needed_conf=p.enter_conf if dwell_met else 0.0,
                     count=state.count,
                 ),
             )

@@ -84,6 +84,13 @@ class Runner:
         #: Rolling background cosines per skill, for fitting bias/temperature.
         self.history: dict[str, list[float]] = {}
         self.calibrated: set[str] = set()
+        #: Skills we have announced we are collecting background for, so the
+        #: notice appears once rather than per frame.
+        self._warming: set[str] = set()
+        #: Keys whose freshly fitted calibration still has to be sent up.
+        #: Queued because _remember runs inside the scoring path and must not
+        #: await on a socket.
+        self._pending_calibration: list[str] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
@@ -157,6 +164,19 @@ class Runner:
         )
         self._ready.set()
 
+    async def _flush_calibration(self) -> None:
+        while self._pending_calibration:
+            skill = self.skills.get(self._pending_calibration.pop())
+            if skill is None or skill.w is None:
+                continue
+            await self.ledger.weights(
+                skill.key,
+                skill.w,
+                self.embedder.encoder_id,
+                skill.bias,
+                skill.temperature,
+            )
+
     async def _fill_weights(self) -> None:
         """Embed the labels of skills that have no usable vector yet."""
         while self._pending_weights:
@@ -223,7 +243,14 @@ class Runner:
         self.log.debug("frame.sampled", seq=seq, source=source)
 
         motion = self.gate.check(image)
-        if not motion.passed:
+        # A motion gate cannot see a person standing still, and that is
+        # exactly when it matters most: once a session is open, frames are
+        # what decide when it ends. Gating them would let the score sag
+        # unobserved and then report a near-miss for a thing that was in
+        # fact happening the whole time. So the gate only guards the idle
+        # case, which is the case it was there to make cheap.
+        busy = any(st.phase != "idle" for st in self.states.values())
+        if not motion.passed and not busy:
             # The cheapest possible outcome: no embedding, no scores, nothing
             # sent. An empty room should cost nothing.
             self.log.debug(
@@ -263,6 +290,25 @@ class Runner:
         self._remember(skill, e)
         self.log.trace("skill.score", skill=skill.key, score=round(value, 4))
 
+        # An uncalibrated skill must not drive its state machine. With bias at
+        # zero and temperature at one, sigmoid of a cosine returns about 0.5
+        # for literally every frame, so any enter_conf below 0.5 fires on the
+        # first frame and any above it never fires at all. Either way the
+        # event is an artefact of the identity transform rather than anything
+        # seen. Observed for real: a session opened at 0.506 before the first
+        # calibration landed, then could not close because the post-fit scores
+        # straddled exit_conf. Collect the background first, then start.
+        if skill.kind != "discriminator" and skill.key not in self.calibrated:
+            if skill.key not in self._warming:
+                self._warming.add(skill.key)
+                self.log.info(
+                    "service.start",
+                    detail="calibrating",
+                    skill=skill.key,
+                    needs=_CALIBRATE_AFTER,
+                )
+            return
+
         state = self.states.get(skill.key, initial(now))
         nxt, event = step(state, value, now, skill.params)
         self.states[skill.key] = nxt
@@ -295,6 +341,7 @@ class Runner:
         )
         self.skills[skill.key] = replace(skill, bias=bias, temperature=temperature)
         self.calibrated.add(skill.key)
+        self._warming.discard(skill.key)
         self.log.info(
             "probe.refit",
             skill=skill.key,
@@ -304,6 +351,9 @@ class Runner:
             bias=round(bias, 5),
             temperature=round(temperature, 6),
         )
+        # Send it up, or every restart throws away the calibration and spends
+        # another minute collecting background before it can score anything.
+        self._pending_calibration.append(skill.key)
 
     async def _emit(self, skill: Skill, event: Event) -> None:
         """
@@ -323,6 +373,8 @@ class Runner:
                 peak=round(event.peak, 4),
                 held_ms=event.held_ms,
                 needed_ms=event.needed_ms,
+                needed_conf=event.needed_conf,
+                reason=event.reason,
             )
         else:
             self.log.info(
@@ -348,6 +400,7 @@ class Runner:
                 "durationMs": event.duration_ms,
                 "heldMs": event.held_ms,
                 "neededMs": event.needed_ms,
+                "neededConf": event.needed_conf,
                 "peak": event.peak,
                 "count": event.count,
             }
@@ -359,6 +412,7 @@ class Runner:
         """Frames arrive from the Engine; the browser owns the clock."""
         async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
             await self._fill_weights()
+            await self._flush_calibration()
             with Image.open(io.BytesIO(frame.jpeg)) as im:
                 image = im.convert("RGB")
             await self._on_frame(image, frame.seq, frame.ts or time.time(), "relay")
@@ -377,6 +431,7 @@ class Runner:
 
             async for frame in source.frames():
                 await self._fill_weights()
+                await self._flush_calibration()
                 hz = await self._on_frame(frame.image, frame.seq, frame.ts, source.name)
                 source.set_rate(hz)
         finally:
