@@ -128,30 +128,38 @@ class Distribution:
     @property
     def detection(self) -> float:
         """
-        What the state machine should see, on the same scale as every other
-        skill's score: how strongly the best REAL class is favoured.
+        How much better the best real class explains this frame than nothing
+        does: a two-way contest between them, which is what a detection
+        actually asks.
 
-        Not p1, the winner's probability. A softmax over K classes plus
-        `none` cannot return less than 1/(K+1) for its winner - measured at
-        0.345 here, median 0.691 - so it never approaches zero, and it is
-        highest exactly when the discriminator is most confident, including
-        when what it is confident about is `none`. That drove the machine
-        over its enter threshold on 1,048 frames whose verdict was "none of
-        these".
+        Three formulations were measured over 6,720 recorded frames.
 
-        Nor p1-or-zero, which fixes that and buys a cliff: the score drops
-        from 0.68 to 0 the instant `none` edges ahead by a thousandth, and
-        on one recording crossed that cliff on 5% of all samples. A reading
-        that flickers between two values is not a reading.
+        p1, the winner's probability, cannot fall below 1/(K+1) - 0.345 here
+        - and peaks exactly when the discriminator is most certain, INCLUDING
+        when it is certain the answer is `none`. That opened sessions on 1,048
+        frames whose verdict was "none of these". It also had the narrowest
+        spread of anything tried, p10 to p90 of just 0.36: it looked decisive
+        because it sat high, not because it separated anything.
 
-        The best real class does both jobs and is continuous. `none` taking
-        probability mass pushes every real class down smoothly, and `none`
-        can never contribute to the score however sure of it we are.
+        Zeroing on a `none` verdict fixes the first fault and adds a cliff -
+        0.68 to 0 on a thousandth of movement, crossed on 5% of all samples.
+
+        Dividing by the two together keeps every good property and recovers
+        the range: p10 to p90 of 0.66, nearly twice the original's, with 2.1%
+        of frames moving more than 0.3. `none` can only ever divide this
+        down, never raise it. And because the contest is against `none` alone,
+        adding a third real class does not dilute an unrelated one's score -
+        which plain max over the real classes could not say.
         """
-        real = [
-            p for p, n in zip(self.probs, self.names, strict=True) if n != NONE
-        ]
-        return max(real) if real else 0.0
+        none = 0.0
+        best = 0.0
+        for prob, name in zip(self.probs, self.names, strict=True):
+            if name == NONE:
+                none = prob
+            else:
+                best = max(best, prob)
+        total = best + none
+        return best / total if total > 0 else 0.0
 
 
 class EncoderMismatch(RuntimeError):

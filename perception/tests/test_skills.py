@@ -359,7 +359,8 @@ def test_a_confident_none_cannot_raise_the_score() -> None:
     """
     d = _dist({"squat": 0.30, "sit": 0.06, "none": 0.64})
     assert d.top == "none"
-    assert d.detection == 0.30
+    assert d.detection < 0.5  # 0.30 against 0.64, so nothing is winning here
+    assert abs(d.detection - 0.30 / 0.94) < 1e-9
 
 
 def test_more_certainty_about_none_lowers_the_score() -> None:
@@ -369,13 +370,27 @@ def test_more_certainty_about_none_lowers_the_score() -> None:
     assert more < some
 
 
-def test_a_winning_real_class_scores_its_own_probability() -> None:
-    assert _dist({"squat": 0.82, "sit": 0.10, "none": 0.08}).detection == 0.82
+def test_a_winning_real_class_beats_a_vanishing_none() -> None:
+    d = _dist({"squat": 0.82, "sit": 0.10, "none": 0.08})
+    assert abs(d.detection - 0.82 / 0.90) < 1e-9
+    assert d.detection > 0.9
+
+
+def test_a_second_real_class_does_not_dilute_the_first() -> None:
+    """
+    The contest is against `none`, so splitting the real mass differently
+    leaves an unrelated class's score alone. Plain max over the real classes
+    could not say that - adding a rival pushed everything down.
+    """
+    alone = _dist({"squat": 0.60, "none": 0.20}).detection
+    rival = _dist({"squat": 0.60, "sit": 0.20, "none": 0.20}).detection
+    assert abs(alone - rival) < 1e-9
 
 
 def test_the_runner_up_does_not_win_the_score() -> None:
-    """The best real class, not the best of the rest."""
-    assert _dist({"squat": 0.55, "sit": 0.35, "none": 0.10}).detection == 0.55
+    """The best real class contests `none`, not the best of the rest."""
+    d = _dist({"squat": 0.55, "sit": 0.35, "none": 0.10})
+    assert abs(d.detection - 0.55 / 0.65) < 1e-9
 
 
 def test_a_hair_either_side_of_none_barely_moves_the_score() -> None:
@@ -387,6 +402,8 @@ def test_a_hair_either_side_of_none_barely_moves_the_score() -> None:
     just_under = _dist({"squat": 0.349, "sit": 0.30, "none": 0.351}).detection
     just_over = _dist({"squat": 0.352, "sit": 0.30, "none": 0.348}).detection
     assert abs(just_over - just_under) < 0.01
+    # ...and both sit near the middle, because neither side has won.
+    assert 0.45 < just_under < 0.55
 
 
 def test_margin_is_unchanged_by_any_of_this() -> None:
