@@ -129,20 +129,29 @@ class Distribution:
     def detection(self) -> float:
         """
         What the state machine should see, on the same scale as every other
-        skill's score.
+        skill's score: how strongly the best REAL class is favoured.
 
-        p1 is the winning class's probability, and a softmax over K classes
-        plus `none` cannot return less than 1/(K+1) for its winner - measured
-        at 0.345 on a three-way skill, with a median of 0.691. So p1 never
-        approaches zero, sits permanently high beside a calibrated detector
-        score, and is high precisely when the discriminator is CONFIDENT,
-        including when what it is confident about is `none`. On one recording
-        that drove the machine above its enter threshold on 1,048 frames
-        whose verdict was "none of these".
+        Not p1, the winner's probability. A softmax over K classes plus
+        `none` cannot return less than 1/(K+1) for its winner - measured at
+        0.345 here, median 0.691 - so it never approaches zero, and it is
+        highest exactly when the discriminator is most confident, including
+        when what it is confident about is `none`. That drove the machine
+        over its enter threshold on 1,048 frames whose verdict was "none of
+        these".
 
-        Confidence that nothing is there is not a detection. Zero.
+        Nor p1-or-zero, which fixes that and buys a cliff: the score drops
+        from 0.68 to 0 the instant `none` edges ahead by a thousandth, and
+        on one recording crossed that cliff on 5% of all samples. A reading
+        that flickers between two values is not a reading.
+
+        The best real class does both jobs and is continuous. `none` taking
+        probability mass pushes every real class down smoothly, and `none`
+        can never contribute to the score however sure of it we are.
         """
-        return 0.0 if self.top == NONE else self.p1
+        real = [
+            p for p, n in zip(self.probs, self.names, strict=True) if n != NONE
+        ]
+        return max(real) if real else 0.0
 
 
 class EncoderMismatch(RuntimeError):

@@ -65,6 +65,12 @@ setInterval(() => {
   // The live pip is a reading, not decoration: it reflects whether frames
   // actually arrived recently, not whether a socket happens to be open.
   $("pip").classList.toggle("on", Date.now() - lastFrameAt < 6000);
+  // A gate that shut four seconds ago should say so four seconds ago, not
+  // on the next frame - which by definition is not coming while it is shut.
+  if (Date.now() - lastScoreAt > 4000) {
+    drawPlot();
+    renderNotices();
+  }
 }, 1000);
 
 // ------------------------------------------------------------------ state --
@@ -389,7 +395,7 @@ function drawPlot() {
   if (shown.length === 0) {
     parts.push(
       '<text class="plot-wait" x="' + W / 2 + '" y="' + H / 2 +
-        '" text-anchor="middle">waiting for a watcher to report scores</text>',
+        '" text-anchor="middle">' + esc(quietBecause()) + "</text>",
     );
     svg.innerHTML = parts.join("");
     return;
@@ -411,6 +417,25 @@ function drawPlot() {
   }
 
   svg.innerHTML = parts.join("");
+}
+
+/**
+ * Why the chart is empty, said accurately.
+ *
+ * It used to say "waiting for a watcher to report scores" for every empty
+ * state, including the commonest one by far: a working watcher, a publishing
+ * camera, and a room with nobody in it. The motion gate returns before the
+ * encoder when nothing has moved, so a still room produces no scores at all
+ * - that is the whole reason an empty room costs nothing. Reporting it as a
+ * missing watcher sends you to check the one thing that was never wrong.
+ */
+function quietBecause() {
+  if ((state.perception ?? []).length === 0) return "no watcher is connected";
+  if (devices.length === 0) return "no camera is publishing";
+  if (Date.now() - lastScoreAt > 4000) {
+    return "nothing is moving — the gate skips a still room, so it costs nothing";
+  }
+  return "warming up";
 }
 
 const line = (x1, y1, x2, y2, cls) =>
@@ -602,6 +627,7 @@ function engineSocket() {
       // from the camera you are not watching must not move this chart.
       if (activeRoom !== null && msg.room !== activeRoom) return;
       $("r-rate").textContent = msg.hz ? `${msg.hz} Hz` : "—";
+      $("r-rate").title = "frames per second this camera is being sampled at";
       for (const [key, s] of Object.entries(msg.scores ?? {})) pushScore(key, s.score, s.phase);
       drawPlot();
       renderLegend(msg.scores ?? {});
