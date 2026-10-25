@@ -68,6 +68,31 @@ export async function publish(stream) {
     .getTracks()
     .map((track) => pc.addTransceiver(track, { direction: "sendonly" }));
 
+  // Pin the codec to something a Python subscriber can decode.
+  //
+  // The SFU forwards exactly what we encode - it never transcodes - so the
+  // codec chosen here is the one every subscriber must handle. Left alone,
+  // Chrome may pick VP9 or AV1, which the browser wall plays happily while
+  // perception receives a stream it cannot decode and reports nothing, with
+  // no error anywhere. H.264 and VP8 are what aiortc supports.
+  for (const t of transceivers) {
+    if (t.sender.track?.kind !== "video" || !t.setCodecPreferences) continue;
+    const supported = RTCRtpSender.getCapabilities("video")?.codecs ?? [];
+    const safe = supported.filter((c) => /\/(H264|VP8)$/i.test(c.mimeType));
+    const rest = supported.filter((c) => !/\/(H264|VP8)$/i.test(c.mimeType));
+    if (safe.length > 0) {
+      try {
+        // The unsupported ones stay at the end rather than being removed, so
+        // a browser with no H.264 still negotiates something and reaches the
+        // wall, even if perception then cannot read it.
+        t.setCodecPreferences([...safe, ...rest]);
+      } catch {
+        // Not fatal: an older browser without codec preferences still works
+        // for viewing, which is the part a person sees.
+      }
+    }
+  }
+
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 

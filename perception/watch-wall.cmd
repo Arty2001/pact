@@ -2,9 +2,10 @@
 rem ---------------------------------------------------------------------------
 rem  Watch the whole wall.
 rem
-rem  One worker, room "*", so it receives frames from every camera on the wall
-rem  rather than one named device. Add a camera at /join and it is scored
-rem  without anything being restarted or reconfigured.
+rem  One worker pulling straight off the SFU, the way a viewer does. It finds
+rem  cameras through the Hub, so adding one at /join gets it watched with
+rem  nothing restarted - and the publisher never uploads a second copy, so a
+rem  backgrounded tab cannot stop it.
 rem
 rem  This is a stopgap for running it on a laptop. The real home for this is a
 rem  cheap always-on box - see the "Deploying it" section of README.md - because
@@ -38,7 +39,7 @@ rem Restart on exit. A long-running process on a home network will lose its
 rem socket, and the one that needs a human to restart it is the one that is off.
 :loop
 ".venv\Scripts\python.exe" -m pact_perception.run ^
-  --room * --embed local --resolution 384 --source relay ^
+  --room * --embed local --resolution 384 --source sfu --idle-hz 8 ^
   --hub "%PACT_HUB%" --level info >> "%USERPROFILE%\pact-watcher.log" 2>&1
 echo [%date% %time%] watcher exited, restarting in 5s >> "%USERPROFILE%\pact-watcher.log"
 timeout /t 5 /nobreak >nul

@@ -36,6 +36,33 @@ const NOISE_FLOOR = 0.08;
 const HEARTBEAT_MS = 30_000;
 
 /**
+ * A hidden tab is a stopped tab, and nothing about it looks broken.
+ *
+ * Chrome clamps setTimeout in a background tab to once a second, then to
+ * roughly once a minute after five minutes hidden. The camera stays on the
+ * wall the whole time because that is a WebSocket the browser keeps open, so
+ * every indicator says healthy while no frames are being sent at all. The
+ * failure is especially cruel here: switching to the goals page to watch
+ * your reps count is exactly what stops them counting.
+ *
+ * There is no way to opt out of the throttling, so the honest move is to
+ * detect it and say so.
+ */
+const HIDDEN_GRACE_MS = 4_000;
+
+/**
+ * Uploads allowed in flight at once.
+ *
+ * Capture and upload are decoupled because a round trip to the edge is about
+ * 130ms, and awaiting it inside the sample loop capped the publisher near
+ * 7.5 fps however fast the encoder was - just under what a rep counter
+ * needs, and entirely an artefact of how the loop was written. Letting a few
+ * overlap removes that ceiling; letting unlimited overlap would turn a slow
+ * network into unbounded memory and a growing backlog of stale frames.
+ */
+const MAX_IN_FLIGHT = 3;
+
+/**
  * After this many consecutive posts that reached nobody, slow right down.
  * Perception may simply not be running, and a publisher that keeps uploading
  * into a void is the one thing worse than one that is not uploading at all.
@@ -67,8 +94,17 @@ export class FrameTap {
     /** Requested by perception, which knows what the skills need. */
     this.hz = 0.5;
 
-    this.stats = { sampled: 0, gated: 0, sent: 0, lastMoved: 0, delivered: 0 };
+    this.stats = { sampled: 0, gated: 0, sent: 0, lastMoved: 0, delivered: 0, dropped: 0 };
     this.lastSentAt = 0;
+    this.hiddenSince = 0;
+    this.inFlight = 0;
+
+    document.addEventListener("visibilitychange", () => {
+      this.hiddenSince = document.hidden ? Date.now() : 0;
+      // Coming back should resume immediately rather than waiting out a
+      // throttled timer that may be a minute long.
+      if (!document.hidden) this.start();
+    });
   }
 
   start() {
@@ -92,6 +128,16 @@ export class FrameTap {
    */
   get unwatched() {
     return this.undelivered >= IDLE_AFTER_UNDELIVERED;
+  }
+
+  /** True while this tab is hidden and therefore being throttled. */
+  get throttled() {
+    return this.hiddenSince > 0 && Date.now() - this.hiddenSince > HIDDEN_GRACE_MS;
+  }
+
+  /** Seconds since a frame actually reached a worker, or null if never. */
+  get staleFor() {
+    return this.lastSentAt === 0 ? null : (Date.now() - this.lastSentAt) / 1000;
   }
 
   /** Perception asks for a rate; the browser owns the clock and obeys. */
@@ -144,15 +190,36 @@ export class FrameTap {
     const blob = await new Promise((r) => this.canvas.toBlob(r, "image/jpeg", 0.8));
     if (!blob) return;
 
+    // Dropping a frame beats queueing it. A backlog would deliver pictures of
+    // a squat that finished seconds ago, and a state machine reading them
+    // would time the dwell against the wrong clock entirely.
+    if (this.inFlight >= MAX_IN_FLIGHT) {
+      this.stats.dropped++;
+      return;
+    }
+
     this.seq++;
     this.lastSentAt = Date.now();
-
-    const res = await fetch(`/api/frames/${encodeURIComponent(this.room)}`, {
-      method: "POST",
-      headers: { "Content-Type": "image/jpeg", "X-Frame-Seq": String(this.seq) },
-      body: blob,
+    this.inFlight++;
+    // Deliberately not awaited: the next frame is due on a schedule, not
+    // when the edge finishes replying.
+    void this.upload(blob, this.seq).finally(() => {
+      this.inFlight--;
     });
+  }
 
+  async upload(blob, seq) {
+    let res;
+    try {
+      res = await fetch(`/api/frames/${encodeURIComponent(this.room)}`, {
+        method: "POST",
+        headers: { "Content-Type": "image/jpeg", "X-Frame-Seq": String(seq) },
+        body: blob,
+      });
+    } catch {
+      this.undelivered++;
+      return;
+    }
     if (!res.ok) {
       this.undelivered++;
       return;

@@ -638,6 +638,55 @@ class Runner:
 
     # ------------------------------------------------------------- the loops
 
+    async def run_sfu(self) -> None:
+        """
+        Subscribe to every camera on the wall and sample each of them.
+
+        Three concurrent jobs: hold the Engine socket, follow the Hub's live
+        device list, and sample whatever is currently subscribed. They are
+        separate because each fails independently - losing the Hub socket
+        should not drop the video, and losing one camera should not stop the
+        others.
+        """
+        from .sfu import SfuSource
+
+        source = SfuSource(self.cfg.hub, self.log, hz=self.cfg.idle_hz)
+        engine = asyncio.create_task(self._hold_socket())
+
+        async def follow() -> None:
+            while True:
+                try:
+                    async for devices in source.devices():
+                        await source.reconcile(devices)
+                        self.log.info(
+                            "service.start",
+                            detail="wall",
+                            devices=[d.name for d in devices],
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    self.log.warn("service.error", detail=f"hub socket lost: {err}")
+                    await asyncio.sleep(3.0)
+
+        watch = asyncio.create_task(follow())
+        try:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._ready.wait(), timeout=15.0)
+            async for room_name, frame in source.frames():
+                await self._fill_weights()
+                await self._flush_calibration()
+                hz = await self._on_frame(frame.image, frame.seq, frame.ts, source.name, room_name)
+                # One rate for the whole source: it polls every subscription
+                # on one clock, so the fastest room sets the pace.
+                source.set_rate(hz)
+        finally:
+            for task in (engine, watch):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            await source.aclose()
+
     async def run_relay(self) -> None:
         """Frames arrive from the Engine; the browser owns the clock."""
         async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
@@ -716,7 +765,9 @@ async def main(argv: list[str] | None = None) -> int:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, stop.set)
 
-    if cfg.source == "relay":
+    if cfg.source == "sfu":
+        work = asyncio.create_task(runner.run_sfu())
+    elif cfg.source == "relay":
         work = asyncio.create_task(runner.run_relay())
     else:
         source = sources.build(

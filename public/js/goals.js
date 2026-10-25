@@ -216,6 +216,20 @@ function renderPerception() {
   box.className = "pstatus pstatus-on";
   box.textContent = workers.map((w) => `${w.room} · ${w.encoderId} · ${w.dim}-d`).join("   ");
 
+  // A room whose frames have dried up while its camera is still on the wall
+  // is almost always a backgrounded publisher tab, and nothing else on this
+  // page would ever say so.
+  const stale = (state.rooms ?? []).filter((r) => r.secondsAgo > 20);
+  if (stale.length > 0) {
+    banner.hidden = false;
+    banner.innerHTML =
+      "<b>Frames have stopped arriving.</b> " +
+      stale.map((r) => `${esc(r.room)} last sent ${Math.round(r.secondsAgo)}s ago`).join(", ") +
+      ". A publisher tab that is hidden gets throttled by the browser and stops " +
+      "sending, while its camera stays on the wall. Bring that tab to the front, " +
+      "or publish from a phone and watch this page elsewhere.";
+  }
+
   // A skill with no vector means perception has not embedded its label yet.
   // Brief and normal after creating a goal; permanent if the encoder failed
   // to load, which is worth distinguishing from "nothing is happening".

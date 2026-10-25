@@ -19,7 +19,12 @@ from typing import Literal
 
 from .log import Level
 
-SourceKind = Literal["folder", "camera", "relay"]
+#: `sfu` pulls straight off the Realtime SFU, the way a viewer does, and is
+#: the right default: the video is already flowing there, so a publisher
+#: uploading a second copy is both slower and dependent on its tab staying
+#: in the foreground. `relay` is that older path, kept for sources that
+#: cannot reach the SFU.
+SourceKind = Literal["sfu", "folder", "camera", "relay"]
 #: `stub` is a fake encoder with no model behind it. It exists so the whole
 #: pipeline can be exercised in seconds instead of after a four gigabyte
 #: download; it detects nothing and no threshold fitted against it transfers.
@@ -115,7 +120,9 @@ def load(argv: list[str] | None = None) -> Config:
     add("--room", default=_env("PACT_ROOM", "default"))
     add("--hub", default=_env("PACT_HUB", "http://localhost:8787"))
 
-    add("--source", choices=("folder", "camera", "relay"), default=_env("PACT_SOURCE", "folder"))
+    add(
+        "--source", choices=("sfu", "folder", "camera", "relay"), default=_env("PACT_SOURCE", "sfu")
+    )
     add("--folder", default=_env("PACT_FOLDER"))
     add("--camera-index", type=int, default=_env_int("PACT_CAMERA_INDEX", 0))
     add(

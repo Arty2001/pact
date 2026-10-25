@@ -65,6 +65,16 @@ export class Engine implements DurableObject {
    */
   private rates = new Map<string, number>();
 
+  /**
+   * When each room last actually delivered a frame.
+   *
+   * The one fact that distinguishes "nothing is happening in that room" from
+   * "that publisher has stopped sending", which look identical everywhere
+   * else: the camera stays on the wall either way, because that is a
+   * separate socket the browser keeps open regardless.
+   */
+  private lastFrameAt = new Map<string, number>();
+
   constructor(
     private ctx: DurableObjectState,
     private env: { NEBIUS_API_KEY?: string },
@@ -283,6 +293,7 @@ export class Engine implements DurableObject {
     }
 
     const seq = Number(request.headers.get("X-Frame-Seq") ?? "0");
+    this.lastFrameAt.set(room, Date.now());
     const targets = this.perceptionSockets(room);
     if (targets.length > 0) {
       const jpegBase64 = base64(bytes);
@@ -590,6 +601,7 @@ export class Engine implements DurableObject {
         instances: this.instances(goal.key),
       })),
       questions: this.openQuestions(),
+      rooms: [...this.lastFrameAt].map(([room, at]) => ({ room, secondsAgo: (Date.now() - at) / 1000 })),
       perception: this.ctx
         .getWebSockets()
         .map((ws) => this.metaOf(ws))

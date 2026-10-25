@@ -180,6 +180,18 @@ async function start() {
       if (!tap) return;
       const { sampled, gated, sent, lastMoved } = tap.stats;
       const gate = el("onair-gate");
+
+      // Checked before everything else, because while it is true none of the
+      // other numbers are moving and all of them look fine.
+      if (tap.throttled) {
+        gate.className = "status err";
+        gate.textContent =
+          "This tab is in the background, so the browser has throttled it and " +
+          "frames have stopped. Keep this tab visible - or publish from a phone " +
+          "and watch the goals page somewhere else.";
+        return;
+      }
+
       if (tap.unwatched) {
         // The feed is on the wall and nothing is analysing it. Say so, and
         // say what to do, because every other signal on this page looks
