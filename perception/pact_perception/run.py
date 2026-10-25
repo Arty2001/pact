@@ -168,6 +168,9 @@ class Runner:
         #: skills are known is a frame silently thrown away, and on a short
         #: recording that can be the whole run.
         self._ready = asyncio.Event()
+        #: Set when the registry changes, so labels get embedded off the
+        #: scoring path instead of waiting for a frame that may never come.
+        self._registry_changed = asyncio.Event()
 
         self.ledger.on_registry(self._on_registry)
 
@@ -247,6 +250,7 @@ class Runner:
             needing_weights=len(self._pending_weights),
         )
         self._ready.set()
+        self._registry_changed.set()
 
     async def _flush_calibration(self) -> None:
         while self._pending_calibration:
@@ -260,6 +264,20 @@ class Runner:
                 skill.bias,
                 skill.temperature,
             )
+
+    async def _embed_labels(self) -> None:
+        """
+        Embed labels as soon as the registry names them.
+
+        A vector is the encoded label and nothing else, so it needs no frame.
+        Embedding inside the frame loop meant a wall with no camera on it
+        never embedded at all, and the first frames after a camera appeared
+        were spent on nine encoder calls rather than on scoring.
+        """
+        while True:
+            await self._registry_changed.wait()
+            self._registry_changed.clear()
+            await self._fill_weights()
 
     async def _fill_weights(self) -> None:
         """Embed the labels of skills that have no usable vector yet."""
@@ -756,6 +774,7 @@ class Runner:
 
         source = SfuSource(self.cfg.hub, self.log, hz=self.cfg.idle_hz)
         engine = asyncio.create_task(self._hold_socket())
+        embed = asyncio.create_task(self._embed_labels())
 
         async def follow() -> None:
             while True:
@@ -778,14 +797,13 @@ class Runner:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._ready.wait(), timeout=15.0)
             async for room_name, frame in source.frames():
-                await self._fill_weights()
                 await self._flush_calibration()
                 hz = await self._on_frame(frame.image, frame.seq, frame.ts, source.name, room_name)
                 # One rate for the whole source: it polls every subscription
                 # on one clock, so the fastest room sets the pace.
                 source.set_rate(hz)
         finally:
-            for task in (engine, watch):
+            for task in (engine, watch, embed):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -793,16 +811,24 @@ class Runner:
 
     async def run_relay(self) -> None:
         """Frames arrive from the Engine; the browser owns the clock."""
-        async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
-            await self._fill_weights()
-            await self._flush_calibration()
-            with Image.open(io.BytesIO(frame.jpeg)) as im:
-                image = im.convert("RGB")
-            await self._on_frame(image, frame.seq, frame.ts or time.time(), "relay", frame.room)
+        embed = asyncio.create_task(self._embed_labels())
+        try:
+            async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
+                await self._flush_calibration()
+                with Image.open(io.BytesIO(frame.jpeg)) as im:
+                    image = im.convert("RGB")
+                await self._on_frame(
+                    image, frame.seq, frame.ts or time.time(), "relay", frame.room
+                )
+        finally:
+            embed.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await embed
 
     async def run_local(self, source: Any) -> None:
         """We own the clock: a folder or a camera, paced by the skills."""
         socket = asyncio.create_task(self._hold_socket())
+        embed = asyncio.create_task(self._embed_labels())
         try:
             # Wait for the registry rather than racing it. If the Engine is
             # unreachable this proceeds anyway after a moment, so a local
@@ -813,16 +839,16 @@ class Runner:
                 self.log.warn("service.error", detail="no registry; scoring nothing")
 
             async for frame in source.frames():
-                await self._fill_weights()
                 await self._flush_calibration()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, self.cfg.room
                 )
                 source.set_rate(hz)
         finally:
-            socket.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await socket
+            for task in (socket, embed):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     async def _hold_socket(self) -> None:
         """Keep the Engine socket open while a local source drives the loop."""
