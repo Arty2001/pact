@@ -483,7 +483,13 @@ export class Engine implements DurableObject {
 
   private settleIfDue(goal: Goal, log: Logger): void {
     const instance = this.ensureInstance(goal);
-    if (instance.state === "done" || instance.state === "violated") return;
+
+    // A settled instance stops being re-settled, but it does NOT stop
+    // counting. Returning here was why a goal that wanted five reps froze at
+    // five while the camera went on recording the sixth through the ninth:
+    // the tally is a record of what happened, and what happened kept
+    // happening after the threshold was crossed.
+    const alreadySettled = instance.state === "done" || instance.state === "violated";
 
     const links = this.links(goal.key);
     const since = Date.now() - WINDOW_LOOKBACK_MS;
@@ -500,6 +506,7 @@ export class Engine implements DurableObject {
     });
 
     this.sql("UPDATE instances SET observed = ? WHERE id = ?", verdict.observed, instance.id);
+    if (alreadySettled) return;
 
     if (!verdict.settled) {
       // A metric nobody has answered leaves the instance unsure, never
