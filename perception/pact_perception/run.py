@@ -345,7 +345,7 @@ class Runner:
         """The fastest rate any currently eligible skill needs."""
         hz = self.cfg.idle_hz
         for skill in eligible:
-            need = 8.0 if skill.kind == "counter" else 2.0 if skill.kind != "gate" else 0.5
+            need = 12.0 if skill.kind == "counter" else 2.0 if skill.kind != "gate" else 0.5
             hz = max(hz, need)
         return min(hz, self.cfg.max_hz)
 

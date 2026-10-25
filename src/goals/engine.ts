@@ -1026,15 +1026,23 @@ function defaultHz(kind: Skill["kind"]): number {
  * counted twice. Getting these from the generic defaults is why a squat
  * counter created by the planner could only ever record one rep per ten
  * seconds.
+ *
+ * A counter's numbers are set by the shape of the state machine rather than
+ * by taste. Promotion always costs two frames - one to open candidacy, one
+ * to clear dwell - so any dwell below a single sample interval means exactly
+ * that floor, and that floor is already the shortest honest debounce there
+ * is. Anything longer asks a rep to hold its bottom position: measured at
+ * 4.6 Hz, half of all real squats cleared enter for one frame only, and were
+ * rejected at 178ms and 215ms against a 400ms dwell.
  */
 function defaultDwellS(kind: Skill["kind"]): number {
-  if (kind === "counter") return 0.4;
+  if (kind === "counter") return 0.05;
   if (kind === "gate") return 3;
   return 2;
 }
 
 function defaultExitS(kind: Skill["kind"]): number {
-  return kind === "counter" ? 0.3 : 2;
+  return kind === "counter" ? 0.05 : 2;
 }
 
 function defaultCooldownS(kind: Skill["kind"]): number {
@@ -1052,7 +1060,7 @@ function defaultCooldownS(kind: Skill["kind"]): number {
  * of having to come back up.
  */
 function defaultMinCycleS(kind: Skill["kind"]): number {
-  return kind === "counter" ? 1.2 : 0;
+  return kind === "counter" ? 0.7 : 0;
 }
 
 /** Target for the n-th occurrence of a progression. */

@@ -277,8 +277,22 @@ class SfuSource:
         we look at rather than of what the decoder is allowed to do.
         """
         seen: dict[str, int] = {}
+        # A deadline, not a delay. Sleeping for the full interval and only
+        # then handing over a frame makes the period the interval PLUS
+        # however long scoring took, so a requested 8 Hz with 90ms of work
+        # per frame actually ran at 4.6 - and at 4.6 Hz the bottom of a fast
+        # squat is one frame, which no dwell can be short enough to catch.
+        due = time.monotonic()
         while not self._closed:
-            await asyncio.sleep(1.0 / self._hz)
+            due += 1.0 / self._hz
+            slack = due - time.monotonic()
+            if slack > 0:
+                await asyncio.sleep(slack)
+            else:
+                # Behind the clock. Carrying the debt forward would spend the
+                # next several periods sprinting to catch up a second that is
+                # already gone, so the deadline moves to now instead.
+                due = time.monotonic()
             for sub in list(self._subs.values()):
                 frame = sub.latest
                 if frame is None or seen.get(sub.device.id) == frame.seq:
