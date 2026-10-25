@@ -759,10 +759,20 @@ function requestPlot() {
 function quietBecause() {
   if ((state.perception ?? []).length === 0) return "no watcher is connected";
   if (devices.length === 0) return "no camera is publishing";
-  if (Date.now() - lastScoreAt > 4000) {
-    return "nothing is moving — the gate skips a still room, so it costs nothing";
+  if (Date.now() - lastScoreAt <= 4000) return "warming up";
+
+  // A watcher that has never reported on this room is not watching it, which
+  // looks exactly like a still room from here and wants the opposite fix.
+  // Saying "nothing is moving" when a subscription is delivering nothing
+  // sends you to stand in front of a camera that was never being read.
+  const seen = (state.watching ?? []).find((w) => w.room === activeRoom);
+  if (activeRoom !== null && seen === undefined) {
+    return "the watcher is not receiving this camera — it may still be connecting";
   }
-  return "warming up";
+  if (seen !== undefined && seen.secondsAgo > 30) {
+    return `nothing from this camera for ${Math.round(seen.secondsAgo)}s — check it is still sharing`;
+  }
+  return "nothing is moving — the gate skips a still room, so it costs nothing";
 }
 
 

@@ -178,6 +178,13 @@ class SfuSubscription:
                 await self.pc.close()
 
 
+#: How long the Hub may say nothing before it gets asked directly. Quiet is
+#: normal - a wall changes rarely - so this only has to be short enough that
+#: an orphaned socket is noticed before anyone is standing in front of a
+#: camera wondering why nothing counts.
+_RECONCILE_S = 20.0
+
+
 class SfuSource:
     """
     Every live device on the wall, sampled at a requested rate.
@@ -198,8 +205,34 @@ class SfuSource:
     def set_rate(self, hz: float) -> None:
         self._hz = max(0.1, min(hz, 30.0))
 
+    async def _ask_hub(self) -> list[Device] | None:
+        """The live set, asked for rather than waited for."""
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as http:
+                res = await http.get(f"{self.hub}/api/hub/devices")
+                res.raise_for_status()
+                return [_device(d) for d in res.json().get("devices", [])]
+        except Exception:
+            # The Hub being unreachable is the socket's problem to report.
+            return None
+
     async def devices(self) -> AsyncIterator[list[Device]]:
-        """The live set, pushed by the Hub whenever it changes."""
+        """
+        The live set, pushed by the Hub and checked against it.
+
+        A push socket cannot tell you it has stopped being listened to. This
+        one went quiet after a deploy cycled the Hub - still open, still
+        pinging, no longer in anyone's broadcast set - and the wall stayed
+        empty for five minutes while a camera was publishing, because
+        "nothing has changed" and "I am no longer being told" arrive as
+        exactly the same silence.
+
+        So the socket is for latency and the Hub's own answer is for truth.
+        Every RECONCILE_S of quiet, ask. If the answer differs from what the
+        socket believes, the socket has been talking to nobody: hand back
+        the truth and return, which drops the connection and makes the
+        caller open an honest one.
+        """
         import json
 
         import websockets
@@ -207,7 +240,21 @@ class SfuSource:
         url = self.hub.replace("http://", "ws://").replace("https://", "wss://") + "/api/hub/ws"
         live: dict[str, Device] = {}
         async with websockets.connect(url, max_size=4 * 1024 * 1024) as ws:
-            async for raw in ws:
+            while not self._closed:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=_RECONCILE_S)
+                except TimeoutError:
+                    truth = await self._ask_hub()
+                    if truth is None or {d.id for d in truth} == set(live):
+                        continue
+                    self.log.warn(
+                        "service.error",
+                        detail="hub socket went quiet while the wall changed; reconnecting",
+                        devices=[d.name for d in truth],
+                    )
+                    yield truth
+                    return
+
                 try:
                     msg = json.loads(raw)
                 except (ValueError, TypeError):

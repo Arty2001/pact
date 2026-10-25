@@ -102,6 +102,15 @@ export class Engine implements DurableObject {
    * separate socket the browser keeps open regardless.
    */
   private lastFrameAt = new Map<string, number>();
+  /**
+   * When perception last reported SCORES for a room.
+   *
+   * Distinct from lastFrameAt, which only moves on the browser's own frame
+   * posting and so says nothing about whether anything is analysing them.
+   * Without this the console cannot tell a quiet gate from a subscription
+   * that is delivering nothing, and it guessed - wrongly, and confidently.
+   */
+  private lastScoreAt = new Map<string, number>();
 
   constructor(
     private ctx: DurableObjectState,
@@ -374,6 +383,7 @@ export class Engine implements DurableObject {
     }
 
     if (msg.type === "scores") {
+      this.lastScoreAt.set(msg.room, Date.now());
       // Straight out to the browsers and then gone. Nothing is persisted,
       // which is what keeps this from quietly becoming the observations
       // table the whole process split exists to avoid.
@@ -1176,6 +1186,13 @@ export class Engine implements DurableObject {
       })),
       questions: this.openQuestions(),
       rooms: [...this.lastFrameAt].map(([room, at]) => ({ room, secondsAgo: (Date.now() - at) / 1000 })),
+      // Which rooms something is actually scoring, as opposed to which are
+      // merely publishing. The difference is the whole of "why is nothing
+      // happening".
+      watching: [...this.lastScoreAt].map(([room, at]) => ({
+        room,
+        secondsAgo: (Date.now() - at) / 1000,
+      })),
       perception: this.ctx
         .getWebSockets()
         .map((ws) => this.metaOf(ws))
