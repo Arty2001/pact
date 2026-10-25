@@ -56,6 +56,15 @@ const TICK_MS = 15 * 60 * 1000;
  */
 const WINDOW_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How long a transition is kept.
+ *
+ * Longer than the 24-hour evaluation window, because the console shows a
+ * fortnight of occurrences and an explanation has to survive long enough to
+ * be asked for. Shorter than forever, which is what it was.
+ */
+const LEDGER_RETAIN_MS = 14 * 24 * 60 * 60 * 1000;
+
 /** The same planner model. It already knows the vocabulary of this system. */
 const ASSISTANT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
@@ -235,6 +244,22 @@ export class Engine implements DurableObject {
         say: r.text,
         ui: { banner: r.text, tone: "nudge", focusGoal: r.goal_key ?? undefined },
       });
+    }
+
+    // The ledger is append-only and nothing was ever removing from it. Every
+    // read is windowed to the last day, so rows older than the retention
+    // window are not merely unused - they are scanned past, forever, by a
+    // query that can never return them. Settled instances keep their own
+    // summary, so this loses no verdict.
+    const stale = Date.now() - LEDGER_RETAIN_MS;
+    const cut = this.rows<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM transitions WHERE at < ?",
+      stale,
+    )[0]?.n;
+    if (cut !== undefined && cut > 0) {
+      this.sql("DELETE FROM transitions WHERE at < ?", stale);
+      this.sql("DELETE FROM reminders WHERE done = 1 AND at < ?", stale);
+      this.log.info("goal.evaluate", { detail: `pruned ${cut} transitions past retention` });
     }
 
     // The next wake is whichever comes first: the regular tick, or a nudge.

@@ -226,9 +226,11 @@ a { color: var(--proved-text); }
 .col { display: flex; flex-direction: column; gap: clamp(14px, 2vw, 20px); min-width: 0; }
 
 .card {
-  background: var(--glass);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
+  /* No backdrop-filter. The ground behind a card is a fixed gradient, so a
+     blur of it is a constant - visually identical to this plate and paid for
+     on every composited frame. The blur is kept where the backdrop actually
+     moves under it: the sticky bar, and the dialog over the page. */
+  background: rgba(255, 255, 255, .72);
   border: 1px solid var(--glass-top);
   box-shadow: var(--lift), var(--inner);
   border-radius: var(--r2);
@@ -506,8 +508,6 @@ a { color: var(--proved-text); }
   padding: 13px 16px;
   border: 1px solid var(--pending-edge);
   background: var(--pending-wash);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
   border-radius: var(--r2);
   box-shadow: var(--lift);
   font-size: 13px;
@@ -643,9 +643,7 @@ body.join {
 .join-card {
   width: 100%;
   max-width: 440px;
-  background: var(--glass);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
+  background: rgba(255, 255, 255, .74);
   border: 1px solid var(--glass-top);
   border-radius: var(--r3);
   box-shadow: var(--lift2), var(--inner);
@@ -784,9 +782,11 @@ body.join {
   gap: 11px;
   padding: 9px 14px 9px 11px;
   border-radius: var(--r);
-  background: rgba(7, 11, 16, .72);
-  backdrop-filter: saturate(150%) blur(16px);
-  -webkit-backdrop-filter: saturate(150%) blur(16px);
+  /* Opaque, not frosted. A backdrop-filter here would re-blur a region of
+     video that changes on every decoded frame, for the whole four seconds
+     the toast is up - the most expensive compositing in the app, over the
+     one surface where the blur is least visible anyway. */
+  background: rgba(7, 11, 16, .86);
   border: 1px solid rgba(255, 255, 255, .13);
   border-left: 3px solid rgba(255, 255, 255, .3);
   box-shadow: 0 8px 24px -8px rgba(0, 0, 0, .6);
@@ -903,9 +903,7 @@ body.join {
   gap: 3px;
   padding: 11px 16px;
   border-radius: var(--r2);
-  background: var(--glass);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
+  background: rgba(255, 255, 255, .72);
   border: 1px solid var(--glass-top);
   box-shadow: var(--lift), var(--inner);
   transition: border-color .2s, box-shadow .2s;

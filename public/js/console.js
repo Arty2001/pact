@@ -245,9 +245,12 @@ function renderMeta() {
  * not anything is scoring its frames — which means every other indicator can
  * read fine while nothing at all is happening.
  */
+let noticeShown = false;
+
 function renderNotices() {
   const box = $("notices");
   box.replaceChildren();
+  noticeShown = false;
 
   // Liveness comes from scores arriving, not from the last snapshot. The
   // watcher's socket drops and reconnects in under two seconds on any
@@ -256,6 +259,7 @@ function renderNotices() {
   const scoring = Date.now() - lastScoreAt < 15000;
   if (scoring || (state.perception ?? []).length > 0) return;
 
+  noticeShown = true;
   box.append(
     notice(
       "bad",
@@ -563,59 +567,138 @@ function renderEvents(list) {
  * produces one event and not forty, so the band between them is drawn as a
  * fill: it is the part of the picture that explains the behaviour.
  */
-function drawPlot() {
-  const svg = $("plot");
-  const W = 600;
-  const H = 150;
-  const y = (v) => H - 12 - v * (H - 26);
-  const parts = [];
+/*
+ * The chart is built once and then only moved.
+ *
+ * It used to rebuild its own innerHTML on every scores message: four times a
+ * second, five series, two hundred points each - four thousand coordinates
+ * formatted into a string, parsed, and laid out, per second, on the same
+ * main thread that is decoding the video next to it. That is the delay that
+ * grows the longer it runs, because it competes with everything else for a
+ * budget that gets smaller as the machine warms up.
+ *
+ * Structure changes only when the SET of series changes. A new sample moves
+ * the points of a polyline that is already there.
+ */
 
-  // An enter/exit band belongs to one skill. Six of them stacked would be
-  // six overlapping rectangles and no readable threshold, so the band
-  // appears only once the chart has been narrowed to a single series.
+/** What is currently in the DOM, so a redraw can tell if it still fits. */
+let plotShape = "";
+const plotNodes = new Map();
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+const W = 600;
+const H = 150;
+const yOf = (v) => H - 12 - v * (H - 26);
+
+function svg(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+  return el;
+}
+
+function shownSeries() {
+  return [...traces.entries()].filter(
+    ([key, pts]) => pts.length > 1 && (focusSkill === null || key === focusSkill),
+  );
+}
+
+function rebuildPlot(shown) {
+  const host = $("plot");
+  host.replaceChildren();
+  plotNodes.clear();
+
+  if (shown.length === 0) {
+    host.append(
+      Object.assign(
+        svg("text", { class: "plot-wait", x: W / 2, y: H / 2, "text-anchor": "middle" }),
+        { textContent: quietBecause() },
+      ),
+    );
+    return;
+  }
+
+  // An enter/exit band belongs to one skill. Six of them stacked would be six
+  // overlapping rectangles and no readable threshold, so it appears only once
+  // the chart has been narrowed to a single series.
   const focus = focusSkill ? state.skills.find((s) => s.key === focusSkill) : null;
   if (focus) {
     const enter = focus.enterConf ?? 0.75;
     const exit = focus.exitConf ?? 0.45;
-    parts.push(
-      '<rect class="plot-band" x="42" y="' + y(enter) + '" width="' + (W - 50) +
-        '" height="' + Math.max(0, y(exit) - y(enter)) + '"/>',
-      line(42, y(enter), W - 8, y(enter), "plot-enter"),
-      line(42, y(exit), W - 8, y(exit), "plot-exit"),
-      label(0, y(enter) + 3, num(enter), "plot-lbl enter"),
-      label(0, y(exit) + 3, num(exit), "plot-lbl"),
+    host.append(
+      svg("rect", {
+        class: "plot-band",
+        x: 42,
+        y: yOf(enter),
+        width: W - 50,
+        height: Math.max(0, yOf(exit) - yOf(enter)),
+      }),
+      svg("line", { class: "plot-enter", x1: 42, y1: yOf(enter), x2: W - 8, y2: yOf(enter), "stroke-width": 1, "stroke-dasharray": "3 3" }),
+      svg("line", { class: "plot-exit", x1: 42, y1: yOf(exit), x2: W - 8, y2: yOf(exit), "stroke-width": 1, "stroke-dasharray": "3 3" }),
+      Object.assign(svg("text", { class: "plot-lbl enter", x: 0, y: yOf(enter) + 3 }), {
+        textContent: num(enter),
+      }),
+      Object.assign(svg("text", { class: "plot-lbl", x: 0, y: yOf(exit) + 3 }), {
+        textContent: num(exit),
+      }),
     );
   }
 
-  const shown = [...traces.entries()].filter(
-    ([key, pts]) => pts.length > 1 && (focusSkill === null || key === focusSkill),
-  );
+  for (const [key] of shown) {
+    const stroke = hueOf(key);
+    const curve = svg("polyline", {
+      class: `plot-curve${focusSkill === key ? " lead" : ""}`,
+      points: "",
+      style: `stroke:${stroke}`,
+    });
+    const head = svg("circle", { class: "plot-head", r: 3, cx: 0, cy: 0, style: `fill:${stroke}` });
+    host.append(curve, head);
+    plotNodes.set(key, { curve, head });
+  }
+}
 
+function drawPlot() {
+  const shown = shownSeries();
+  const shape = `${focusSkill}|${shown.map(([k]) => k).join(",")}`;
+  if (shape !== plotShape) {
+    plotShape = shape;
+    rebuildPlot(shown);
+  }
   if (shown.length === 0) {
-    parts.push(
-      '<text class="plot-wait" x="' + W / 2 + '" y="' + H / 2 +
-        '" text-anchor="middle">' + esc(quietBecause()) + "</text>",
-    );
-    svg.innerHTML = parts.join("");
+    // The reason can change while the shape does not - a gate shutting does
+    // not add or remove a series.
+    const label = $("plot").firstElementChild;
+    if (label) label.textContent = quietBecause();
     return;
   }
 
   const step = (W - 50) / Math.max(TRACE - 1, 1);
   for (const [key, pts] of shown) {
-    const stroke = hueOf(key);
-    const d = pts.map((pt, i) => 42 + i * step + "," + y(pt.score)).join(" ");
-    parts.push(
-      '<polyline class="plot-curve' + (focusSkill === key ? " lead" : "") +
-        '" points="' + d + '" style="stroke:' + stroke + '"/>',
-    );
+    const node = plotNodes.get(key);
+    if (node === undefined) continue;
+    let d = "";
+    for (let i = 0; i < pts.length; i += 1) d += `${42 + i * step},${yOf(pts[i].score)} `;
+    node.curve.setAttribute("points", d);
     const last = pts[pts.length - 1];
-    parts.push(
-      '<circle class="plot-head" cx="' + (42 + (pts.length - 1) * step) +
-        '" cy="' + y(last.score) + '" r="3" style="fill:' + stroke + '"/>',
-    );
+    node.head.setAttribute("cx", String(42 + (pts.length - 1) * step));
+    node.head.setAttribute("cy", String(yOf(last.score)));
   }
+}
 
-  svg.innerHTML = parts.join("");
+/**
+ * One redraw per frame, however many samples arrive.
+ *
+ * Drawing straight from the socket handler puts layout work in the middle of
+ * whatever the browser was doing; a frame callback lands it on a boundary,
+ * and a burst of messages collapses into one.
+ */
+let plotQueued = false;
+function requestPlot() {
+  if (plotQueued) return;
+  plotQueued = true;
+  requestAnimationFrame(() => {
+    plotQueued = false;
+    drawPlot();
+  });
 }
 
 /**
@@ -637,9 +720,6 @@ function quietBecause() {
   return "warming up";
 }
 
-const line = (x1, y1, x2, y2, cls) =>
-  `<line class="${cls}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke-width="1" stroke-dasharray="3 3"/>`;
-const label = (x, yy, t, cls) => `<text class="${cls}" x="${x}" y="${yy}">${t}</text>`;
 
 function pushScore(skillKey, score, phase) {
   const s = seriesFor(skillKey);
@@ -680,37 +760,76 @@ function loudest() {
  * measurements. Down here each carries its series colour, so reading the
  * chart needs no key, and clicking narrows the chart to that one skill.
  */
+/** Live legend entries, so a value change does not rebuild the control. */
+const legendNodes = new Map();
+let legendShape = "";
+
+/**
+ * The legend, which is also the filter.
+ *
+ * These used to float over the camera, where four of them covered the lower
+ * third of the frame and the thing being measured sat behind the
+ * measurements. Down here each carries its series colour, so reading the
+ * chart needs no key, and clicking narrows the chart to that one skill.
+ *
+ * Rebuilt only when the set of skills changes. Recreating five buttons and
+ * five closures four times a second was twenty nodes a second thrown away,
+ * and it made clicking one a race against its own replacement.
+ */
 function renderLegend(scores) {
   const host = $("legend");
   if (host === null) return;
   const keys = Object.keys(scores).sort();
 
-  host.replaceChildren(
-    ...keys.map((key) => {
-      const s = scores[key];
-      const el = document.createElement("button");
-      el.type = "button";
-      el.className = "sig is-" + (s.phase ?? "idle") + (focusSkill === key ? " on" : "");
-      el.title = state.skills.find((x) => x.key === key)?.label ?? key;
-      el.setAttribute("aria-pressed", String(focusSkill === key));
-      el.innerHTML =
-        '<i style="background:' + hueOf(key) + '"></i>' +
-        '<span class="k">' + esc(key) + "</span>" +
-        '<span class="v">' + num(s.score) + "</span>";
-      // Clicking the focused one clears the filter, so there is always a way
-      // back to the whole picture without hunting for a reset control.
-      el.addEventListener("click", () => {
-        focusSkill = focusSkill === key ? null : key;
-        renderLegend(scores);
-        drawPlot();
-      });
-      return el;
-    }),
-  );
+  const shape = keys.join(",");
+  if (shape !== legendShape) {
+    legendShape = shape;
+    legendNodes.clear();
+    host.replaceChildren(
+      ...keys.map((key) => {
+        const el = document.createElement("button");
+        el.type = "button";
+        el.title = state.skills.find((x) => x.key === key)?.label ?? key;
+        const dot = document.createElement("i");
+        dot.style.background = hueOf(key);
+        const name = document.createElement("span");
+        name.className = "k";
+        name.textContent = key;
+        const value = document.createElement("span");
+        value.className = "v";
+        el.append(dot, name, value);
+        // Clicking the focused one clears the filter, so there is always a
+        // way back to the whole picture without hunting for a reset control.
+        el.addEventListener("click", () => {
+          focusSkill = focusSkill === key ? null : key;
+          syncLegend(scores);
+          drawPlot();
+        });
+        legendNodes.set(key, { el, value });
+        return el;
+      }),
+    );
+  }
+  syncLegend(scores);
 
   const hit = keys.some((k) => scores[k].phase === "active");
   const box = document.querySelector(".bbox");
   if (box) box.classList.toggle("hit", hit);
+}
+
+/** Text and state only. Touching nothing that holds a listener. */
+function syncLegend(scores) {
+  for (const [key, node] of legendNodes) {
+    const s = scores[key];
+    if (s === undefined) continue;
+    const next = num(s.score);
+    if (node.value.textContent !== next) node.value.textContent = next;
+    const cls = `sig is-${s.phase ?? "idle"}${focusSkill === key ? " on" : ""}`;
+    if (node.el.className !== cls) {
+      node.el.className = cls;
+      node.el.setAttribute("aria-pressed", String(focusSkill === key));
+    }
+  }
 }
 
 // ------------------------------------------------------------------ video --
@@ -965,9 +1084,11 @@ function engineSocket() {
       $("r-rate").textContent = msg.hz ? `${msg.hz} Hz` : "—";
       $("r-rate").title = "frames per second this camera is being sampled at";
       for (const [key, s] of Object.entries(msg.scores ?? {})) pushScore(key, s.score, s.phase);
-      drawPlot();
+      requestPlot();
       renderLegend(msg.scores ?? {});
-      renderNotices();
+      // Notices answer "is anything scoring", which a score arriving already
+      // settled. Rebuilding that four times a second said nothing new.
+      if (noticeShown) renderNotices();
     } else if (msg.type === "assistant") {
       // Another surface spoke - the phone in the room, or a reminder firing
       // on the alarm. Every console shows the same exchange, but only the
