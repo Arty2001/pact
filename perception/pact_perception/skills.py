@@ -1,0 +1,271 @@
+"""
+A skill is a dot product. This is where the dot product happens.
+
+There is no model behind a skill. There is a vector the same width as the
+embedding, so scoring fifty skills against one frame is fifty dot products of
+1152 terms each, which is microseconds. That is the property the whole design
+rests on: adding a goal costs nothing per frame.
+
+The part the design got wrong, and the reason this module exists at all, is
+turning a cosine into a score. The written formula is sigmoid(w*e + b), and
+with b at zero that produces nothing usable: cosines in a CLIP-family space
+run from about -0.1 to 0.4, so every score lands between 0.475 and 0.599 and
+an enter threshold of 0.75 is not merely untuned, it is unreachable. Nothing
+would ever fire.
+
+Borrowing SigLIP's own learned scale fails the other way. At a scale near 100
+the band from 0.45 to 0.75 spans 0.013 of cosine, so the hysteresis that is
+supposed to debounce a wobbling signal covers less than the frame-to-frame
+noise and debounces nothing.
+
+So the scale and the offset are per skill and fitted from recorded frames:
+
+    score = sigmoid((w . e - bias) / temperature)
+
+`bias` is the cosine at which the score is exactly 0.5, placed at a high
+quantile of what the room looks like when nothing is happening. `temperature`
+is chosen so the 0.45-to-0.75 band spans a stated number of standard
+deviations of that background. Both come out of `calibrate`, which needs
+background footage and no labels at all.
+
+The `none` class of a discriminator is a scalar rather than a text row. Zero
+shot gives every class the embedding of its label, but no sentence describes
+"none of the above", so there is nothing to embed. A logit of zero is exactly
+right instead: a real class only beats it once its cosine clears that class's
+own bias, which is the definition of the class being present.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+
+import numpy as np
+
+from .machine import Params
+
+SkillKind = (
+    "gate",
+    "object",
+    "action",
+    "counter",
+    "discriminator",
+    "metric",
+)
+
+#: Kinds perception actually scores. A metric is a question for a person;
+#: no camera can see it, so it never reaches the encoder.
+SCORED_KINDS = frozenset({"gate", "object", "action", "counter", "discriminator"})
+
+
+def sigmoid(x: np.ndarray | float) -> np.ndarray:
+    # Written through tanh rather than exp so a large negative input returns
+    # zero instead of overflowing on the way there.
+    return 0.5 * (1.0 + np.tanh(np.asarray(x, dtype=np.float64) / 2.0))
+
+
+def softmax(x: np.ndarray) -> np.ndarray:
+    z = np.asarray(x, dtype=np.float64)
+    z = z - np.max(z)
+    e = np.exp(z)
+    return e / np.sum(e)
+
+
+@dataclass(frozen=True, slots=True)
+class Skill:
+    """
+    One row of the registry.
+
+    `w` is (dim,) for every kind but a discriminator, where it is (K, dim),
+    one row per real class. `encoder_id` records the embedding space the
+    vector was fitted in: a weight vector is meaningless under a different
+    encoder or a different input resolution, and the failure is silent rather
+    than loud, so it is checked before scoring rather than hoped about.
+    """
+
+    key: str
+    kind: str
+    label: str
+    w: np.ndarray | None = None
+    bias: float = 0.0
+    temperature: float = 1.0
+    encoder_id: str = ""
+    params: Params = field(default_factory=Params)
+    depends_on: str | None = None
+    classes: tuple[str, ...] = ()
+    margin: float = 0.15
+    #: Labels collected so far. A skill with none of them should run looser
+    #: and ask more often than one with fifty; see `loosen_for`.
+    n_labels: int = 0
+
+    @property
+    def ready(self) -> bool:
+        return self.w is not None
+
+    @property
+    def scored(self) -> bool:
+        return self.kind in SCORED_KINDS
+
+
+@dataclass(frozen=True, slots=True)
+class Distribution:
+    """A discriminator's output. The only kind that returns more than a number."""
+
+    probs: tuple[float, ...]
+    names: tuple[str, ...]
+    top: str
+    p1: float
+    runner_up: str
+    p2: float
+
+    @property
+    def margin(self) -> float:
+        return self.p1 - self.p2
+
+
+class EncoderMismatch(RuntimeError):
+    """
+    Raised rather than scoring a skill fitted against a different encoder.
+
+    Swapping the model or the input resolution moves every vector in the
+    space. Scoring anyway returns plausible numbers that mean nothing, which
+    is far worse than stopping.
+    """
+
+
+def score(skill: Skill, embedding: np.ndarray, encoder_id: str) -> float:
+    """Sigmoid score for every kind except a discriminator."""
+    _check(skill, embedding, encoder_id)
+    assert skill.w is not None
+    cos = float(np.dot(skill.w, embedding))
+    return float(sigmoid((cos - skill.bias) / max(skill.temperature, 1e-6)))
+
+
+def discriminate(skill: Skill, embedding: np.ndarray, encoder_id: str) -> Distribution:
+    """
+    Softmax over K real classes plus `none`.
+
+    A softmax rather than K independent sigmoids because mutual exclusivity
+    has to be structural: two sigmoids can both fire, and nothing in that
+    arithmetic knows you only have one hand. The margin between the top two
+    is the escalation trigger, and it is a far better one than any absolute
+    threshold, because it says "I cannot tell these apart" rather than "I am
+    unsure in general".
+    """
+    _check(skill, embedding, encoder_id)
+    assert skill.w is not None
+    w = np.atleast_2d(skill.w)
+    cos = w @ embedding
+    logits = (cos - skill.bias) / max(skill.temperature, 1e-6)
+    # `none` sits at zero, so a real class wins exactly when its cosine has
+    # cleared the bias. No sentence to embed, and nothing to tune.
+    probs = softmax(np.concatenate([logits, np.zeros(1)]))
+    names = (*skill.classes[: len(logits)], "none")
+    order = np.argsort(probs)[::-1]
+    return Distribution(
+        probs=tuple(float(p) for p in probs),
+        names=names,
+        top=names[int(order[0])],
+        p1=float(probs[order[0]]),
+        runner_up=names[int(order[1])],
+        p2=float(probs[order[1]]),
+    )
+
+
+def _check(skill: Skill, embedding: np.ndarray, encoder_id: str) -> None:
+    if skill.w is None:
+        raise ValueError(f"skill {skill.key!r} has no weight vector yet")
+    if skill.encoder_id and skill.encoder_id != encoder_id:
+        raise EncoderMismatch(
+            f"skill {skill.key!r} was fitted against {skill.encoder_id!r}, "
+            f"but the live encoder is {encoder_id!r}"
+        )
+    if np.atleast_2d(skill.w).shape[-1] != embedding.shape[-1]:
+        raise EncoderMismatch(
+            f"skill {skill.key!r} has {np.atleast_2d(skill.w).shape[-1]}-d weights, "
+            f"embedding is {embedding.shape[-1]}-d"
+        )
+
+
+# ------------------------------------------------------------- calibration --
+
+
+def calibrate(
+    background_cosines: np.ndarray,
+    *,
+    enter_conf: float = 0.75,
+    exit_conf: float = 0.45,
+    quantile: float = 0.98,
+    band_sigmas: float = 1.5,
+) -> tuple[float, float]:
+    """
+    Fit `bias` and `temperature` from footage of nothing happening.
+
+    Returns the two numbers that make `enter_conf` and `exit_conf` mean
+    something for this skill in this room. Needs no labels, which is what
+    lets a brand new skill be usable immediately: point a camera at an empty
+    room for a few minutes and the background distribution is the calibration
+    set.
+
+    `bias` goes at a high quantile of the background, so an ordinary frame
+    scores well under 0.5 and only an unusual one crosses it.
+
+    `temperature` is set so the distance from exit_conf to enter_conf covers
+    `band_sigmas` standard deviations of that background. The algebra: a
+    sigmoid reaches p at bias + temperature * logit(p), so the band spans
+    temperature * (logit(enter) - logit(exit)) in cosine, and we want that to
+    equal band_sigmas * sigma.
+    """
+    cos = np.asarray(background_cosines, dtype=np.float64).ravel()
+    if cos.size < 8:
+        raise ValueError(f"need at least 8 background samples to calibrate, got {cos.size}")
+
+    bias = float(np.quantile(cos, quantile))
+    sigma = float(np.std(cos))
+    # A perfectly flat background (a frozen frame, a test fixture) would give
+    # a zero width and a divide by zero. Fall back to something small but
+    # finite so calibration degrades rather than explodes.
+    sigma = max(sigma, 1e-3)
+
+    span_in_logits = _logit(enter_conf) - _logit(exit_conf)
+    temperature = (band_sigmas * sigma) / span_in_logits
+    return bias, float(max(temperature, 1e-6))
+
+
+def _logit(p: float) -> float:
+    return float(np.log(p / (1.0 - p)))
+
+
+def apply_calibration(skill: Skill, bias: float, temperature: float, encoder_id: str) -> Skill:
+    return replace(skill, bias=bias, temperature=temperature, encoder_id=encoder_id)
+
+
+# ----------------------------------------------------------------- warm-up --
+
+#: A skill with no labels should catch more and miss less, accept the extra
+#: teacher calls, and tighten as evidence arrives. These are the design's
+#: warm-up bands: looser entry and faster escalation while n is small.
+_WARMUP: tuple[tuple[int, float, float], ...] = (
+    (0, 0.60, 30.0),
+    (5, 0.65, 45.0),
+    (16, 0.70, 60.0),
+)
+
+
+def loosen_for(params: Params, n_labels: int) -> Params:
+    """
+    Relax the thresholds of a skill that has not learned anything yet.
+
+    The honest failure this mitigates: the first time you do something new in
+    front of a camera that has never seen it, you get zero-shot quality, and
+    if that is weak for your room the session may be missed entirely. Running
+    loose at the start is the mitigation, not a cure, which is why the manual
+    entry path has to stay first class.
+    """
+    enter, escalate = params.enter_conf, params.escalate_after_s
+    for threshold, e, esc in _WARMUP:
+        if n_labels <= threshold:
+            enter, escalate = e, esc
+            break
+    else:
+        return params
+    return replace(params, enter_conf=min(enter, params.enter_conf), escalate_after_s=escalate)
