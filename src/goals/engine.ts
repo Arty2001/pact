@@ -192,6 +192,15 @@ export class Engine implements DurableObject {
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ role: "watcher" } satisfies SocketMeta);
+
+    // Hand a new watcher today's events immediately. A console that opens
+    // empty and fills in only as things happen shows nothing about a system
+    // that has been running all day.
+    try {
+      server.send(JSON.stringify({ type: "events", events: this.recentTransitions() }));
+    } catch {
+      // The socket can close between accept and first send.
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -221,6 +230,14 @@ export class Engine implements DurableObject {
 
     if (msg.type === "rate") {
       this.rates.set(msg.room, msg.hz);
+      return;
+    }
+
+    if (msg.type === "scores") {
+      // Straight out to the browsers and then gone. Nothing is persisted,
+      // which is what keeps this from quietly becoming the observations
+      // table the whole process split exists to avoid.
+      this.toWatchers({ type: "scores", room: msg.room, hz: msg.hz, scores: msg.scores });
       return;
     }
 
@@ -824,17 +841,52 @@ export class Engine implements DurableObject {
     }
   }
 
-  /** Nudge every watching browser to re-read /state. */
+  /** Nudge every watching browser to re-read /state, with today's events. */
   private broadcastWatchers(): void {
+    this.toWatchers({ type: "changed", events: this.recentTransitions() });
+  }
+
+  private toWatchers(payload: unknown): void {
+    const json = JSON.stringify(payload);
     for (const ws of this.ctx.getWebSockets()) {
       if (this.metaOf(ws)?.role === "watcher") {
         try {
-          ws.send(JSON.stringify({ type: "changed" }));
+          ws.send(json);
         } catch {
-          // Same race as above.
+          // Socket raced us and closed; the close handler cleans up.
         }
       }
     }
+  }
+
+  /**
+   * Today's transitions, newest first.
+   *
+   * Bounded rather than paged: this feeds a live column, and a console that
+   * can scroll into last week is answering a question nobody asked while
+   * watching.
+   */
+  private recentTransitions() {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    return this.rows<Record<string, unknown>>(
+      "SELECT * FROM transitions WHERE at >= ? ORDER BY at DESC LIMIT 60",
+      since,
+    ).map((r) => ({
+      skillKey: String(r.skill_key),
+      kind: String(r.kind),
+      at: Number(r.at),
+      room: String(r.room),
+      traceId: String(r.trace_id),
+      score: Number(r.score),
+      reason: String(r.reason),
+      peak: r.peak === null ? null : Number(r.peak),
+      heldMs: r.held_ms === null ? null : Number(r.held_ms),
+      neededMs: r.needed_ms === null ? null : Number(r.needed_ms),
+      neededConf: r.needed_conf === null ? null : Number(r.needed_conf),
+      durationMs: r.duration_ms === null ? null : Number(r.duration_ms),
+      count: r.count === null ? null : Number(r.count),
+      verdictBy: r.verdict_by === null ? null : String(r.verdict_by),
+    }));
   }
 }
 

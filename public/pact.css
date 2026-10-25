@@ -1,835 +1,457 @@
 /* ===========================================================================
-   Pact — control surface
-   One accent colour, and it means something: #E8402A marks a live feed.
+   pact — design system.
+
+   Palette derived from both brands' own shipped CSS rather than from a brand
+   page, and from NVIDIA's open-source VSS Blueprint, which is their reference
+   UI for this exact product category.
+
+   Three rules it follows, all of them theirs rather than ours:
+
+   Green is a signal, never a surface. Tracing every consumer of
+   --color-brand in NVIDIA's shipped bundle, it resolves to text, borders,
+   focus rings and one button fill, and to no background token anywhere.
+
+   Hue carries one meaning. Green means proved, violet means a camera is
+   watching, amber means pending. Nothing else touches hue - focus and
+   selection use a wash and a ring instead. Langfuse shipped a second meaning
+   on colour and reverted it in production; no reason to rediscover that.
+
+   Radii are 2-4px. NVIDIA's own `rounded-lg` is 4px. Soft corners read as
+   consumer software; this is instrumentation.
    =========================================================================== */
 
 :root {
-  --ground:    #12161c;
-  --panel:     #1a1f28;
-  --raised:    #222a35;
-  --hairline:  #2b3442;
-  --hairline-2:#3a4555;
+  /* Ground: NVIDIA's dark-UI value steps carrying Nebius's navy tint. Nebius
+     builds its whole neutral ramp on navy rather than grey, which is why
+     their surfaces read engineered. Neither brand owns this exact ladder,
+     which is what keeps it from looking like a sponsor page. */
+  --bg:        #0A0E13;
+  --panel:     #101722;
+  --raised:    #16202D;
+  --hair:      #1A2430;
+  --line:      #1E2A38;
 
-  --bone:      #e9e6e0;
-  --dim:       #808b99;
-  --dimmer:    #4d5663;
+  --fg:        #E8EDF2;
+  --dim:       #94A3B4;
+  --dimmer:    #5E7183;
 
-  --tally:     #e8402a;
-  --seal:      #9e3340;
-  --ok:        #5fd4a8;
+  /* NVIDIA green. #76B900 for fills and rings; #BFF230 once it becomes type,
+     where it is 14.9:1 against this ground rather than 8.1:1. */
+  --proved:      #76B900;
+  --proved-text: #BFF230;
+  --proved-wash: rgba(118, 185, 0, .12);
 
-  --rail: 232px;
-  --bar: 52px;
+  /* Nebius violet. A fill colour only: #614EFA is 3.7:1 and fails AA for
+     body text, so type uses the lightened value. */
+  --watch:       #614EFA;
+  --watch-text:  #9B8CFF;
+  --watch-wash:  rgba(97, 78, 250, .14);
 
-  --ui: "Saira", ui-sans-serif, system-ui, sans-serif;
-  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", monospace;
+  /* Crossed the threshold, has not held long enough. Grafana ships this
+     state between Normal and Alerting and so do we; it was in the machine
+     long before it was on screen. */
+  --pending:      #FF9900;
+  --pending-text: #FBAD37;
+  --pending-wash: rgba(255, 153, 0, .13);
 
-  color-scheme: dark;
+  --bad:       #FE3F3F;
+  --bad-text:  #FF8080;
+  --bad-wash:  rgba(254, 63, 63, .12);
+
+  /* NVIDIA ships JetBrains Mono as its own mono and names Inter as the
+     metric substitute for NVIDIA Sans; Nebius ships Inter as its real UI
+     face. Inter is the shared ground, not a compromise. */
+  --ui:   "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --display: "Hanken Grotesk", "Inter", ui-sans-serif, sans-serif;
+
+  --r:  2px;
+  --r2: 4px;
 }
 
-*, *::before, *::after { box-sizing: border-box; }
+* { box-sizing: border-box; }
 
-html, body {
-  height: 100%;
-  margin: 0;
-}
+html { font-size: 16px; }
 
 body {
-  background: var(--ground);
-  color: var(--bone);
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
   font-family: var(--ui);
   font-size: 14px;
-  font-weight: 400;
-  line-height: 1.45;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
-  overflow: hidden;
 }
 
-/* Grain. Low enough to read as texture on a monitor, not as an effect. */
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  pointer-events: none;
-  opacity: 0.035;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
-}
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+a { color: var(--proved-text); }
 
 :focus-visible {
-  outline: 1px solid var(--ok);
-  outline-offset: 2px;
+  outline: none;
+  border-color: var(--proved);
+  box-shadow: 0 0 0 3px rgba(118, 185, 0, .35);
 }
 
-/* ----------------------------------------------------------------- shell -- */
-
-.shell {
-  display: grid;
-  grid-template-columns: var(--rail) 1fr;
-  grid-template-rows: var(--bar) 1fr;
-  grid-template-areas: "bar bar" "rail wall";
-  height: 100%;
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
 }
 
-/* ------------------------------------------------------------------- bar -- */
+/* ------------------------------------------------------------------- bar */
 
 .bar {
-  grid-area: bar;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 0 16px;
-  border-bottom: 1px solid var(--hairline);
-  background: var(--panel);
+  gap: 18px;
+  height: 46px;
+  padding: 0 clamp(12px, 3vw, 22px);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 40;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: -.02em;
+  color: var(--fg);
   text-decoration: none;
-  color: var(--bone);
 }
 
-.brand svg { display: block; }
+/* The live dot pulses only while frames are actually arriving, so it is a
+   reading rather than decoration. */
+.pip { width: 7px; height: 7px; border-radius: 50%; background: var(--dimmer); flex: none; }
+.pip.on { background: var(--proved); box-shadow: 0 0 0 3px var(--proved-wash); animation: pip 2s ease-in-out infinite; }
+@keyframes pip { 0%,100% { opacity: 1 } 50% { opacity: .45 } }
 
-.brand b {
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: 0.055em;
-}
-
-.bar-stats {
+.bar-meta {
+  margin-left: auto;
   display: flex;
   gap: 18px;
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.bar-stats i { font-style: normal; color: var(--bone); }
-
-/* ------------------------------------------------------------------ rail -- */
-
-.rail {
-  grid-area: rail;
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--hairline);
-  background: var(--panel);
-  min-height: 0;
-}
-
-.rail-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 14px 16px 10px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--dim);
-}
-
-.rail-head span {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--dimmer);
-  font-variant-numeric: tabular-nums;
 }
+.bar-meta b { color: var(--dim); font-weight: 400; }
 
-.rail-list {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-  padding: 0 8px;
+/* ------------------------------------------------------------------ page */
+
+.page {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: clamp(12px, 2.4vw, 22px);
+  display: grid;
+  gap: clamp(12px, 2vw, 18px);
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
+}
+@media (max-width: 1080px) { .page { grid-template-columns: minmax(0, 1fr); } }
+
+.col { display: flex; flex-direction: column; gap: clamp(12px, 2vw, 18px); min-width: 0; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  min-width: 0;
+}
+.card > header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--hair);
+}
+.card > header h2 {
   margin: 0;
-  list-style: none;
-}
-
-.rail-item {
-  display: grid;
-  grid-template-columns: 7px 1fr auto;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 8px;
-  border-radius: 2px;
-  cursor: pointer;
-  color: var(--bone);
-}
-
-.rail-item:hover { background: var(--raised); }
-
-.rail-item[aria-selected="true"] {
-  background: var(--raised);
-  box-shadow: inset 2px 0 0 var(--tally);
-}
-
-.rail-item .led {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--tally);
-  box-shadow: 0 0 7px -1px var(--tally);
-}
-
-.rail-item .nm {
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rail-item .el {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.rail-empty {
-  padding: 10px 16px;
-  font-size: 12.5px;
-  color: var(--dimmer);
-  line-height: 1.5;
-}
-
-.rail-foot {
-  padding: 12px;
-  border-top: 1px solid var(--hairline);
-}
-
-/* --------------------------------------------------------------- buttons -- */
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: 9px 14px;
-  border: 1px solid var(--hairline-2);
-  border-radius: 2px;
-  background: var(--raised);
-  color: var(--bone);
-  font-family: var(--ui);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 500;
-  cursor: pointer;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--dim);
 }
+.card > header .note { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
 
-.btn:hover { border-color: var(--dim); background: #27303c; }
+/* ------------------------------------------------------------ the stage */
 
-.btn-primary {
-  background: var(--seal);
-  border-color: var(--seal);
-  color: #fff;
-}
-
-.btn-primary:hover { background: #b23a48; border-color: #b23a48; }
-
-.btn-ghost {
-  width: auto;
-  background: transparent;
-  border-color: var(--hairline-2);
-}
-
-/* ------------------------------------------------------------------ wall -- */
-
-.wall {
-  grid-area: wall;
-  overflow-y: auto;
-  padding: 14px;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
-  grid-auto-rows: min-content;
-  gap: 14px;
-  align-content: start;
-}
-
-/* ------------------------------------------------------------------ tile -- */
-
-.tile {
+.stage {
   position: relative;
+  background: #05080C;
   aspect-ratio: 16 / 9;
-  background: #0c1014;
-  border: 1px solid var(--hairline);
-  border-radius: 2px;
   overflow: hidden;
+  border-radius: var(--r2) var(--r2) 0 0;
 }
+.stage video { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-.tile video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  background: #0c1014;
-}
-
-/* Burnt-in clock, the way an NVR overlays it on the image itself. */
-.tile .clock {
-  position: absolute;
-  top: 7px;
-  right: 9px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  color: rgba(233, 230, 224, 0.82);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-}
-
-/* Under-monitor display: channel, name, tally. Borrowed from multiviewers. */
-.tile .umd {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 7px 10px;
-  background: linear-gradient(to top, rgba(8, 11, 14, 0.94), rgba(8, 11, 14, 0));
-}
-
-.tile .ch {
-  font-family: var(--mono);
-  font-size: 10.5px;
+.stage-empty {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; text-align: center; padding: 20px;
   color: var(--dim);
-  font-variant-numeric: tabular-nums;
 }
+.stage-empty b { color: var(--fg); font-size: 15px; font-weight: 600; }
+.stage-empty span { font-size: 13px; max-width: 42ch; color: var(--dim); }
 
-.tile .nm {
-  font-size: 13px;
-  font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tile .kind {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--dimmer);
-  margin-left: auto;
-}
-
-.tile .tally {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--tally);
-  box-shadow: 0 0 8px -1px var(--tally);
-  flex: none;
-  animation: breathe 2.4s ease-in-out infinite;
-}
-
-@keyframes breathe {
-  50% { opacity: 0.45; }
-}
-
-/* Brackets appear on the tile you are pointing at, not on all of them. */
-.tile::before,
-.tile::after {
-  content: "";
+/* NVIDIA's VSS Blueprint draws these white and turns them green only on
+   selection, with a full-opacity black shadow so the stroke survives any
+   frame content. A green box on every detection is CV debug output. */
+.bbox {
   position: absolute;
-  width: 13px;
-  height: 13px;
-  opacity: 0;
-  transition: opacity 120ms ease;
+  border: 2.5px solid #fff;
+  filter: drop-shadow(0 0 6px rgba(0,0,0,1));
   pointer-events: none;
-  z-index: 2;
+  transition: border-color .12s, border-width .12s;
+}
+.bbox.hit { border-color: var(--proved); border-width: 4px; filter: drop-shadow(0 0 14px rgba(0,0,0,1)); }
+.bbox > span {
+  position: absolute; top: -20px; left: -2.5px;
+  background: var(--proved); color: #0A0E13;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  padding: 2px 6px; border-radius: var(--r); white-space: nowrap;
 }
 
-.tile::before {
-  top: 5px; left: 5px;
-  border-top: 1px solid var(--tally);
-  border-left: 1px solid var(--tally);
+.hud {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: space-between;
+  padding: clamp(10px, 1.6vw, 16px);
+  pointer-events: none;
 }
+.hud-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
 
-.tile::after {
-  bottom: 5px; right: 5px;
-  border-bottom: 1px solid var(--tally);
-  border-right: 1px solid var(--tally);
-}
+.where { font-family: var(--mono); font-size: 10.5px; color: var(--dim); text-shadow: 0 1px 4px #000; }
+.where b { display: block; font-family: var(--ui); font-size: 13px; font-weight: 600; color: #fff; letter-spacing: -.01em; }
 
-.tile:hover::before,
-.tile:hover::after { opacity: 1; }
-
-.tile.connecting video { opacity: 0.25; }
-
-/* --------------------------------------------------- no signal / slots --- */
-
-/* A dead channel on a real wall is not blank. It shows you it is dead. */
-.slot {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--hairline);
-  border-radius: 2px;
-  overflow: hidden;
-  background:
-    repeating-linear-gradient(
-      -45deg,
-      transparent 0 9px,
-      rgba(123, 136, 153, 0.045) 9px 18px
-    ),
-    #0e1217;
-  display: grid;
-  place-items: center;
-}
-
-.slot::before {
-  content: "";
-  position: absolute;
-  left: 0; right: 0;
-  height: 44px;
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    rgba(123, 136, 153, 0.05),
-    transparent
-  );
-  animation: sweep 7s linear infinite;
-}
-
-@keyframes sweep {
-  from { top: -44px; }
-  to   { top: 100%; }
-}
-
-.slot span {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--dimmer);
-  letter-spacing: 0.1em;
-  z-index: 1;
-}
-
-/* ---------------------------------------------------------------- dialog -- */
-
-dialog {
-  padding: 0;
-  border: 1px solid var(--hairline-2);
-  border-radius: 3px;
-  background: var(--panel);
-  color: var(--bone);
-  max-width: 400px;
-  width: calc(100% - 32px);
-}
-
-dialog::backdrop { background: rgba(6, 8, 11, 0.74); }
-
-.dlg {
-  padding: 22px;
-  text-align: center;
-}
-
-.dlg h2 {
-  margin: 0 0 6px;
-  font-size: 19px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.dlg p {
-  margin: 0 0 18px;
-  font-size: 13px;
-  color: var(--dim);
-  line-height: 1.55;
-}
-
-.qr {
-  width: 188px;
-  height: 188px;
-  margin: 0 auto 16px;
-  padding: 11px;
-  background: #fff;
-  border-radius: 2px;
-}
-
-.qr canvas, .qr img { display: block; width: 100%; height: 100%; }
-
-.code {
-  font-family: var(--mono);
-  font-size: 30px;
-  font-weight: 500;
-  letter-spacing: 0.26em;
-  text-indent: 0.26em;
-  margin-bottom: 6px;
-}
-
-.join-url {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--dim);
-  word-break: break-all;
-  margin-bottom: 18px;
-}
-
-.dlg-actions { display: flex; gap: 8px; }
-
-/* ------------------------------------------------------------ join page -- */
-
-body.join {
-  overflow: auto;
-  display: grid;
-  place-items: center;
-  padding: 28px 20px;
-}
-
-.join-card {
-  width: 100%;
-  max-width: 460px;
-}
-
-.join-head {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-bottom: 26px;
-}
-
-.join-head b {
-  font-weight: 600;
-  font-size: 16px;
-  letter-spacing: 0.055em;
-}
-
-.join-card h1 {
-  margin: 0 0 7px;
-  font-size: 25px;
-  font-weight: 500;
-  letter-spacing: -0.012em;
-  line-height: 1.2;
-}
-
-.join-card > p {
-  margin: 0 0 20px;
-  font-size: 14px;
-  color: var(--dim);
-  line-height: 1.55;
-  max-width: 46ch;
-}
-
-.preview {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  background: #0c1014;
-  border: 1px solid var(--hairline);
-  border-radius: 2px;
-  overflow: hidden;
-  margin-bottom: 14px;
-}
-
-.preview video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+/* The count is the loudest thing on the page and everything else stays
+   quiet, because it is the one number a person came to see. */
+.tally { text-align: right; line-height: 1; text-shadow: 0 2px 12px rgba(0,0,0,.9); }
+.tally .n {
   display: block;
+  font-family: var(--mono); font-weight: 700;
+  font-size: clamp(40px, 7vw, 76px);
+  letter-spacing: -.055em;
+  color: var(--proved-text);
+  font-variant-numeric: tabular-nums;
 }
+.tally .sub { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.tally .what { font-size: 13px; color: #fff; margin-top: 3px; font-weight: 500; }
 
-.preview .placeholder {
-  position: absolute;
-  inset: 0;
+.hud-bottom { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+
+.probe {
+  display: flex; align-items: center; gap: 9px;
+  background: rgba(10,14,19,.78);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--line);
+  border-radius: var(--r2);
+  padding: 7px 10px;
+  pointer-events: auto;
+}
+.probe .k { font-family: var(--mono); font-size: 10.5px; color: var(--fg); }
+.probe .v { font-family: var(--mono); font-size: 10.5px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.bar-mini { width: 60px; height: 3px; background: var(--raised); border-radius: 2px; overflow: hidden; flex: none; }
+.bar-mini i { display: block; height: 100%; background: var(--proved); transition: width .18s ease-out; }
+.probe.is-pending .bar-mini i { background: var(--pending); }
+.probe.is-idle .bar-mini i { background: var(--dimmer); }
+
+/* --------------------------------------------------------------- signal */
+
+.signal { padding: 12px 14px 14px; }
+.readout { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 10px; }
+.readout div { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
+.readout b {
+  display: block; font-size: 17px; color: var(--fg); font-weight: 700;
+  letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+}
+.readout .lit { color: var(--proved-text); }
+
+/* --------------------------------------------------------------- events */
+
+.events { display: flex; flex-direction: column; max-height: 340px; overflow-y: auto; }
+.ev {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hair);
+}
+.ev:last-child { border-bottom: 0; }
+/* A rejection keeps its place on the clock and dims, rather than vanishing,
+   so it reads in the context of the events either side of it. */
+.ev.miss { opacity: .62; }
+.ev .t { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); min-width: 56px; padding-top: 1px; }
+.ev .b { min-width: 0; font-size: 12.5px; }
+.ev .b .q { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 2px; }
+
+/* ---------------------------------------------------------------- goals */
+
+.goals { display: flex; flex-direction: column; }
+.goal {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--hair);
   display: grid;
-  place-items: center;
+  gap: 7px;
+}
+.goal:last-child { border-bottom: 0; }
+.goal-top { display: flex; align-items: baseline; gap: 10px; }
+.goal-top .name { font-weight: 600; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-top .key { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
+.goal-meta { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
+
+.prog { height: 3px; background: var(--raised); border-radius: 2px; overflow: hidden; }
+.prog i { display: block; height: 100%; background: var(--proved); transition: width .3s ease-out; }
+.goal.is-done .prog i { background: var(--proved); }
+.goal.is-violated .prog i { background: var(--bad); }
+
+.uses { display: flex; gap: 5px; flex-wrap: wrap; }
+
+/* 14 days of occurrences. A streak is the only view that shows whether a
+   goal is actually working. */
+.streak { display: flex; gap: 3px; }
+.streak i { width: 11px; height: 11px; border-radius: var(--r); background: var(--raised); }
+.streak i.done { background: var(--proved); }
+.streak i.violated { background: var(--bad); }
+.streak i.active { background: var(--watch); }
+
+/* ---------------------------------------------------------------- chips */
+
+.chip {
   font-family: var(--mono);
-  font-size: 11px;
-  color: var(--dimmer);
-  letter-spacing: 0.1em;
-  background:
-    repeating-linear-gradient(
-      -45deg,
-      transparent 0 9px,
-      rgba(123, 136, 153, 0.045) 9px 18px
-    );
-}
-
-.field { margin-bottom: 12px; }
-
-.field label {
-  display: block;
-  font-size: 12.5px;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: var(--r);
+  background: var(--raised);
   color: var(--dim);
-  margin-bottom: 6px;
+  border: 1px solid transparent;
+  white-space: nowrap;
 }
+.chip.proved     { background: var(--proved-wash);  color: var(--proved-text);  border-color: rgba(118,185,0,.3); }
+.chip.watching   { background: var(--watch-wash);   color: var(--watch-text);   border-color: rgba(97,78,250,.3); }
+.chip.pending    { background: var(--pending-wash); color: var(--pending-text); border-color: rgba(255,153,0,.3); }
+.chip.bad        { background: var(--bad-wash);     color: var(--bad-text);     border-color: rgba(254,63,63,.3); }
 
-.field input {
-  width: 100%;
-  padding: 10px 12px;
-  background: var(--ground);
-  border: 1px solid var(--hairline-2);
-  border-radius: 2px;
-  color: var(--bone);
-  font-family: var(--ui);
-  font-size: 14px;
-}
+/* ---------------------------------------------------------------- skills */
 
-.field input:focus-visible { border-color: var(--ok); outline: none; }
-
-.sources { display: flex; gap: 8px; margin-bottom: 14px; }
-
-.sources .btn { flex: 1; }
-
-.sources .btn[aria-pressed="true"] {
-  border-color: var(--bone);
-  background: #2b3542;
-}
-
-.status {
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--dim);
-  margin-top: 13px;
-  min-height: 1.4em;
-  line-height: 1.5;
-}
-
-.status.live { color: var(--tally); }
-.status.err  { color: #ff8a7a; }
-
-.live-banner {
-  display: flex;
-  align-items: center;
+.skills { display: flex; flex-direction: column; }
+.skill {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) auto;
   gap: 10px;
-  padding: 13px 15px;
-  border: 1px solid var(--tally);
-  border-radius: 2px;
-  background: rgba(232, 64, 42, 0.07);
-  margin-bottom: 14px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--hair);
+  font-size: 12.5px;
 }
+.skill:last-child { border-bottom: 0; }
+.skill .kind { font-family: var(--mono); font-size: 9.5px; color: var(--dimmer); text-transform: uppercase; letter-spacing: .05em; }
+.skill .key { font-family: var(--mono); font-size: 11px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill .label { font-size: 11px; color: var(--dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.live-banner .tally {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: var(--tally);
-  box-shadow: 0 0 8px -1px var(--tally);
-  flex: none;
-  animation: breathe 2.4s ease-in-out infinite;
-}
-
-.live-banner div { font-size: 13px; }
-.live-banner small { display: block; color: var(--dim); font-size: 12px; }
+/* --------------------------------------------------------------- notices */
 
 .notice {
+  display: flex; gap: 11px; align-items: flex-start;
   padding: 12px 14px;
-  border: 1px solid var(--hairline-2);
-  border-left: 2px solid var(--seal);
-  border-radius: 2px;
-  background: var(--panel);
+  border: 1px solid rgba(255,153,0,.35);
+  background: var(--pending-wash);
+  border-radius: var(--r2);
   font-size: 13px;
-  color: var(--dim);
-  line-height: 1.55;
-  margin-bottom: 16px;
 }
+.notice.bad { border-color: rgba(254,63,63,.35); background: var(--bad-wash); }
+.notice b { display: block; margin-bottom: 2px; color: var(--fg); }
+.notice span { color: var(--dim); }
 
-.notice b { color: var(--bone); font-weight: 500; }
+/* ------------------------------------------------------------- questions */
 
-.notice code {
-  font-family: var(--mono);
+.q-item { padding: 12px 14px; border-bottom: 1px solid var(--hair); }
+.q-item:last-child { border-bottom: 0; }
+.q-prompt { font-size: 13px; margin-bottom: 9px; }
+.q-acts { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+
+/* --------------------------------------------------------------- buttons */
+
+.btn {
+  font: inherit;
   font-size: 12px;
-  color: var(--bone);
+  font-weight: 500;
+  padding: 6px 12px;
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--raised);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
 }
+.btn:hover { border-color: var(--dimmer); }
+/* NVIDIA's own primary: green fill, black text. */
+.btn.primary { background: var(--proved); border-color: var(--proved); color: #0A0E13; font-weight: 600; }
+.btn.primary:hover { background: #8AD100; border-color: #8AD100; }
+.btn.ghost { background: transparent; }
+.btn.sm { padding: 4px 9px; font-size: 11px; }
 
-/* --------------------------------------------------------------- mobile -- */
+/* ---------------------------------------------------------------- dialog */
 
-@media (max-width: 760px) {
-  body { overflow: auto; }
-
-  .shell {
-    grid-template-columns: 1fr;
-    grid-template-rows: var(--bar) auto 1fr;
-    grid-template-areas: "bar" "rail" "wall";
-    height: auto;
-    min-height: 100%;
-  }
-
-  .rail { border-right: 0; border-bottom: 1px solid var(--hairline); }
-  .rail-list { max-height: 180px; }
-  .wall { grid-template-columns: 1fr; }
+dialog {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--fg);
+  border-radius: var(--r2);
+  padding: 0;
+  max-width: 620px;
+  width: calc(100vw - 28px);
 }
+dialog::backdrop { background: rgba(3, 6, 10, .78); }
+dialog form { padding: 18px; display: grid; gap: 14px; }
+dialog h3 { margin: 0; font-family: var(--display); font-size: 19px; font-weight: 700; letter-spacing: -.02em; }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-  }
-}
+.field { display: grid; gap: 5px; }
+.field label { font-size: 11px; color: var(--dim); font-weight: 500; }
+.field small { font-size: 11px; color: var(--dimmer); line-height: 1.45; }
 
-/* ===========================================================================
-   Goals.
-
-   The wall is a grid of moving pictures; this page is a ledger. It reuses the
-   bar, the buttons and the palette, but drops the rail: there is nothing to
-   navigate between here, only a list to read top to bottom in the order of
-   who is waiting on whom.
-   =========================================================================== */
-
-.shell-goals { grid-template-columns: 1fr; }
-
-.bar-nav { display: flex; gap: 2px; margin-left: 18px; }
-.bar-nav a {
-  color: var(--dim); text-decoration: none; font-size: 12px; letter-spacing: .08em;
-  text-transform: uppercase; padding: 6px 12px; border-radius: 3px;
-}
-.bar-nav a:hover { color: var(--bone); background: var(--raised); }
-.bar-nav a.on { color: var(--bone); background: var(--raised); }
-
-.goals-main {
-  grid-column: 1 / -1; padding: 28px clamp(16px, 4vw, 48px) 64px;
-  max-width: 1040px; width: 100%; margin: 0 auto; overflow-y: auto;
-}
-.goals-main section { margin-bottom: 40px; }
-
-.sec-head {
-  display: flex; align-items: center; gap: 12px;
-  font-size: 12px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase;
-  color: var(--dim); margin: 0 0 14px; padding-bottom: 10px;
-  border-bottom: 1px solid var(--hairline);
-}
-.sec-head .btn { margin-left: auto; }
-.sec-note { text-transform: none; letter-spacing: 0; color: var(--dimmer); font-weight: 400; }
-.btn-sm { padding: 5px 11px; font-size: 11px; }
-.empty { color: var(--dimmer); font-size: 13px; margin: 0; }
-
-/* -- questions ----------------------------------------------------------- */
-
-.qlist, .glist, .slist { list-style: none; margin: 0; padding: 0; }
-
-.qitem {
-  background: var(--panel); border: 1px solid var(--seal); border-radius: 4px;
-  padding: 14px 16px; margin-bottom: 10px;
-}
-.qprompt { color: var(--bone); font-size: 14px; margin-bottom: 10px; }
-.qactions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.qinput {
-  background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
-  border-radius: 3px; padding: 7px 10px; font: inherit; font-size: 12px; width: 170px;
-}
-
-/* -- goals --------------------------------------------------------------- */
-
-.gitem {
-  position: relative; background: var(--panel); border: 1px solid var(--hairline);
-  border-radius: 4px; padding: 15px 16px; margin-bottom: 10px;
-}
-.ghead { display: flex; align-items: baseline; gap: 12px; }
-.ghead b { color: var(--bone); font-size: 15px; font-weight: 500; }
-.gkey { font-family: var(--mono); font-size: 11px; color: var(--dimmer); margin-left: 9px; }
-.gmeta { font-size: 11px; color: var(--dim); margin-top: 4px; font-family: var(--mono); }
-
-.guses { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 11px 0 0; padding: 0; }
-.use {
-  font-family: var(--mono); font-size: 10.5px; padding: 3px 8px; border-radius: 3px;
-  background: var(--raised); color: var(--dim); border: 1px solid transparent; cursor: help;
-}
-.use-gate { border-color: var(--hairline-2); color: var(--bone); }
-.use-discriminating { border-color: var(--seal); }
-
-/* The chip carries the verdict, so its colour is the one thing on this page
-   that must never be ambiguous between "done" and "nearly". */
-.chip {
-  margin-left: auto; font-family: var(--mono); font-size: 10.5px; padding: 3px 9px;
-  border-radius: 3px; text-transform: uppercase; letter-spacing: .06em; white-space: nowrap;
-}
-.chip-pending  { background: var(--raised); color: var(--dim); }
-.chip-active   { background: #2a3340; color: var(--bone); }
-.chip-done     { background: rgba(95,212,168,.14); color: var(--ok); }
-.chip-violated { background: rgba(232,64,42,.16); color: var(--tally); }
-.chip-missed   { background: var(--raised); color: var(--dimmer); }
-
-.strip { display: flex; gap: 3px; margin-top: 11px; }
-.dot { width: 13px; height: 13px; border-radius: 2px; background: var(--raised); }
-.dot-done { background: var(--ok); }
-.dot-violated { background: var(--tally); }
-.dot-active { background: var(--hairline-2); }
-.dot-missed { background: var(--raised); opacity: .5; }
-
-.gdel { position: absolute; top: 12px; right: 12px; opacity: 0; transition: opacity .12s; }
-.gitem:hover .gdel { opacity: 1; }
-
-/* -- skills -------------------------------------------------------------- */
-
-.sitem {
-  display: flex; align-items: center; gap: 11px; padding: 9px 12px;
-  border-bottom: 1px solid var(--hairline); font-size: 12.5px;
-}
-.sitem b { color: var(--bone); font-family: var(--mono); font-size: 11.5px; font-weight: 500; }
-.slabel { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.kind {
-  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  padding: 2px 7px; border-radius: 3px; background: var(--raised); color: var(--dim);
-  min-width: 86px; text-align: center;
-}
-.kind-gate { color: var(--bone); }
-.kind-counter, .kind-discriminator { color: var(--seal); }
-.kind-metric { color: var(--dimmer); }
-.shz { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
-
-/* "pending" is not an error. It means perception has not embedded the label
-   yet, and reading it as a failure sends people debugging a wait. */
-.wstate { font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 3px; }
-.wstate-pending  { color: var(--dim); background: var(--raised); }
-.wstate-zeroshot { color: var(--bone); background: var(--raised); }
-.wstate-fitted   { color: var(--ok); background: rgba(95,212,168,.12); }
-
-/* -- perception ---------------------------------------------------------- */
-
-.pstatus {
-  font-family: var(--mono); font-size: 11.5px; padding: 11px 13px;
-  border-radius: 4px; border: 1px solid var(--hairline); background: var(--panel);
-}
-.pstatus-off { color: var(--dim); border-color: var(--hairline); }
-.pstatus-on  { color: var(--ok); border-color: rgba(95,212,168,.3); }
-
-/* -- the new-goal dialog ------------------------------------------------- */
-
-.dlg-wide { max-width: 620px; width: calc(100vw - 32px); }
-.dlg-wide .two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.rule { border: 0; border-top: 1px solid var(--hairline); margin: 18px 0; }
-
-.dlg-wide select, .dlg-wide input[type="time"], .dlg-wide input[type="number"] {
-  background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
-  border-radius: 3px; padding: 8px 10px; font: inherit; font-size: 13px; width: 100%;
-}
-.dlg-wide small { display: block; color: var(--dimmer); font-size: 11px; margin-top: 5px; line-height: 1.5; }
-
-.skill-rows { list-style: none; margin: 0 0 9px; padding: 0; }
-.skill-row { display: grid; grid-template-columns: 112px 128px 1fr 104px 26px; gap: 6px; margin-bottom: 6px; }
-.skill-row input, .skill-row select {
-  background: var(--ground); border: 1px solid var(--hairline); color: var(--bone);
-  border-radius: 3px; padding: 6px 8px; font: inherit; font-size: 11.5px; min-width: 0;
-}
-.row-drop { padding: 0; min-width: 26px; color: var(--dim); }
-
-@media (max-width: 720px) {
-  .skill-row { grid-template-columns: 1fr 1fr; }
-  .dlg-wide .two { grid-template-columns: 1fr; }
-}
-
-/* The one thing on the goals page that is an alarm rather than a record:
-   cameras publishing into a void, with every other indicator looking fine. */
-.nowatch {
-  border: 1px solid var(--tally);
-  background: rgba(232, 64, 42, .09);
-  color: var(--bone);
-  border-radius: 4px;
-  padding: 14px 16px;
-  margin-bottom: 26px;
+input, select, textarea {
+  font: inherit;
   font-size: 13px;
-  line-height: 1.6;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: var(--r2);
+  padding: 8px 10px;
+  width: 100%;
+  min-width: 0;
 }
-.nowatch code {
-  display: block;
-  margin-top: 10px;
-  padding: 10px 12px;
-  background: var(--ground);
-  border-radius: 3px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-  color: var(--dim);
-  overflow-x: auto;
+input::placeholder { color: var(--dimmer); }
+
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .two { grid-template-columns: 1fr; } }
+
+.rows { display: grid; gap: 6px; }
+.row {
+  display: grid;
+  grid-template-columns: 108px 128px minmax(0, 1fr) 100px 26px;
+  gap: 6px;
 }
+@media (max-width: 640px) { .row { grid-template-columns: 1fr 1fr; } }
+.row input, .row select { font-size: 11.5px; padding: 6px 8px; }
+
+.actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+.status { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+.status.err { color: var(--bad-text); }
+.status.ok { color: var(--proved-text); }
+
+.empty { padding: 16px 14px; color: var(--dimmer); font-size: 12.5px; }
+
+/* Pairing. The QR library draws a plain canvas, so the quiet zone around it
+   has to be a real white plate or a phone camera will not read it on a dark
+   ground. */
+.qr {
+  display: grid;
+  place-items: center;
+  background: #fff;
+  padding: 14px;
+  border-radius: var(--r2);
+  justify-self: center;
+}
+.qr img, .qr canvas { display: block; }

@@ -80,6 +80,10 @@ _CALIBRATE_AFTER = 60
 #: standing in front of the camera waiting to see whether it noticed them.
 _PROVISIONAL_AFTER = 20
 
+#: How often a room ships its score snapshot to the console. Four a second
+#: is already past what anyone reads off a moving line.
+_SNAPSHOT_EVERY_S = 0.25
+
 
 @dataclass
 class Room:
@@ -99,6 +103,11 @@ class Room:
     #: Last rate we asked this room's publisher for, so it is sent on change
     #: rather than on every frame.
     asked_hz: float = 0.0
+    #: This frame's score per skill, rebuilt each frame and sent as one
+    #: snapshot. Per-skill messages would be N times the traffic for a
+    #: picture that is only ever read all at once.
+    snapshot: dict[str, Any] = field(default_factory=dict)
+    last_sent: float = 0.0
     #: How many times each skill has been calibrated. Two, then never.
     refits: dict[str, int] = field(default_factory=dict)
     states: dict[str, State] = field(default_factory=dict)
@@ -323,6 +332,14 @@ class Runner:
         for skill in self._eligible(room):
             await self._score_one(skill, embedding.vector, now, room, room_name)
 
+        # One snapshot per frame, capped: a console redraws at human speed,
+        # and 8 Hz of socket traffic per camera buys nothing a person can see.
+        if room.snapshot and now - room.last_sent >= _SNAPSHOT_EVERY_S:
+            room.last_sent = now
+            await self.ledger.scores(
+                room_name, self._rate(self._eligible(room)), dict(room.snapshot)
+            )
+
         hz = self._rate(self._eligible(room))
         if abs(hz - room.asked_hz) > 1e-6:
             # The publisher owns its clock, so this is a request, not a
@@ -359,6 +376,11 @@ class Runner:
 
         self._remember(skill, e, room)
         self.log.trace("skill.score", skill=skill.key, score=round(value, 4))
+        phase = room.states.get(skill.key)
+        room.snapshot[skill.key] = {
+            "score": round(value, 4),
+            "phase": phase.phase if phase else "idle",
+        }
         state_now = room.states.get(skill.key)
         self.store.observe(
             skill.key,

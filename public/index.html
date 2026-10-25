@@ -3,72 +3,211 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pact — wall</title>
-<meta name="description" content="Live feed wall. Every device that is streaming right now.">
+<title>Pact</title>
+<meta name="description" content="You say you'll do something. The cameras confirm you did.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Saira:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/pact.css">
 </head>
 <body>
 
-<div class="shell">
+<!-- One surface. The camera and the goal are the same fact, so splitting them
+     across tabs meant neither view contained the product. -->
+<header class="bar">
+  <a class="brand" href="/">
+    <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 1.4 17.4 5.7v8.6L10 18.6 2.6 14.3V5.7z" fill="none" stroke="#76B900" stroke-width="1.5"/>
+      <path d="M5.8 12.1h8.4" stroke="#E8EDF2" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    pact
+  </a>
+  <span class="pip" id="pip" title="frames arriving"></span>
 
-  <header class="bar">
-    <a class="brand" href="/">
-      <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true">
-        <path d="M10 1.4 17.4 5.7v8.6L10 18.6 2.6 14.3V5.7z"
-              fill="none" stroke="#9e3340" stroke-width="1.4"/>
-        <path d="M5.8 12.1h8.4" stroke="#e9e6e0" stroke-width="1.4" stroke-linecap="round"/>
-      </svg>
-      <b>pact</b>
-    </a>
+  <div class="bar-meta">
+    <span id="m-encoder">—</span>
+    <span><b id="m-cameras">0</b> cameras</span>
+    <span><b id="m-scores">0</b> scores → <b id="m-events">0</b> events</span>
+    <span id="m-clock">--:--:--</span>
+  </div>
+</header>
 
-    <nav class="bar-nav">
-      <a href="/" class="on">Wall</a>
-      <a href="/goals">Goals</a>
-    </nav>
+<main class="page">
 
-    <div class="bar-stats">
-      <span><i id="stat-live">0</i> live</span>
-      <span id="stat-clock">--:--:--</span>
-    </div>
-  </header>
+  <!-- ------------------------------------------------------------ left -->
+  <div class="col">
 
-  <aside class="rail">
-    <div class="rail-head">
-      Devices
-      <span id="rail-count">0</span>
-    </div>
+    <div id="notices"></div>
 
-    <ul class="rail-list" id="rail-list"></ul>
+    <section class="card">
+      <div class="stage" id="stage">
+        <video id="feed" autoplay muted playsinline></video>
+        <div class="stage-empty" id="stage-empty">
+          <b>No camera is publishing</b>
+          <span>Open <strong>/join</strong> on a phone or laptop and start a camera. It appears here, and perception subscribes to it automatically.</span>
+          <button class="btn primary" id="add-camera">Add a camera</button>
+        </div>
+        <div class="hud" id="hud" hidden>
+          <div class="hud-top">
+            <div class="where"><b id="cam-name">—</b><span id="cam-meta">—</span></div>
+            <div class="tally">
+              <span class="n" id="tally-n">0</span>
+              <span class="sub" id="tally-sub">—</span>
+              <div class="what" id="tally-what">—</div>
+            </div>
+          </div>
+          <div class="hud-bottom" id="probes"></div>
+        </div>
+      </div>
 
-    <div class="rail-foot">
-      <button class="btn btn-primary" id="add-device">Add a device</button>
-    </div>
-  </aside>
+      <!-- Signal: the score curve with both thresholds drawn, so a rep and a
+           near-miss are distinguishable without reading anything. -->
+      <div class="signal">
+        <div class="readout">
+          <div><b id="r-score">—</b>score now</div>
+          <div><b id="r-peak">—</b>peak</div>
+          <div><b class="lit" id="r-count">0</b>counted today</div>
+          <div><b id="r-rate">—</b>sampling</div>
+        </div>
+        <svg id="plot" viewBox="0 0 600 150" width="100%" height="140" preserveAspectRatio="none"
+             role="img" aria-label="Detection score over time against the enter and exit thresholds"></svg>
+      </div>
+    </section>
 
-  <main class="wall" id="wall"></main>
+    <section class="card">
+      <header>
+        <h2>What happened</h2>
+        <span class="note" id="ev-note">newest first</span>
+      </header>
+      <div class="events" id="events">
+        <div class="empty">Nothing yet. Events appear the moment a skill crosses its threshold.</div>
+      </div>
+    </section>
+  </div>
 
-</div>
+  <!-- ----------------------------------------------------------- right -->
+  <div class="col">
+
+    <section class="card" id="q-card" hidden>
+      <header><h2>Waiting on you</h2></header>
+      <div id="questions"></div>
+    </section>
+
+    <section class="card">
+      <header>
+        <h2>Goals</h2>
+        <button class="btn primary sm" id="new-goal">New goal</button>
+      </header>
+      <div class="goals" id="goals">
+        <div class="empty">No goals yet. A goal is a sentence plus the things a camera would have to see for it to be true.</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <header>
+        <h2>Skills</h2>
+        <span class="note">shared by every goal</span>
+      </header>
+      <div class="skills" id="skills"></div>
+    </section>
+  </div>
+</main>
 
 <dialog id="claim-dialog">
-  <div class="dlg">
-    <h2>Add a device</h2>
-    <p>Open this on the phone, laptop or tablet you want to stream from. The code works once, for ten minutes.</p>
-
+  <form method="dialog">
+    <h3>Add a camera</h3>
+    <p style="margin:0; color:var(--dim); font-size:13px">
+      Scan this on the device you want to watch with, or open the link there.
+      The code works once and lasts ten minutes.
+    </p>
     <div class="qr" id="claim-qr"></div>
-    <div class="code" id="claim-code">----</div>
-    <div class="join-url" id="claim-url"></div>
-
-    <div class="dlg-actions">
-      <button class="btn" id="claim-copy">Copy link</button>
-      <button class="btn btn-ghost" id="claim-close">Done</button>
+    <div class="field">
+      <label>Link</label>
+      <input id="claim-url" readonly>
     </div>
-  </div>
+    <div class="actions">
+      <button class="btn ghost" id="claim-copy" type="button">Copy link</button>
+      <button class="btn primary" value="close">Done</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- --------------------------------------------------------------- dialog -->
+<dialog id="goal-dialog">
+  <form method="dialog" id="goal-form">
+    <h3>New goal</h3>
+
+    <div class="field">
+      <label for="g-sentence">What do you want to track?</label>
+      <input id="g-sentence" type="text" autocomplete="off" placeholder="I want to do 20 pushups every morning">
+      <small>Nemotron turns this into skills and reuses any that already exist. Check what it drafts before creating — a skill's label <em>is</em> its detector.</small>
+    </div>
+    <div class="actions" style="justify-content:flex-start">
+      <button type="button" class="btn" id="g-plan">Draft it</button>
+      <span class="status" id="g-status"></span>
+    </div>
+
+    <div class="two">
+      <div class="field">
+        <label for="g-key">Key</label>
+        <input id="g-key" type="text" placeholder="fitness/pushups" required>
+      </div>
+      <div class="field">
+        <label for="g-type">Type</label>
+        <select id="g-type">
+          <option value="target">target — you want it to happen</option>
+          <option value="limit">limit — you want it not to</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="g-desc">Description</label>
+      <input id="g-desc" type="text" placeholder="Do 20 pushups every morning" required>
+    </div>
+
+    <div class="two">
+      <div class="field">
+        <label for="g-cadence">Cadence</label>
+        <select id="g-cadence">
+          <option value="daily">daily</option>
+          <option value="weekly:1">weekly, once</option>
+          <option value="weekly:3">weekly, three times</option>
+          <option value="weekly:5">weekdays</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="g-donemin">Done at</label>
+        <input id="g-donemin" type="number" value="1" step="any">
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="field">
+        <label for="g-start">Window starts</label>
+        <input id="g-start" type="time">
+      </div>
+      <div class="field">
+        <label for="g-end">Window ends</label>
+        <input id="g-end" type="time">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Skills it needs</label>
+      <div class="rows" id="g-skills"></div>
+      <button type="button" class="btn ghost sm" id="g-add" style="justify-self:start">Add a skill</button>
+      <small>A label must describe what a camera would literally see. That text becomes the weight vector directly, with no training.</small>
+    </div>
+
+    <div class="actions">
+      <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn primary" value="save">Create goal</button>
+    </div>
+  </form>
 </dialog>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<script type="module" src="/js/wall.js"></script>
+<script type="module" src="/js/console.js"></script>
 </body>
 </html>

@@ -231,6 +231,20 @@ export type PerceptionMessage =
   | { type: "hello"; room: string; encoderId: string; dim: number }
   /** "this room needs N fps now", from the skills currently eligible there. */
   | { type: "rate"; room: string; hz: number }
+  /**
+   * A downsampled snapshot of what every eligible skill is scoring.
+   *
+   * Fanned to watching browsers and never written anywhere. That is not a
+   * loophole in the "the ledger never sees scores" rule, it is the rule: a
+   * live view of a number is not a record of it, and nothing here survives
+   * the socket closing.
+   */
+  | {
+      type: "scores";
+      room: string;
+      hz: number;
+      scores: Record<string, { score: number; phase: string }>;
+    }
   | { type: "transition"; transition: Transition }
   | { type: "weights"; skillKey: string; encoderId: string; dim: number; w: string; bias: number; temperature: number }
   | { type: "refit"; skillKey: string; nExamples: number; holdoutBefore: number; holdoutAfter: number };

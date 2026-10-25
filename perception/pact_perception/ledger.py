@@ -131,6 +131,17 @@ class Ledger:
         """Ask a room's publisher for a sample rate. Sent only when it changes."""
         await self._send({"type": "rate", "room": room, "hz": hz})
 
+    async def scores(self, room: str, hz: float, scores: dict[str, Any]) -> None:
+        """
+        A downsampled snapshot of what every eligible skill is scoring.
+
+        Sent for the console to draw, and stored nowhere. Scores are produced
+        several times a second per skill and the ledger keeping only
+        transitions is the entire point of the split; a live view of a number
+        is not a record of it, and nothing here outlives the socket.
+        """
+        await self._send({"type": "scores", "room": room, "hz": hz, "scores": scores})
+
     async def transition(self, payload: dict[str, Any]) -> None:
         await self._send({"type": "transition", "transition": payload})
 
