@@ -134,6 +134,13 @@ export interface Goal {
    */
   tz: string;
 
+  /**
+   * Longest gap between two steps of one sequenced pass, in seconds. Zero
+   * disables the timeout. Ignored by a goal whose links carry no
+   * sequence index, which is every unordered goal.
+   */
+  sequenceWindowS: number;
+
   /** Progressions: 135 lb, +5 a week, only when the last one succeeded. */
   stepValue: number | null;
   stepPeriod: "week" | "month" | null;

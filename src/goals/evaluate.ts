@@ -13,7 +13,9 @@
  * rows.
  */
 
-import type { GoalSkill, Goal, Transition } from "./types";
+import { sequence, stepsOf } from "./sequence.ts";
+import type { SequenceOutcome } from "./sequence.ts";
+import type { GoalSkill, Goal, Transition } from "./types.ts";
 
 /** What one required skill contributed, and whether it was enough. */
 export interface SubgoalResult {
@@ -34,6 +36,8 @@ export interface Verdict {
   subgoals: SubgoalResult[];
   /** Which skills still need a person to answer before this can settle. */
   awaiting: string[];
+  /** Set only for a goal whose links are ordered. Drives the step display. */
+  sequence?: SequenceOutcome;
 }
 
 /**
@@ -69,6 +73,13 @@ export function evaluate(
   transitions: Transition[],
   metricAnswers: Map<string, number>,
 ): Verdict {
+  // An ordered goal is a different question, not a variation on this one:
+  // it reads transitions in time order and asks where the pass has got to,
+  // where this reads them per skill and asks how many there were. Branching
+  // here rather than threading order through the loop below keeps the
+  // unordered path exactly as it was.
+  if (stepsOf(links).length > 0) return evaluateSequenced(goal, links, transitions);
+
   const subgoals: SubgoalResult[] = [];
   const awaiting: string[] = [];
   let observed = 0;
@@ -176,4 +187,50 @@ export function evaluate(
     goal.type === "limit" ? required.some((s) => s.observed > (goal.doneMax ?? 0)) : allMet;
 
   return { settled, observed, subgoals, awaiting };
+}
+
+/**
+ * Evaluate a goal whose links carry a sequence index.
+ *
+ * `observed` is completed passes, so "three sets of ten" has doneMin 3 and
+ * each pass is a set. The per-step counts describe the pass that is open
+ * right now, which is what makes a part-finished set legible rather than
+ * looking like a failure.
+ *
+ * Settling comes from the completion count and not from the subgoal rows,
+ * because a subgoal row describes the open pass: after two of three sets the
+ * open pass is empty, and `every(met)` over it would read as nothing done.
+ */
+function evaluateSequenced(
+  goal: Goal,
+  links: GoalSkill[],
+  transitions: Transition[],
+): Verdict {
+  const out = sequence(links, transitions, goal.sequenceWindowS);
+  const needed = Math.max(goal.doneMin ?? 1, 1);
+
+  const subgoals: SubgoalResult[] = out.steps.flatMap((step) =>
+    step.counts.map((count) => ({
+      skillKey: count.skillKey,
+      role: "required",
+      met: count.observed >= count.needed,
+      observed: count.observed,
+      needed: count.needed,
+      why:
+        count.observed >= count.needed
+          ? `step ${step.index} satisfied`
+          : `step ${step.index}: ${count.observed} of ${count.needed}`,
+    })),
+  );
+
+  const settled =
+    goal.type === "limit"
+      ? out.completions > (goal.doneMax ?? 0)
+      : out.completions >= needed;
+
+  // A metric step would belong here, since an unanswered measurement must
+  // leave the instance unsure rather than failed. Ordering shipped without
+  // it on purpose: the measurement path reports an unanswered metric as
+  // "never fired", and a sequence cannot paper over that.
+  return { settled, observed: out.completions, subgoals, awaiting: [], sequence: out };
 }

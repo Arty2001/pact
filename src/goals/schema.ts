@@ -34,6 +34,7 @@
 export const ADDITIONS: readonly string[] = [
   "ALTER TABLE skills ADD COLUMN min_cycle_s REAL NOT NULL DEFAULT 0.0",
   "ALTER TABLE transitions ADD COLUMN needed_conf REAL",
+  "ALTER TABLE goals ADD COLUMN sequence_window_s REAL NOT NULL DEFAULT 600",
 ];
 
 export const SCHEMA = `
@@ -86,6 +87,10 @@ CREATE TABLE IF NOT EXISTS goals (
   window_start  TEXT,
   window_end    TEXT,
   tz            TEXT NOT NULL DEFAULT 'UTC',
+  -- Longest gap allowed between two steps of one sequenced pass, in
+  -- seconds. Zero means no limit. Without it a first step observed in the
+  -- morning would go on scoping later steps all day.
+  sequence_window_s REAL NOT NULL DEFAULT 600,
   step_value    REAL,
   step_period   TEXT,
   step_on       TEXT,

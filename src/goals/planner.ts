@@ -1,5 +1,5 @@
-import { Nebius, type Tool } from "./nebius";
-import type { Skill } from "./types";
+import { Nebius, type Tool } from "./nebius.ts";
+import type { Skill } from "./types.ts";
 
 /**
  * Sentence in, goal draft out.

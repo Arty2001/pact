@@ -1,7 +1,7 @@
-import { Logger, newTraceId } from "../log";
-import { evaluate, inWindow } from "./evaluate";
-import { plan } from "./planner";
-import { ADDITIONS, SCHEMA } from "./schema";
+import { Logger, newTraceId } from "../log.ts";
+import { evaluate, inWindow } from "./evaluate.ts";
+import { plan } from "./planner.ts";
+import { ADDITIONS, SCHEMA } from "./schema.ts";
 import type {
   EngineMessage,
   Goal,
@@ -10,7 +10,7 @@ import type {
   PerceptionMessage,
   Skill,
   Transition,
-} from "./types";
+} from "./types.ts";
 
 /**
  * The Engine is the control plane and the ledger, and there is one of them.
@@ -443,8 +443,8 @@ export class Engine implements DurableObject {
     this.sql(
       `INSERT OR REPLACE INTO goals
         (key, description, type, cadence, done_min, done_max, window_start, window_end,
-         tz, step_value, step_period, step_on, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         tz, sequence_window_s, step_value, step_period, step_on, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       body.key,
       body.description,
       body.type ?? "target",
@@ -454,6 +454,7 @@ export class Engine implements DurableObject {
       body.windowStart ?? null,
       body.windowEnd ?? null,
       body.tz ?? "UTC",
+      body.sequenceWindowS ?? 600,
       body.stepValue ?? null,
       body.stepPeriod ?? null,
       body.stepOn ?? null,
@@ -584,7 +585,26 @@ export class Engine implements DurableObject {
     log.info("goal.evaluate", {
       goal: goal.key,
       subgoal_results: verdict.subgoals.map((s) => `${s.skillKey}=${s.met ? "met" : s.why}`),
+      ...(verdict.sequence
+        ? {
+            passes: verdict.sequence.completions,
+            waiting_on: verdict.sequence.cursor,
+            resets: verdict.sequence.resets,
+          }
+        : {}),
     });
+
+    // Out of order is the sequenced answer to "why is my count low", and it
+    // is only an answer if it is said out loud. Silently crediting nothing
+    // is what sends someone looking at the detector for three days.
+    for (const skipped of verdict.sequence?.outOfOrder ?? []) {
+      log.warn("skill.rejected", {
+        goal: goal.key,
+        skill: skipped.skillKey,
+        detail: `step ${skipped.step} observed while waiting on step ${skipped.waitingOn}`,
+        at: skipped.at,
+      });
+    }
 
     this.sql("UPDATE instances SET observed = ? WHERE id = ?", verdict.observed, instance.id);
     if (alreadySettled) return;
@@ -994,6 +1014,7 @@ function toGoal(r: Record<string, unknown>): Goal {
     windowStart: r.window_start === null ? null : String(r.window_start),
     windowEnd: r.window_end === null ? null : String(r.window_end),
     tz: String(r.tz),
+    sequenceWindowS: Number(r.sequence_window_s ?? 600),
     stepValue: r.step_value === null ? null : Number(r.step_value),
     stepPeriod: r.step_period === null ? null : (r.step_period as Goal["stepPeriod"]),
     stepOn: r.step_on === null ? null : (r.step_on as Goal["stepOn"]),

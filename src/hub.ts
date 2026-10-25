@@ -1,4 +1,4 @@
-import type { ClientMessage, Device, Env, ServerMessage } from "./types";
+import type { ClientMessage, Device, Env, ServerMessage } from "./types.ts";
 
 /** Claim codes are short-lived on purpose: scan it now or get a new one. */
 const CLAIM_TTL_MS = 10 * 60 * 1000;
