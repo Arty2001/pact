@@ -122,6 +122,28 @@ export class Engine implements DurableObject {
       return Response.json({ ok: true });
     }
 
+    const skillMatch = path.match(/^\/skills\/([A-Za-z0-9_\-/]+)$/);
+    if (skillMatch && request.method === "DELETE") {
+      // A skill a goal still names cannot go: the goal would be left asking
+      // for evidence nothing can produce, which reads as "never fired"
+      // rather than as the broken reference it is.
+      const used = this.rows<{ goal_key: string }>(
+        "SELECT goal_key FROM goal_skills WHERE skill_key = ?",
+        skillMatch[1],
+      ).map((r) => r.goal_key);
+      if (used.length > 0) {
+        this.log.warn("skill.rejected", {
+          detail: "delete refused, still in use",
+          skill: skillMatch[1],
+          goals: used.join(","),
+        });
+        return Response.json({ error: "in use", goals: used }, { status: 409 });
+      }
+      this.sql("DELETE FROM skills WHERE key = ?", skillMatch[1]);
+      this.pushRegistry();
+      return Response.json({ ok: true });
+    }
+
     const frameMatch = path.match(/^\/frames\/([A-Za-z0-9_-]+)$/);
     if (frameMatch && request.method === "POST") {
       return this.relayFrame(frameMatch[1], request);
