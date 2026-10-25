@@ -77,6 +77,24 @@ const MAX_CORRECTION_MIN = 240;
  */
 const LEDGER_RETAIN_MS = 14 * 24 * 60 * 60 * 1000;
 
+/**
+ * A key, made addressable.
+ *
+ * A key is a path segment before it is anything else, and the planner is a
+ * model being asked for one - it produced "nos youtube_shorts_limit", whose
+ * space made a goal that no URL could name. Normalising on the way in is
+ * cheaper than every route downstream having to cope: slashes stay, because
+ * a key is namespaced and they are the namespace.
+ */
+function asKey(raw: unknown): string {
+  return String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_/]+|[_/]+$/g, "");
+}
+
 /** The same planner model. It already knows the vocabulary of this system. */
 const ASSISTANT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
@@ -161,10 +179,15 @@ export class Engine implements DurableObject {
     // from a run that is now known to have been wrong sits on screen until
     // midnight with no way to say so - which is its own kind of lying about
     // what the camera saw.
-    const resetMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)\/instances$/);
+    // Keys are matched loosely and decoded, because a key is whatever was
+    // stored - and a planner that emitted "nos youtube_shorts_limit" made a
+    // goal that no route could address, so deleting it did nothing and said
+    // ok. A pattern that only accepts well-formed keys cannot clean up a
+    // badly-formed one, which is exactly when you need it to.
+    const resetMatch = path.match(/^\/goals\/(.+)\/instances$/);
     if (resetMatch && request.method === "DELETE") {
-      this.sql("DELETE FROM instances WHERE goal_key = ?", resetMatch[1]);
-      this.log.info("goal.evaluate", { goal: resetMatch[1], detail: "instances cleared" });
+      this.sql("DELETE FROM instances WHERE goal_key = ?", decodeURIComponent(resetMatch[1]));
+      this.log.info("goal.evaluate", { goal: decodeURIComponent(resetMatch[1]), detail: "instances cleared" });
       this.broadcastWatchers();
       return Response.json({ ok: true });
     }
@@ -172,9 +195,9 @@ export class Engine implements DurableObject {
     // Ordered above the goal delete deliberately: its path pattern
     // allows slashes, so it matches this one too and would answer it
     // by deleting nothing and reporting ok.
-    const goalMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)$/);
+    const goalMatch = path.match(/^\/goals\/(.+)$/);
     if (goalMatch && request.method === "DELETE") {
-      const key = goalMatch[1];
+      const key = decodeURIComponent(goalMatch[1]);
       // Written out rather than left to ON DELETE CASCADE, which only fires
       // when foreign keys are enforced and nothing here guarantees they are.
       this.sql("DELETE FROM goal_skills WHERE goal_key = ?", key);
@@ -202,24 +225,24 @@ export class Engine implements DurableObject {
       return Response.json({ ok: true, removedSkills: orphans });
     }
 
-    const skillMatch = path.match(/^\/skills\/([A-Za-z0-9_\-/]+)$/);
+    const skillMatch = path.match(/^\/skills\/(.+)$/);
     if (skillMatch && request.method === "DELETE") {
       // A skill a goal still names cannot go: the goal would be left asking
       // for evidence nothing can produce, which reads as "never fired"
       // rather than as the broken reference it is.
       const used = this.rows<{ goal_key: string }>(
         "SELECT goal_key FROM goal_skills WHERE skill_key = ?",
-        skillMatch[1],
+        decodeURIComponent(skillMatch[1]),
       ).map((r) => r.goal_key);
       if (used.length > 0) {
         this.log.warn("skill.rejected", {
           detail: "delete refused, still in use",
-          skill: skillMatch[1],
+          skill: decodeURIComponent(skillMatch[1]),
           goals: used.join(","),
         });
         return Response.json({ error: "in use", goals: used }, { status: 409 });
       }
-      this.sql("DELETE FROM skills WHERE key = ?", skillMatch[1]);
+      this.sql("DELETE FROM skills WHERE key = ?", decodeURIComponent(skillMatch[1]));
       this.pushRegistry();
       return Response.json({ ok: true });
     }
@@ -522,7 +545,7 @@ export class Engine implements DurableObject {
     // Only a changed label invalidates the vector — the label IS the detector.
     const prior = this.rows<Record<string, unknown>>(
       "SELECT * FROM skills WHERE key = ?",
-      body.key,
+      asKey(body.key),
     )[0];
     const keep = prior && String(prior.label) === body.label ? prior : undefined;
 
@@ -549,7 +572,7 @@ export class Engine implements DurableObject {
          cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
          w, encoder_id, dim, bias, temperature, weight_state, n_labels, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      body.key,
+      asKey(body.key),
       body.kind ?? "object",
       body.label,
       body.room ?? null,
@@ -601,7 +624,7 @@ export class Engine implements DurableObject {
         (key, description, type, cadence, done_min, done_max, window_start, window_end,
          tz, sequence_window_s, step_value, step_period, step_on, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      body.key,
+      asKey(body.key),
       body.description,
       body.type ?? "target",
       body.cadence ?? "daily",
@@ -623,8 +646,8 @@ export class Engine implements DurableObject {
         `INSERT OR REPLACE INTO goal_skills
           (goal_key, skill_key, role, class_key, min_count, accumulate, sequence_index)
          VALUES (?,?,?,?,?,?,?)`,
-        body.key,
-        use.skillKey,
+        asKey(body.key),
+        asKey(use.skillKey),
         use.role,
         use.classKey ?? null,
         use.minCount ?? null,

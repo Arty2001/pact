@@ -376,7 +376,25 @@ function renderGoals() {
           return;
         }
         kill.textContent = "…";
-        const res = await fetch(`/api/engine/goals/${g.key}`, { method: "DELETE" });
+        // Each segment encoded, the slashes left alone: a key is namespaced
+        // and the separators are part of the path, but anything else in it
+        // is data and has to survive the trip.
+        const addr = g.key.split("/").map(encodeURIComponent).join("/");
+        const res = await fetch(`/api/engine/goals/${addr}`, { method: "DELETE" });
+        if (!res.ok) {
+          // It used to report success whatever came back, so a goal with a
+          // key no route could match simply stayed, silently.
+          kill.textContent = "×";
+          kill.dataset.armed = "";
+          kill.classList.remove("armed");
+          toast({
+            kind: "bad",
+            lead: "!",
+            line: `Could not delete ${g.description}`,
+            sub: `the engine answered ${res.status}`,
+          });
+          return;
+        }
         const { removedSkills = [] } = await res.json().catch(() => ({}));
         if (focusGoal === g.key) focusGoal = null;
         goalWas.delete(g.key);
