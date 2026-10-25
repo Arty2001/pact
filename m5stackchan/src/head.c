@@ -326,3 +326,12 @@ bool head_is_moving(void)
 {
     return s_yaw_now != s_yaw_target || s_pit_now != s_pit_target;
 }
+int head_units_remaining(void)
+{
+    const int dy = (s_yaw_target > s_yaw_now) ? s_yaw_target - s_yaw_now
+                                              : s_yaw_now - s_yaw_target;
+    const int dp = (s_pit_target > s_pit_now) ? s_pit_target - s_pit_now
+                                              : s_pit_now - s_pit_target;
+    return (dy > dp) ? dy : dp;
+}
+

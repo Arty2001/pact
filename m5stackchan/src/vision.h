@@ -55,6 +55,8 @@ typedef struct {
     float strength;
     /** How many grid cells the person covers. */
     int cells;
+    /** Bounding box, in grid cells. People are upright; noise is not. */
+    int width, height;
     /** False when nobody is there. */
     bool valid;
 } motion_t;

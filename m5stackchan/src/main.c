@@ -39,15 +39,20 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "audio.h"
 #include "head.h"
 #include "pact_board.h"
 #include "scs.h"
 #include "vision.h"
+#include "voice.h"
 
 /* Capture mode supplies its own app_main; this file sits out. */
 #ifndef PACT_CAPTURE
 
 #define TICK_HZ 50
+
+/* SCS0009: about 300 degrees over 1023 counts. */
+#define DEG_PER_UNIT 0.293f
 
 /* --- control ------------------------------------------------------------ */
 
@@ -55,10 +60,22 @@
    converges smoothly instead of overshooting and hunting. */
 #define GAIN 0.8f
 
-/* Offsets smaller than this are already being looked at. Wider on pitch,
-   because the useful pitch band is narrow and a person is tall. */
+/* Offsets smaller than this are already being looked at.
+ *
+ * Yaw is the axis that matters - turning to face someone is the job.
+ *
+ * Pitch is deliberately reluctant. Its useful range is only 18 degrees,
+ * while the camera already sees 38 degrees vertically, so someone standing
+ * anywhere reasonable is in frame without tilting at all. Set against that
+ * almost-nil benefit, nearly every serious failure in this project has been
+ * pitch walking itself into a stop and staring at the ceiling. A wide
+ * deadband and a tight step limit buy back the little pitch offers without
+ * the failure mode. */
 #define DEADBAND_X 0.12f
-#define DEADBAND_Y 0.25f
+#define DEADBAND_Y 0.45f
+
+/* Most pitch units one correction may ask for. */
+#define MAX_PITCH_STEP 10
 
 /* A blob smaller than this is not worth turning the head for. */
 #define MIN_CELLS 8
@@ -66,13 +83,53 @@
 /* A servo cannot honour a move smaller than this. */
 #define MIN_STEP 5
 
+/* Consecutive sightings before the robot believes it. One frame of ceiling
+   flicker can pass every size and shape test; two in a row, in roughly the
+   same place, essentially cannot. Cheap insurance against announcing
+   someone who is not there. */
+#define CONFIRM_FRAMES 2
+#define CONFIRM_MOVE   0.35f
+
+/* How far ahead to aim, in seconds.
+ *
+ * Proportional control alone always arrives where the person WAS. By the
+ * time a correction is computed, executed and settled, a walking person has
+ * moved on, so the head lands behind them and the next correction starts
+ * from behind as well - which is what "it is always a step behind" is.
+ * Aiming at where they will be by the time the head gets there removes the
+ * lag instead of chasing it. Roughly the measured cost of one correction. */
+#define LEAD_SECONDS 0.45f
+
+/* Never lead further than this, so a noisy velocity cannot fling the head
+   across the room. */
+#define LEAD_MAX 0.40f
+
 /* Fallback geometry, used only when the scene is too blank to measure a
-   shift against. The GC0308 sees about 50 x 38 degrees, and the SCS0009
-   spans roughly 300 degrees over 1023 counts - which cross-checks against
-   the measured pitch travel: 285 counts is 83 degrees, and M5 document the
-   tilt axis as 90. The signs come from the camera image being mirrored. */
-#define FALLBACK_CELLS_PER_UNIT_X (-0.1172f)  /* 0.293 deg per unit / 2.50 deg per cell */
-#define FALLBACK_CELLS_PER_UNIT_Y (+0.1157f)  /* 0.293 deg per unit / 2.53 deg per cell */
+   shift against - and DERIVED FROM THE GRID, not written down.
+ *
+ * Written down, it rotted the moment the grid changed: these were worked
+ * out for 20 cells across the lens, and when the grid went to 40 they were
+ * left behind at half the right value. The effect was corrections roughly
+ * twice as large as they should be - a person at the edge of frame asked
+ * for 41 degrees of yaw when they were only 25 degrees off axis. Anything
+ * that depends on GW and GH has to be computed from GW and GH.
+ *
+ * The GC0308 sees about 50 x 38 degrees, and the SCS0009 spans roughly 300
+ * degrees over 1023 counts - which cross-checks against the measured pitch
+ * travel: 285 counts is 83 degrees, and M5 document the tilt axis as 90.
+ * The signs come from the camera image being mirrored horizontally. */
+#define LENS_FOV_X 50.0f
+#define LENS_FOV_Y 38.0f
+
+static float fallback_x(int gw)
+{
+    return -DEG_PER_UNIT * (float)gw / LENS_FOV_X;
+}
+
+static float fallback_y(int gh)
+{
+    return +DEG_PER_UNIT * (float)gh / LENS_FOV_Y;
+}
 
 /* How far each axis turns when measuring its gain.
  *
@@ -89,29 +146,44 @@
 /* --- timing ------------------------------------------------------------- */
 
 /* After the servos report arrival the head is still settling, and so is
-   auto-exposure. Short, because this is a real settle and not a guess
-   standing in for compensation. */
-#define SETTLE_MS 90
+   auto-exposure.
+ *
+ * Measured: a look costs 30ms, a correction 150-530ms. Almost all of the
+ * loop was spent waiting for the head rather than watching the room, which
+ * is the whole of "the frame rate is too slow". The settle is kept short,
+ * and the arrival wait below is allowed to give up early for small moves. */
+#define SETTLE_MS 50
 
 /* Give up waiting for arrival after this, so a stalled axis cannot wedge
-   the loop. */
-#define ARRIVE_TIMEOUT_MS 1200
+   the loop. Scaled by how far the head was asked to go: waiting a fixed
+   1.2 seconds for a 6-unit nudge is most of a second spent not looking. */
+#define ARRIVE_MIN_MS  120
+#define ARRIVE_MAX_MS 1000
+#define ARRIVE_MS_PER_UNIT 4
 
-/* Nobody seen for this long and it starts looking around. */
-#define BORED_US 8000000
+/* Nobody seen for this long and it goes back to waiting. */
+#define BORED_US 6000000
 
-/* Search: yaw offsets in degrees from where the person was last seen,
-   nearest first then outwards, pausing at each. */
-#define SEARCH_DWELL_US 2500000
-static const float kSearchDeg[] = {0, -25, 25, -50, 50, -75, 75};
-#define SEARCH_N ((int)(sizeof(kSearchDeg) / sizeof(kSearchDeg[0])))
-#define DEG_PER_UNIT 0.293f
+/* How long it sits still before allowing itself one small look around.
+ *
+ * Deliberately long, because searching turned out to be COUNTERPRODUCTIVE.
+ * Every move slides or resets the room model and blinds the robot while the
+ * head travels, so a robot sweeping the room is a robot that cannot see.
+ * A still camera with a settled background model is the most sensitive this
+ * thing ever gets - it catches someone the moment they walk in. Hunting for
+ * them destroys the very thing that would have found them.
+ *
+ * Measured: sweeping +-75 degrees left it staring at curtains, a column and
+ * a window while the person it was looking for stood somewhere else
+ * entirely. Waiting is not laziness here, it is the better algorithm. */
+#define IDLE_GLANCE_US 45000000
+#define GLANCE_DEG     18.0f
 
 #define GRID_EVERY_US 2500000
 
 /* Measured at boot: grid cells the picture slides per servo unit. */
-static float s_cells_per_unit_x = FALLBACK_CELLS_PER_UNIT_X;
-static float s_cells_per_unit_y = FALLBACK_CELLS_PER_UNIT_Y;
+static float s_cells_per_unit_x;
+static float s_cells_per_unit_y;
 
 /* ---------------------------------------------------------------- motion -- */
 
@@ -152,7 +224,15 @@ static void move_and_settle(void)
     const int pit0 = scs_read_pos(SCS_ID_PITCH);
 
     const int64_t t0 = esp_timer_get_time();
-    const int64_t deadline = esp_timer_get_time() + ARRIVE_TIMEOUT_MS * 1000;
+
+    /* Budget the wait by the size of the move. The servo travels at a
+       roughly fixed rate, so a short nudge is done long before a long sweep
+       and should not be waited on as if it were one. */
+    int togo = head_units_remaining();
+    if (togo < 0) togo = 0;
+    int budget_ms = ARRIVE_MIN_MS + togo * ARRIVE_MS_PER_UNIT;
+    if (budget_ms > ARRIVE_MAX_MS) budget_ms = ARRIVE_MAX_MS;
+    const int64_t deadline = t0 + (int64_t)budget_ms * 1000;
     int stable = 0;
     int last_y = -1, last_p = -1;
 
@@ -197,7 +277,7 @@ static void move_and_settle(void)
  * correlate, the geometry fallback stands in and says so - a stated
  * assumption beats a silent one.
  */
-static void measure_gain(void)
+static void measure_gain(int gw, int gh)
 {
     const struct {
         int units;
@@ -205,8 +285,8 @@ static void measure_gain(void)
         const char *name;
         float fallback;
     } axes[] = {
-        { PROBE_YAW_UNITS,   &s_cells_per_unit_x, "yaw",   FALLBACK_CELLS_PER_UNIT_X },
-        { PROBE_PITCH_UNITS, &s_cells_per_unit_y, "pitch", FALLBACK_CELLS_PER_UNIT_Y },
+        { PROBE_YAW_UNITS,   &s_cells_per_unit_x, "yaw",   fallback_x(gw) },
+        { PROBE_PITCH_UNITS, &s_cells_per_unit_y, "pitch", fallback_y(gh) },
     };
 
     for (int a = 0; a < 2; a++) {
@@ -330,29 +410,50 @@ void app_main(void)
            yaw_travel, (double)(yaw_travel * DEG_PER_UNIT),
            pitch_travel, (double)(pitch_travel * DEG_PER_UNIT));
 
+    /* Audio before the camera: both want I2C pins 12/11, and esp32-camera
+       will not share them. */
+    const bool voice = audio_begin();
+
     printf("\n--- camera ---\n");
     const bool eyes = vision_begin();
     if (!eyes) printf("  FAILED - the head will move but blind\n");
 
     int gw = 0, gh = 0;
     vision_grid_size(&gw, &gh);
+    s_cells_per_unit_x = fallback_x(gw);
+    s_cells_per_unit_y = fallback_y(gh);
 
     head_center();
     move_and_settle();
 
     if (eyes) {
         printf("\n--- measuring control gain ---\n");
-        measure_gain();
+        measure_gain(gw, gh);
         head_center();
         move_and_settle();
     }
 
     printf("\n--- running ---\n\n");
 
+    /* Ask for what it needs, out loud.
+     *
+     * Every attempt to test this has foundered on the same thing: the
+     * recording and the person were never in step, and session after
+     * session came back showing an empty room. The robot asking directly is
+     * the only version of this that has ever worked. */
+    if (voice) audio_play_u8(kVoicePROMPT, sizeof(kVoicePROMPT));
+
     int64_t last_seen_us = esp_timer_get_time();
-    int seen_yaw = 0;
-    int search_step = -1;
-    int64_t search_until = 0;
+    bool at_home = true;
+    bool have_person = false;
+
+    /* For confirmation and for velocity. */
+    int   seen_run = 0;
+    float last_x = 0.0f, last_y = 0.0f;
+    int64_t last_t = 0;
+    float vel_x = 0.0f, vel_y = 0.0f;
+    bool glance_dir = false;
+    int64_t glance_at = esp_timer_get_time() + IDLE_GLANCE_US;
     int64_t next_grid = esp_timer_get_time() + GRID_EVERY_US;
     const int64_t run_t0 = esp_timer_get_time();
     int64_t looks = 0, look_total_us = 0;
@@ -375,20 +476,85 @@ void app_main(void)
         look_total_us += look_us;
 
         if (looked && m.valid && m.cells >= MIN_CELLS) {
-            const bool off_x = (m.x > DEADBAND_X || m.x < -DEADBAND_X);
-            const bool off_y = (m.y > DEADBAND_Y || m.y < -DEADBAND_Y);
+            /* Confirm before believing.
+             *
+             * One frame of ceiling flicker can pass every size and shape
+             * test - measured, on an empty room, clusters from the
+             * downlights announced a person with nobody there. Requiring a
+             * second sighting near the first costs one frame of latency and
+             * removes essentially all of it, because noise does not repeat
+             * in the same place. */
+            const float jump_x = m.x - last_x;
+            const float jump_y = m.y - last_y;
+            const bool near_last =
+                (jump_x < CONFIRM_MOVE && jump_x > -CONFIRM_MOVE) &&
+                (jump_y < CONFIRM_MOVE && jump_y > -CONFIRM_MOVE);
+            seen_run = (seen_run > 0 && near_last) ? seen_run + 1 : 1;
 
-            const int dy = off_x ? correction(m.x, s_cells_per_unit_x, gw / 2) : 0;
-            const int dp = off_y ? correction(m.y, s_cells_per_unit_y, gh / 2) : 0;
+            /* Velocity, in frame-widths per second, from the last two
+               confirmed sightings. Smoothed, because a single frame's
+               position noise would otherwise become a large phantom speed. */
+            if (seen_run >= 2 && last_t > 0) {
+                const float dt = (float)(now - last_t) / 1e6f;
+                if (dt > 0.02f && dt < 1.5f) {
+                    vel_x = 0.6f * vel_x + 0.4f * (jump_x / dt);
+                    vel_y = 0.6f * vel_y + 0.4f * (jump_y / dt);
+                }
+            }
+            last_x = m.x;
+            last_y = m.y;
+            last_t = now;
 
-            float hx = 0.0f, hy = 0.0f;
-            head_position(&hx, &hy);
-            seen_yaw = (int)(hx * (float)(yaw_travel / 2));
+            if (seen_run < CONFIRM_FRAMES) {
+                /* Seen once. Wait for the second before acting or speaking. */
+                head_tick();
+                vTaskDelay(pdMS_TO_TICKS(1000 / TICK_HZ));
+                continue;
+            }
+
+            /* Aim where they are GOING, not where they were.
+             *
+             * A correction takes a few hundred milliseconds to compute,
+             * execute and settle. Aim at the measured position and the head
+             * lands where the person used to be, so the next correction
+             * starts from behind too - that is the permanent one-step lag.
+             * Leading by the measured velocity removes it rather than
+             * chasing it. */
+            float lead_x = vel_x * LEAD_SECONDS;
+            float lead_y = vel_y * LEAD_SECONDS;
+            if (lead_x >  LEAD_MAX) lead_x =  LEAD_MAX;
+            if (lead_x < -LEAD_MAX) lead_x = -LEAD_MAX;
+            if (lead_y >  LEAD_MAX) lead_y =  LEAD_MAX;
+            if (lead_y < -LEAD_MAX) lead_y = -LEAD_MAX;
+
+            const float aim_x = m.x + lead_x;
+            const float aim_y = m.y + lead_y;
+
+            const bool off_x = (aim_x > DEADBAND_X || aim_x < -DEADBAND_X);
+            const bool off_y = (aim_y > DEADBAND_Y || aim_y < -DEADBAND_Y);
+
+            const int dy = off_x ? correction(aim_x, s_cells_per_unit_x, gw / 2) : 0;
+            int dp = off_y ? correction(aim_y, s_cells_per_unit_y, gh / 2) : 0;
+            if (dp >  MAX_PITCH_STEP) dp =  MAX_PITCH_STEP;
+            if (dp < -MAX_PITCH_STEP) dp = -MAX_PITCH_STEP;
+
+            /* Say so the first time it picks someone up. This is the
+               feedback loop the whole thing was missing: whoever is
+               standing there learns instantly whether it can see them,
+               without reading a log over someone's shoulder. */
+            if (voice && !have_person) {
+                audio_play_u8(kVoiceHELLO, sizeof(kVoiceHELLO));
+            }
+            have_person = true;
             last_seen_us = now;
-            search_step = -1;
+            at_home = false;
 
-            printf("  person %2d cells at (%+.2f,%+.2f) -> %+d,%+d units\n",
-                   m.cells, (double)m.x, (double)m.y, dy, dp);
+            printf("  person %3d cells %dx%d at (%+.2f,%+.2f) vel %+.2f"
+                   " lead %+.2f -> %+d,%+d units  [look %lldms settle %lldms]\n",
+                   m.cells, m.width, m.height, (double)m.x, (double)m.y,
+                   (double)vel_x, (double)lead_x, dy, dp,
+                   (long long)(look_us / 1000),
+                   (long long)(s_settle_us / 1000));
 
             if (dy || dp) {
                 head_nudge_units(dy, dp);
@@ -397,44 +563,50 @@ void app_main(void)
             }
         }
 
-        /* Nobody for a while: one outward sweep around the last sighting,
-           then rest. A robot still hunting an hour later reads as broken. */
-        if (!acted && (now - last_seen_us) > BORED_US && now >= search_until) {
-            if (search_step < 0) {
-                search_step = 0;
-                printf("  nobody about - looking around\n");
-            }
-            if (search_step < SEARCH_N) {
-                const int units = (int)(kSearchDeg[search_step] / DEG_PER_UNIT);
-                float hx = 0.0f, hy = 0.0f;
-                head_position(&hx, &hy);
-                const int cur = (int)(hx * (float)(yaw_travel / 2));
+        /* Nobody for a while: go back to facing the room, and WAIT.
+           Not a sweep - see IDLE_GLANCE_US above for why hunting makes this
+           worse rather than better. */
+        if (!looked || !m.valid || m.cells < MIN_CELLS) {
+            seen_run = 0;
+            vel_x = 0.0f;
+            vel_y = 0.0f;
+        }
 
-                /* Bring pitch back to level on the way.
-                 *
-                 * Searching used to sweep yaw alone, so a pitch that had
-                 * been driven into its stop stayed there - and from the
-                 * ceiling there is no one to see, so nothing could ever pull
-                 * it back down. That is a trap, and it is what "it keeps
-                 * looking up" has meant every time. Whatever else goes
-                 * wrong, giving up on finding someone now also means
-                 * returning to where people actually are. */
-                const int pit_now = scs_read_pos(SCS_ID_PITCH);
-                int pit_lo = 0, pit_hi = 0, ylo = 0, yhi = 0;
-                head_limits_units(&ylo, &yhi, &pit_lo, &pit_hi);
-                const int d_pit = (pit_now >= 0)
-                                  ? ((pit_lo + pit_hi) / 2) - pit_now : 0;
+        if (have_person && (now - last_seen_us) > BORED_US) {
+            have_person = false;
+            if (voice) audio_play_u8(kVoiceLOST, sizeof(kVoiceLOST));
+        }
 
-                head_nudge_units((seen_yaw + units) - cur, d_pit);
-                printf("  looking %+.0f deg\n", (double)kSearchDeg[search_step]);
-                search_step++;
-                move_and_settle();
-                search_until = esp_timer_get_time() + SEARCH_DWELL_US;
-            } else {
-                search_step = -1;
-                search_until = now + 30000000;
-                printf("  nobody found, resting\n");
+        if (!acted && (now - last_seen_us) > BORED_US && !at_home) {
+            int ylo = 0, yhi = 0, plo = 0, phi = 0;
+            head_limits_units(&ylo, &yhi, &plo, &phi);
+            const int yaw_now = scs_read_pos(SCS_ID_YAW);
+            const int pit_now = scs_read_pos(SCS_ID_PITCH);
+            if (yaw_now >= 0 && pit_now >= 0) {
+                const int d_yaw = ((ylo + yhi) / 2) - yaw_now;
+                const int d_pit = ((plo + phi) / 2) - pit_now;
+                if (d_yaw > 4 || d_yaw < -4 || d_pit > 4 || d_pit < -4) {
+                    printf("  nobody about - back to facing the room\n");
+                    head_nudge_units(d_yaw, d_pit);
+                    move_and_settle();
+                }
             }
+            at_home = true;
+            glance_at = now + IDLE_GLANCE_US;
+        }
+
+        /* After a long quiet spell, one small glance to either side. Enough
+           that it does not look switched off, small enough that the model
+           recovers quickly and it is soon watching properly again. */
+        if (!acted && at_home && now >= glance_at) {
+            const int units = (int)((glance_dir ? GLANCE_DEG : -GLANCE_DEG)
+                                    / DEG_PER_UNIT);
+            glance_dir = !glance_dir;
+            printf("  a glance %+.0f deg\n",
+                   (double)(glance_dir ? -GLANCE_DEG : GLANCE_DEG));
+            head_nudge_units(units, 0);
+            move_and_settle();
+            glance_at = esp_timer_get_time() + IDLE_GLANCE_US;
         }
 
         if (eyes && now >= next_grid) {

@@ -66,6 +66,9 @@ void head_position(float *x_out, float *y_out);
 /** True while either axis is still travelling toward its target. */
 bool head_is_moving(void);
 
+/** Largest remaining distance to the target, in servo units. */
+int head_units_remaining(void);
+
 /** Max units of travel per tick. Lower is calmer, higher is snappier. */
 void head_set_rate(int units_per_tick);
 

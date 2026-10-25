@@ -355,7 +355,8 @@ static int mad_of(const int16_t *d, int n, int med)
  * The y returned is near the TOP of the blob rather than its centre: a
  * standing person runs head to feet, so the centroid is at the waist.
  */
-static int largest_blob(const bool *fg, float *out_x, float *out_y)
+static int largest_blob(const bool *fg, float *out_x, float *out_y,
+                        int *out_w, int *out_h)
 {
     static int16_t stack[GN];
     static bool seen[GN];
@@ -368,6 +369,7 @@ static int largest_blob(const bool *fg, float *out_x, float *out_y)
         if (!fg[start] || seen[start]) continue;
 
         int sp = 0, count = 0, sum_x = 0;
+        int min_x = GW, max_x = -1, min_y = GH, max_y = -1;
         stack[sp++] = (int16_t)start;
         seen[start] = true;
 
@@ -377,6 +379,10 @@ static int largest_blob(const bool *fg, float *out_x, float *out_y)
             rows[count] = (int16_t)y;
             sum_x += x;
             count++;
+            if (x < min_x) min_x = x;
+            if (x > max_x) max_x = x;
+            if (y < min_y) min_y = y;
+            if (y > max_y) max_y = y;
 
             const int nb[4] = {
                 (x > 0)      ? i - 1  : -1,
@@ -393,8 +399,28 @@ static int largest_blob(const bool *fg, float *out_x, float *out_y)
             }
         }
 
+        const int bw = max_x - min_x + 1;
+        const int bh = max_y - min_y + 1;
+
+        /* Shape, not just size.
+         *
+         * The ceiling downlights flicker as auto-exposure hunts, and the
+         * cells they light join into clusters that reach the size of a
+         * distant person. Measured on footage of an empty room, those
+         * clusters announced "I can see you" with nobody there.
+         *
+         * They do not look like people, though. A person - standing or
+         * sitting - is at least as tall as they are wide, and is a solid
+         * region rather than a spatter. Lighting noise is wide, stringy and
+         * mostly holes. Two cheap tests on the bounding box throw it out
+         * without costing a real detection. */
+        if (bh * 4 < bw * 3) continue;                  /* too wide to be a person */
+        if (count * 100 < bw * bh * 40) continue;       /* too sparse to be solid */
+
         if (count > best) {
             best = count;
+            if (out_w) *out_w = bw;
+            if (out_h) *out_h = bh;
 
             /* Row at the 20th percentile: head and shoulders, not waist.
                Counting sort, because the rows are 0..GH-1. */
@@ -485,7 +511,8 @@ bool vision_look(motion_t *out)
     }
 
     float x = 0.0f, y = 0.0f;
-    const int cells = largest_blob(fg, &x, &y);
+    int bw = 0, bh = 0;
+    const int cells = largest_blob(fg, &x, &y, &bw, &bh);
     s_last_cells = cells;
     if (cells < MIN_CELLS) return true;
 
@@ -504,6 +531,8 @@ bool vision_look(motion_t *out)
     out->x = x;
     out->y = y;
     out->cells = cells;
+    out->width = bw;
+    out->height = bh;
     out->strength = (float)cells / 40.0f;
     if (out->strength > 1.0f) out->strength = 1.0f;
     out->valid = true;
