@@ -24,6 +24,15 @@ const $ = (id) => document.getElementById(id);
 /** How many score samples the plot holds. ~25 s at 8 Hz. */
 const TRACE = 200;
 
+/**
+ * How long the scores have to stop before the chart says anything about it.
+ *
+ * A still room is the designed state, not a fault - it is the whole reason
+ * an empty room costs nothing - so the bar for calling it out has to sit
+ * above a normal pause. Four seconds is the gap between two squats.
+ */
+const QUIET_MS = 20000;
+
 let state = { skills: [], goals: [], questions: [], perception: [], rooms: [] };
 let devices = [];
 let current = null; // { device, pc }
@@ -76,13 +85,14 @@ setInterval(() => {
   // The live pip is a reading, not decoration: it reflects whether frames
   // actually arrived recently, not whether a socket happens to be open.
   $("pip").classList.toggle("on", Date.now() - lastFrameAt < 6000);
-  // A gate that shut four seconds ago should say so four seconds ago, not
-  // on the next frame - which by definition is not coming while it is shut.
-  if (Date.now() - lastScoreAt > 4000) {
+  // Only once the quiet has lasted long enough to be worth remarking on.
+  // Four seconds was the gap between two squats, so the chart announced
+  // itself broken every time someone stood up straight.
+  if (Date.now() - lastScoreAt > QUIET_MS) {
     drawPlot();
     renderNotices();
   }
-}, 1000);
+}, 2000);
 
 // ------------------------------------------------------------------ toast --
 
@@ -215,7 +225,12 @@ function renderAll() {
  * saying stop.
  */
 function pruneTraces() {
-  const live = new Set((state.skills ?? []).map((s) => s.key));
+  // An empty skill list is what a failed read looks like as well as what an
+  // emptied registry looks like, and wiping every curve on the strength of
+  // it is how the chart kept erasing itself mid-session.
+  const skills = state.skills ?? [];
+  if (skills.length === 0) return;
+  const live = new Set(skills.map((s) => s.key));
   for (const key of [...traces.keys()]) if (!live.has(key)) traces.delete(key);
   if (focusSkill !== null && !live.has(focusSkill)) focusSkill = null;
   drawPlot();
@@ -759,7 +774,8 @@ function requestPlot() {
 function quietBecause() {
   if ((state.perception ?? []).length === 0) return "no watcher is connected";
   if (devices.length === 0) return "no camera is publishing";
-  if (Date.now() - lastScoreAt <= 4000) return "warming up";
+  if (lastScoreAt === 0) return "waiting for the first frame";
+  if (Date.now() - lastScoreAt <= QUIET_MS) return "warming up";
 
   // A watcher that has never reported on this room is not watching it, which
   // looks exactly like a still room from here and wants the opposite fix.
@@ -772,7 +788,16 @@ function quietBecause() {
   if (seen !== undefined && seen.secondsAgo > 30) {
     return `nothing from this camera for ${Math.round(seen.secondsAgo)}s — check it is still sharing`;
   }
-  return "nothing is moving — the gate skips a still room, so it costs nothing";
+  const idle = Math.round((Date.now() - lastScoreAt) / 1000);
+  // The motion gate does not apply to a screen - perception exempts it,
+  // because a desktop is legitimately motionless for minutes at a time and
+  // a still screen is still worth reading. So on a screen this cannot be
+  // the gate, and saying it is sends you looking for movement that was
+  // never the requirement.
+  if (current?.device?.kind === "screen") {
+    return `no scores for ${idle}s — a screen is never gated, so this is the feed, not stillness`;
+  }
+  return `still for ${idle}s — the gate skips a motionless room, so it costs nothing`;
 }
 
 
