@@ -210,9 +210,13 @@ export class Engine implements DurableObject {
       // product per frame forever and crowding the chart it appears on.
       // Delete a goal and whatever was only ever its goes with it; anything
       // another goal still shares is kept by the same query.
-      const orphans = this.rows<{ key: string }>(
-        "SELECT key FROM skills WHERE key NOT IN (SELECT skill_key FROM goal_skills)",
-      ).map((r) => r.key);
+      // Joined against goals, not just goal_skills. A join row whose goal no
+      // longer exists still names a skill, and a reference from a goal that
+      // is gone kept every skill in the registry looking used - so nothing
+      // was ever swept again after the first deletion that left one behind.
+      // Counting only live references makes this self-healing whatever the
+      // table has accumulated.
+      const orphans = this.unreferencedSkills();
       for (const orphan of orphans) this.sql("DELETE FROM skills WHERE key = ?", orphan);
 
       this.log.info("goal.settle", {
@@ -231,7 +235,9 @@ export class Engine implements DurableObject {
       // for evidence nothing can produce, which reads as "never fired"
       // rather than as the broken reference it is.
       const used = this.rows<{ goal_key: string }>(
-        "SELECT goal_key FROM goal_skills WHERE skill_key = ?",
+        `SELECT gs.goal_key FROM goal_skills gs
+         JOIN goals g ON g.key = gs.goal_key
+         WHERE gs.skill_key = ?`,
         decodeURIComponent(skillMatch[1]),
       ).map((r) => r.goal_key);
       if (used.length > 0) {
@@ -307,6 +313,20 @@ export class Engine implements DurableObject {
       this.sql("DELETE FROM transitions WHERE at < ?", stale);
       this.sql("DELETE FROM reminders WHERE done = 1 AND at < ?", stale);
       this.log.info("goal.evaluate", { detail: `pruned ${cut} transitions past retention` });
+    }
+
+    // Rows left by a goal that went before the joins were cleaned up, and
+    // the skills they stranded. Done on the tick because with no goals left
+    // there is no deletion to hang it off, and a registry full of detectors
+    // nothing asks for is scored on every frame forever.
+    const stranded = this.unreferencedSkills();
+    if (stranded.length > 0) {
+      for (const key of stranded) this.sql("DELETE FROM skills WHERE key = ?", key);
+      this.log.info("goal.settle", {
+        detail: "swept skills no goal names",
+        orphaned_skills: stranded.join(","),
+      });
+      this.pushRegistry();
     }
 
     // The next wake is whichever comes first: the regular tick, or a nudge.
@@ -1109,6 +1129,31 @@ export class Engine implements DurableObject {
     this.toWatchers({ type: "assistant", heard: text, say: turn.say, ui: turn.ui });
     return Response.json({ say: turn.say, ui: turn.ui, applied });
   };
+
+  /**
+   * Skills no surviving goal names.
+   *
+   * NOT EXISTS rather than NOT IN: a single NULL in the subquery makes
+   * NOT IN match nothing at all, silently, which is a strange way for a
+   * cleanup to fail. The join to goals is the other half - a join row whose
+   * goal is gone still names a skill, and those leftovers kept every skill
+   * looking used, so nothing was swept again after the first deletion that
+   * left one behind.
+   */
+  private unreferencedSkills(): string[] {
+    this.sql(
+      `DELETE FROM goal_skills
+       WHERE NOT EXISTS (SELECT 1 FROM goals g WHERE g.key = goal_skills.goal_key)`,
+    );
+    return this.rows<{ key: string }>(
+      `SELECT key FROM skills s
+       WHERE NOT EXISTS (
+         SELECT 1 FROM goal_skills gs
+         JOIN goals g ON g.key = gs.goal_key
+         WHERE gs.skill_key = s.key
+       )`,
+    ).map((r) => r.key);
+  }
 
   /** What the model asked for, done by the only thing allowed to do it. */
   private applyActions(actions: ToolCall[], log: Logger): string[] {
