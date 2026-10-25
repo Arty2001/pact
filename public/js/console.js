@@ -196,6 +196,7 @@ async function load() {
 }
 
 function renderAll() {
+  pruneTraces();
   announceGoals();
   renderGoals();
   renderSkills();
@@ -203,6 +204,21 @@ function renderAll() {
   renderMeta();
   renderNotices();
   renderTally();
+}
+
+/**
+ * Drop the series of skills that no longer exist.
+ *
+ * Deleting a goal takes its unshared skills with it, and perception stops
+ * reporting them - but a series already in hand would keep drawing its last
+ * few seconds forever, because nothing arriving is not the same as something
+ * saying stop.
+ */
+function pruneTraces() {
+  const live = new Set((state.skills ?? []).map((s) => s.key));
+  for (const key of [...traces.keys()]) if (!live.has(key)) traces.delete(key);
+  if (focusSkill !== null && !live.has(focusSkill)) focusSkill = null;
+  drawPlot();
 }
 
 let scoresSeen = 0;
@@ -336,9 +352,20 @@ function renderGoals() {
           return;
         }
         kill.textContent = "…";
-        await fetch(`/api/engine/goals/${g.key}`, { method: "DELETE" });
+        const res = await fetch(`/api/engine/goals/${g.key}`, { method: "DELETE" });
+        const { removedSkills = [] } = await res.json().catch(() => ({}));
         if (focusGoal === g.key) focusGoal = null;
         goalWas.delete(g.key);
+        // Say what else went. A skill vanishing from the list with no
+        // explanation reads as a bug rather than as the tidy-up it is.
+        toast({
+          kind: "bad",
+          lead: "×",
+          line: `Deleted ${g.description}`,
+          sub: removedSkills.length
+            ? `with ${removedSkills.length} skill${removedSkills.length > 1 ? "s" : ""} nothing else used`
+            : "its skills are still used elsewhere",
+        });
         void load();
       });
 
@@ -389,6 +416,15 @@ function chipFor(goal, instance) {
 
 function renderSkills() {
   const host = $("skills");
+  if ((state.skills ?? []).length === 0) {
+    host.replaceChildren(
+      Object.assign(document.createElement("div"), {
+        className: "empty",
+        textContent: "No skills. Skills arrive with the goals that need them.",
+      }),
+    );
+    return;
+  }
   host.replaceChildren(
     ...(state.skills ?? []).map((s) => {
       const el = document.createElement("div");

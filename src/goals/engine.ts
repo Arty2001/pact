@@ -134,8 +134,32 @@ export class Engine implements DurableObject {
     // by deleting nothing and reporting ok.
     const goalMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)$/);
     if (goalMatch && request.method === "DELETE") {
-      this.sql("DELETE FROM goals WHERE key = ?", goalMatch[1]);
-      return Response.json({ ok: true });
+      const key = goalMatch[1];
+      // Written out rather than left to ON DELETE CASCADE, which only fires
+      // when foreign keys are enforced and nothing here guarantees they are.
+      this.sql("DELETE FROM goal_skills WHERE goal_key = ?", key);
+      this.sql("DELETE FROM instances WHERE goal_key = ?", key);
+      this.sql("DELETE FROM goals WHERE key = ?", key);
+
+      // A skill no goal names any more is not merely clutter. Perception
+      // embeds it, scores it on every frame and reports it, and the console
+      // draws it a series - so an abandoned detector goes on costing a dot
+      // product per frame forever and crowding the chart it appears on.
+      // Delete a goal and whatever was only ever its goes with it; anything
+      // another goal still shares is kept by the same query.
+      const orphans = this.rows<{ key: string }>(
+        "SELECT key FROM skills WHERE key NOT IN (SELECT skill_key FROM goal_skills)",
+      ).map((r) => r.key);
+      for (const orphan of orphans) this.sql("DELETE FROM skills WHERE key = ?", orphan);
+
+      this.log.info("goal.settle", {
+        goal: key,
+        detail: "goal deleted",
+        orphaned_skills: orphans.join(",") || "none",
+      });
+      this.pushRegistry();
+      this.broadcastWatchers();
+      return Response.json({ ok: true, removedSkills: orphans });
     }
 
     const skillMatch = path.match(/^\/skills\/([A-Za-z0-9_\-/]+)$/);
