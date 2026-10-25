@@ -275,7 +275,30 @@ export type EngineMessage =
    * labelled, not the moment the answer arrived - the two are seconds apart
    * and the frame belongs to the first one.
    */
-  | { type: "label"; room: string; skillKey: string; at: number; label: 0 | 1; source: string };
+  | {
+      type: "label";
+      room: string;
+      skillKey: string;
+      at: number;
+      /**
+       * A stretch of time to label, rather than one moment.
+       *
+       * The single most useful correction a person can make is about
+       * something the cameras MISSED, and that case has no moment to point
+       * at: nothing fired, so there is no transition to anchor to and no
+       * question to answer. "I was doing that for the last twenty minutes"
+       * is the natural way to say it, and it is also the only way to produce
+       * labels in the quantity a refit needs - one sentence covers every
+       * frame in the window instead of one.
+       *
+       * Absent means a single moment, which is what a teacher verdict or an
+       * answered question is. `from`/`to` are inclusive epoch ms.
+       */
+      from?: number;
+      to?: number;
+      label: 0 | 1;
+      source: string;
+    };
 
 /** Perception -> Engine. */
 export type PerceptionMessage =
@@ -298,4 +321,17 @@ export type PerceptionMessage =
     }
   | { type: "transition"; transition: Transition }
   | { type: "weights"; skillKey: string; encoderId: string; dim: number; w: string; bias: number; temperature: number }
-  | { type: "refit"; skillKey: string; nExamples: number; holdoutBefore: number; holdoutAfter: number };
+  | {
+      type: "refit";
+      skillKey: string;
+      nExamples: number;
+      holdoutBefore: number;
+      holdoutAfter: number;
+      /**
+       * Whether the new vector was kept. A refit that cannot beat what it
+       * replaced is discarded, and that outcome is reported rather than
+       * swallowed: someone who has just spoken a correction is asking "did
+       * that do anything", and a declined fit answers it.
+       */
+      accepted?: boolean;
+    };

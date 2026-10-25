@@ -1287,10 +1287,20 @@ function addRow(preset = {}) {
   const el = document.createElement("div");
   el.className = "row";
   if (preset.sequenceIndex != null) el.dataset.step = String(preset.sequenceIndex);
+
+  // Not every drafted field deserves a widget. `dependsOn` is the gate tree
+  // and `accumulate` is "sum this across the day": the planner reasons about
+  // both and a person almost never retypes either, but dropping them on the
+  // floor here flattens every drafted parent/child pair into two unrelated
+  // skills, and lets thirty seconds settle a goal that asked for an hour.
+  el.dataset.dependsOn = preset.dependsOn ?? "";
+  el.dataset.accumulate = preset.accumulate ? "1" : "";
+
   el.append(
     select(["gate", "object", "action", "counter", "discriminator", "metric"], preset.kind ?? "action"),
+    select(["any", "camera", "screen"], preset.surface ?? "any"),
     input(preset.key ?? "", "person_at_desk"),
-    input(preset.label ?? "", "what a camera would literally see"),
+    input(preset.label ?? "", "what would literally be seen"),
     select(["gate", "required", "discriminating"], preset.role ?? "required"),
     btn("×", "ghost sm", () => el.remove()),
   );
@@ -1336,23 +1346,45 @@ $("goal-form").addEventListener("submit", async (e) => {
   if (e.submitter?.value !== "save") return;
 
   const defined = [...rows.children].map((el) => {
-    const [kind, key, label, role] = el.querySelectorAll("select, input");
+    const [kind, surface, key, label, role] = el.querySelectorAll("select, input");
     return {
       kind: kind.value,
+      surface: surface.value,
       key: key.value.trim(),
       label: label.value.trim(),
       role: role.value,
+      dependsOn: el.dataset.dependsOn || null,
+      accumulate: el.dataset.accumulate === "1",
       sequenceIndex: el.dataset.step === undefined ? null : Number(el.dataset.step),
     };
   });
 
   // Skills first: the join row carries a foreign key, and a goal pointing at
   // nothing is a goal that can never settle.
-  for (const r of defined.filter((r) => r.key && r.label)) {
+  //
+  // Gates before the rest for the same reason one level down: depends_on is
+  // itself a foreign key into this table, so a child written before its
+  // parent is a child whose gate chain is broken from birth.
+  const writing = defined.filter((r) => r.key && r.label);
+  const named = new Set(writing.map((r) => r.key));
+  const ordered = [...writing].sort(
+    (a, b) => (a.kind === "gate" ? -1 : 0) - (b.kind === "gate" ? -1 : 0),
+  );
+
+  for (const r of ordered) {
     await fetch("/api/engine/skills", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: r.key, kind: r.kind, label: r.label }),
+      body: JSON.stringify({
+        key: r.key,
+        kind: r.kind,
+        label: r.label,
+        surface: r.surface,
+        // Only when the parent is actually among the skills being written.
+        // A dangling key leaves the child permanently ineligible, which
+        // looks exactly like a detector that does not work.
+        dependsOn: r.dependsOn && named.has(r.dependsOn) ? r.dependsOn : null,
+      }),
     });
   }
 
@@ -1374,6 +1406,10 @@ $("goal-form").addEventListener("submit", async (e) => {
           skillKey: r.key,
           role: r.role,
           minCount: r.kind === "counter" ? Number($("g-donemin").value) || null : null,
+          // Without this an action settles on its first session of any
+          // length, so thirty seconds of the right thing on screen would
+          // credit a whole hour.
+          accumulate: r.accumulate,
           sequenceIndex: r.sequenceIndex,
         })),
     }),

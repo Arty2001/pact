@@ -70,19 +70,23 @@ class Ledger:
         self.token = token
         self._ws: Any = None
         self._skills_cb: Callable[[list[dict[str, Any]]], None] | None = None
-        self._label_cb: Callable[[str, float, int, str], None] | None = None
+        self._label_cb: Callable[[str, float, float, int, str], None] | None = None
 
     def on_registry(self, cb: Callable[[list[dict[str, Any]]], None]) -> None:
         self._skills_cb = cb
 
-    def on_label(self, cb: Callable[[str, float, int, str], None]) -> None:
+    def on_label(self, cb: Callable[[str, float, float, int, str], None]) -> None:
         """
-        A person's answer, on its way to becoming a training example.
+        A person's answer, on its way to becoming training examples.
 
-        The answer is decided in the control plane and the embedding it
-        describes lives here, so the label has to travel. Without this the
+        The answer is decided in the control plane and the embeddings it
+        describes live here, so the label has to travel. Without this the
         teacher was the only thing that could ever teach a skill anything,
         and a teacher call fires on a tenth of a percent of frames.
+
+        The callback takes a span rather than an instant, because the most
+        valuable correction anyone makes is about a stretch the cameras
+        missed entirely. A single moment arrives as a span of zero length.
         """
         self._label_cb = cb
 
@@ -120,9 +124,18 @@ class Ledger:
                         if msg.get("type") == "registry" and self._skills_cb is not None:
                             self._skills_cb(msg.get("skills") or [])
                         elif msg.get("type") == "label" and self._label_cb is not None:
+                            at = float(msg.get("at", 0)) / 1000.0
+                            # An older control plane sends only `at`, which
+                            # means one moment - the same thing as a span of
+                            # zero length, so it needs no separate path.
+                            start = float(msg.get("from", msg.get("at", 0))) / 1000.0
+                            end = float(msg.get("to", msg.get("at", 0))) / 1000.0
+                            if end < start:
+                                start, end = end, start
                             self._label_cb(
                                 str(msg.get("skillKey", "")),
-                                float(msg.get("at", 0)) / 1000.0,
+                                start or at,
+                                end or at,
                                 int(msg.get("label", 0)),
                                 str(msg.get("source", "human")),
                             )
@@ -198,7 +211,12 @@ class Ledger:
         )
 
     async def refit(
-        self, skill_key: str, n_examples: int, holdout_before: float, holdout_after: float
+        self,
+        skill_key: str,
+        n_examples: int,
+        holdout_before: float,
+        holdout_after: float,
+        accepted: bool = True,
     ) -> None:
         await self._send(
             {
@@ -207,6 +225,7 @@ class Ledger:
                 "nExamples": n_examples,
                 "holdoutBefore": holdout_before,
                 "holdoutAfter": holdout_after,
+                "accepted": accepted,
             }
         )
 

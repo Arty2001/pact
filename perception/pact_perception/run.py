@@ -82,6 +82,14 @@ _CALIBRATE_AFTER = 60
 #: standing in front of the camera waiting to see whether it noticed them.
 _PROVISIONAL_AFTER = 20
 
+#: Most frames one spoken correction may turn into examples.
+#:
+#: A long window at a counter's rate is tens of thousands of frames, and
+#: frames two seconds apart are near-duplicates: they cost gradient steps and
+#: add almost no evidence. Thinning evenly across the span keeps the whole
+#: stretch represented, which a head-of-window cut would not.
+_MAX_SPAN_LABELS = 600
+
 #: How often a room ships its score snapshot to the console. Four a second
 #: is already past what anyone reads off a moving line.
 _SNAPSHOT_EVERY_S = 0.25
@@ -267,30 +275,104 @@ class Runner:
         self._ready.set()
         self._registry_changed.set()
 
-    def _on_label(self, skill_key: str, at: float, label: int, source: str) -> None:
+    def _on_label(self, skill_key: str, start: float, end: float, label: int, source: str) -> None:
         """
-        Record an answer against the frame it was about.
+        Record an answer against the frames it was about.
 
-        Attached by proximity, because an answer arrives seconds after the
+        Two shapes arrive here and they want different treatment.
+
+        A single moment - a teacher verdict, an answered question - is
+        attached by proximity, because the answer arrives seconds after the
         thing it describes and nobody hands it a frame timestamp. A label
         with no frame within the tolerance is dropped rather than pinned to
         whatever happened to be nearest, which would teach the skill a
         picture of something else.
+
+        A stretch is the correction case: "I was doing that for the last
+        twenty minutes and you never noticed". It is the only path in this
+        system that produces labels in bulk, and bulk is what a refit has
+        always needed - the ordinary loop only labels moments something was
+        NOTICED, which is precisely the case a correction is about. So this
+        does not resolve a frame, it takes every frame in the span.
         """
         skill = self.skills.get(skill_key)
         if skill is None:
             return
-        frame_ts = self.store.nearest_frame_ts(at, tolerance=30.0)
-        if frame_ts is None:
+
+        if end - start < 1.0:
+            frame_ts = self.store.nearest_frame_ts(start, tolerance=30.0)
+            if frame_ts is None:
+                self.log.warn(
+                    "question.answered",
+                    skill=skill_key,
+                    detail="no frame near that moment; label dropped",
+                )
+                return
+            self.store.label(skill_key, frame_ts, label, source)
+            self.log.info(
+                "question.answered", skill=skill_key, detail=f"labelled {label} by {source}"
+            )
+            self._pending_labels.append(skill_key)
+            return
+
+        self._label_span(skill_key, start, end, label, source)
+
+    def _label_span(
+        self, skill_key: str, start: float, end: float, label: int, source: str
+    ) -> None:
+        """
+        Label every frame in a stretch, and find counter-examples to match.
+
+        The counter-examples are the part worth explaining. A fit cannot
+        separate anything from one-sided labels, and a correction is always
+        one-sided: nobody volunteers the moments they were NOT doing the
+        thing. So the opposite class is drawn from outside the window, from
+        the frames this skill already scored lowest.
+
+        That is an assumption rather than an observation and it is the
+        weakest link here. It is survivable because the refit holds back
+        frames it never trains on and throws itself away when it cannot beat
+        what it had, so a bad draw costs a rejected refit rather than a
+        quietly corrupted skill.
+        """
+        already = self.store.labelled_ts(skill_key)
+        inside = [ts for ts in self.store.frames_between(start, end) if ts not in already]
+        if not inside:
             self.log.warn(
                 "question.answered",
                 skill=skill_key,
-                detail="no frame near that moment; label dropped",
+                detail="no frames stored in that stretch; correction dropped",
             )
             return
-        self.store.label(skill_key, frame_ts, label, source)
+
+        # Thin an over-long window rather than refusing it. Four hours at the
+        # counter's rate is tens of thousands of frames, and consecutive
+        # frames two seconds apart are near-duplicates that add cost without
+        # adding evidence.
+        if len(inside) > _MAX_SPAN_LABELS:
+            step = len(inside) / _MAX_SPAN_LABELS
+            inside = [inside[int(i * step)] for i in range(_MAX_SPAN_LABELS)]
+
+        for ts in inside:
+            self.store.label(skill_key, ts, label, source)
+
+        # Only as many as were just added, so one correction cannot swamp
+        # the labels every other path collected.
+        opposite = [
+            ts
+            for ts in self.store.quiet_frames(skill_key, start, end, limit=len(inside) * 2)
+            if ts not in already
+        ][: len(inside)]
+        for ts in opposite:
+            self.store.label(skill_key, ts, 1 - label, f"{source}:inferred")
+
+        self.store.commit()
         self.log.info(
-            "question.answered", skill=skill_key, detail=f"labelled {label} by {source}"
+            "question.answered",
+            skill=skill_key,
+            detail=f"corrected {label} over {round((end - start) / 60.0, 1)}m by {source}",
+            labelled=len(inside),
+            counter_examples=len(opposite),
         )
         self._pending_labels.append(skill_key)
 
@@ -670,6 +752,18 @@ class Runner:
             accepted=result.accepted,
             why=result.why,
         )
+        # Reported whether or not it was taken. Someone who has just spoken a
+        # correction is asking "did that do anything", and a refit that
+        # declined itself is a real answer to that - silence is not. It used
+        # to return here, so the only outcome that ever reached the control
+        # plane was success, which made the holdout look like decoration.
+        await self.ledger.refit(
+            skill.key,
+            result.n_examples,
+            result.holdout_before,
+            result.holdout_after,
+            result.accepted,
+        )
         if not result.accepted:
             return
 
@@ -686,9 +780,6 @@ class Runner:
             self.embedder.encoder_id,
             result.bias,
             result.temperature,
-        )
-        await self.ledger.refit(
-            skill.key, result.n_examples, result.holdout_before, result.holdout_after
         )
 
     def _remember(self, skill: Skill, e: np.ndarray, room: Room) -> None:

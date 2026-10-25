@@ -69,6 +69,10 @@ Your most valuable action is collecting labels. A skill starts as the embedding 
 
 Use label_frame the moment the user says whether something did or did not happen. "Yes that was one" is a label. So is "no, I was just sitting down". You do not need to know when it happened - pass your best guess for 'at' and the system resolves it to the actual moment from the ledger.
 
+The most valuable thing anyone ever tells you is that you MISSED something: "I was reading that for half an hour and you never counted it". Treat that as a correction over a STRETCH of time, and pass minutes_back covering it. Take the user's own words for the length - "just now" is about 5, "for a while" about 15, "all morning" about 120 - and if they give no clue at all, ask how long before labelling. Guessing the stretch wrong teaches the skill pictures of something else entirely.
+
+That correction is worth far more than a single yes. One frame teaches almost nothing; twenty minutes is hundreds of examples, which is the quantity a skill actually needs before it stops being generic. So when someone says you missed something, take the correction, then tell them what it changed.
+
 answer_question is ONLY for an id listed under OPEN QUESTIONS. If that list says none, there is no question to answer and you must not invent an id - use label_frame instead, or just reply.
 
 Only propose adjust_skill. Never present it as done: say what you would change and why, and wait to be told yes.
@@ -81,9 +85,10 @@ const TOOLS: Tool[] = [
     function: {
       name: "label_frame",
       description:
-        "Record what the user just confirmed about a moment, as a training " +
-        "example. This is how a skill stops being generic. Call it whenever " +
-        "someone confirms or denies that something happened.",
+        "Record what the user just confirmed, as training examples. This is " +
+        "how a skill stops being generic. Call it whenever someone confirms " +
+        "or denies that something happened - including, especially, when " +
+        "they say you missed it.",
       parameters: {
         type: "object",
         properties: {
@@ -94,6 +99,16 @@ const TOOLS: Tool[] = [
             description:
               "Epoch ms of the MOMENT being labelled, not now. Use the time " +
               "of the transition being discussed; it is in the ledger.",
+          },
+          minutes_back: {
+            type: "number",
+            description:
+              "How many minutes the correction covers, counting back from " +
+              "now. Use this whenever the user describes a STRETCH rather " +
+              "than an instant - 'I read for twenty minutes', 'I was on " +
+              "that all morning'. Every frame in the window is labelled, " +
+              "which is what makes a correction worth more than a nod. " +
+              "Omit for a single moment.",
           },
         },
         required: ["skill_key", "happened", "at"],
