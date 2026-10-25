@@ -127,6 +127,10 @@ class Ledger:
 
     # ------------------------------------------------------------------ up
 
+    async def rate(self, room: str, hz: float) -> None:
+        """Ask a room's publisher for a sample rate. Sent only when it changes."""
+        await self._send({"type": "rate", "room": room, "hz": hz})
+
     async def transition(self, payload: dict[str, Any]) -> None:
         await self._send({"type": "transition", "transition": payload})
 

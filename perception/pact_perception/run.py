@@ -69,10 +69,16 @@ from .teacher import FRAMES_PER_CALL, Teacher
 #: 0.5 Hz, which is enough for a stable quantile without unbounded growth.
 _CALIBRATION_WINDOW = 600
 
-#: Recalibrate once this many samples have accumulated, then every so often
-#: as the room's lighting drifts. Without this the thresholds are whatever
-#: the identity transform gives, which is nothing usable.
+#: Enough samples for a stable high quantile. A skill is not scored before
+#: this, because an uncalibrated score sits at ~0.5 for every frame.
 _CALIBRATE_AFTER = 60
+
+#: A provisional fit, much earlier, so a skill starts working in seconds
+#: rather than minutes. Twenty samples is a poor estimate of a 98th
+#: percentile and it is refined at _CALIBRATE_AFTER, but "slightly wrong and
+#: running" beats "perfect and silent" by a wide margin when someone is
+#: standing in front of the camera waiting to see whether it noticed them.
+_PROVISIONAL_AFTER = 20
 
 
 @dataclass
@@ -90,6 +96,11 @@ class Room:
     """
 
     gate: MotionGate
+    #: Last rate we asked this room's publisher for, so it is sent on change
+    #: rather than on every frame.
+    asked_hz: float = 0.0
+    #: How many times each skill has been calibrated. Two, then never.
+    refits: dict[str, int] = field(default_factory=dict)
     states: dict[str, State] = field(default_factory=dict)
     history: dict[str, list[float]] = field(default_factory=dict)
     calibrated: set[str] = field(default_factory=set)
@@ -311,7 +322,17 @@ class Runner:
 
         for skill in self._eligible(room):
             await self._score_one(skill, embedding.vector, now, room, room_name)
-        return self._rate(self._eligible(room))
+
+        hz = self._rate(self._eligible(room))
+        if abs(hz - room.asked_hz) > 1e-6:
+            # The publisher owns its clock, so this is a request, not a
+            # command. Sent only on change: a counter going eligible is the
+            # moment the rate has to jump, and every frame in between would
+            # be the same number repeated.
+            room.asked_hz = hz
+            await self.ledger.rate(room_name, hz)
+            self.log.info("service.start", detail="rate", room=room_name, hz=hz)
+        return hz
 
     async def _score_one(
         self, skill: Skill, e: np.ndarray, now: float, room: Room, room_name: str
@@ -356,14 +377,7 @@ class Runner:
         # calibration landed, then could not close because the post-fit scores
         # straddled exit_conf. Collect the background first, then start.
         if skill.kind != "discriminator" and skill.key not in room.calibrated:
-            if skill.key not in room.warming:
-                room.warming.add(skill.key)
-                self.log.info(
-                    "service.start",
-                    detail="calibrating",
-                    skill=skill.key,
-                    needs=_CALIBRATE_AFTER,
-                )
+            room.warming.add(skill.key)
             return
 
         state = room.states.get(skill.key, initial(now))
@@ -509,8 +523,32 @@ class Runner:
         if len(hist) > _CALIBRATION_WINDOW:
             del hist[0 : len(hist) - _CALIBRATION_WINDOW]
 
-        if len(hist) < _CALIBRATE_AFTER or skill.key in room.calibrated:
+        # Log progress. Without this, "collecting background" and "broken"
+        # look identical from outside for minutes at a time.
+        n = len(hist)
+        if n in (5, 10, _PROVISIONAL_AFTER, 40, _CALIBRATE_AFTER):
+            self.log.info(
+                "service.start",
+                detail="calibrating",
+                skill=skill.key,
+                have=n,
+                needs=_PROVISIONAL_AFTER if n < _PROVISIONAL_AFTER else _CALIBRATE_AFTER,
+            )
+
+        # Exactly two fits per skill: a provisional one so it starts working
+        # in seconds, and a final one once the background is properly
+        # sampled. An earlier version re-fitted on every frame past the
+        # threshold, rewriting the calibration and pushing weights up the
+        # socket at the full frame rate.
+        done = room.refits.get(skill.key, 0)
+        if done == 0 and n < _PROVISIONAL_AFTER:
             return
+        if done == 1 and n < _CALIBRATE_AFTER:
+            return
+        if done >= 2:
+            return
+        provisional = done == 0
+        room.refits[skill.key] = done + 1
         bias, temperature = calibrate(
             np.asarray(hist),
             enter_conf=skill.params.enter_conf,
@@ -522,7 +560,8 @@ class Runner:
         self.log.info(
             "probe.refit",
             skill=skill.key,
-            n_examples=len(hist),
+            provisional=provisional,
+            n_examples=n,
             holdout_before=0.0,
             holdout_after=0.0,
             bias=round(bias, 5),

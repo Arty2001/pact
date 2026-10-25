@@ -229,6 +229,8 @@ export type EngineMessage =
 /** Perception -> Engine. */
 export type PerceptionMessage =
   | { type: "hello"; room: string; encoderId: string; dim: number }
+  /** "this room needs N fps now", from the skills currently eligible there. */
+  | { type: "rate"; room: string; hz: number }
   | { type: "transition"; transition: Transition }
   | { type: "weights"; skillKey: string; encoderId: string; dim: number; w: string; bias: number; temperature: number }
   | { type: "refit"; skillKey: string; nExamples: number; holdoutBefore: number; holdoutAfter: number };

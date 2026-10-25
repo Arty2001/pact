@@ -68,6 +68,13 @@ class Example:
     source: str
 
 
+#: Writes to batch before committing. Committing per frame would fsync on
+#: every sample; never committing at all means a crash loses the lot and
+#: nothing outside this process can read what the system has been doing,
+#: which is how this was found.
+_COMMIT_EVERY = 16
+
+
 class Store:
     def __init__(self, path: str | Path = "traces/perception.db", retain_days: float = 7.0) -> None:
         p = Path(path)
@@ -79,6 +86,7 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.retain_s = retain_days * 86400.0
         self._last_vacuum = 0.0
+        self._uncommitted = 0
 
     # ------------------------------------------------------------- writing
 
@@ -87,6 +95,7 @@ class Store:
             "INSERT INTO observations (skill_key, ts, score, cos, phase) VALUES (?,?,?,?,?)",
             (skill_key, ts, score, cos, phase),
         )
+        self._tick()
 
     def remember_frame(self, ts: float, embedding: np.ndarray, encoder_id: str) -> None:
         vec = np.asarray(embedding, dtype=np.float32)
@@ -94,6 +103,13 @@ class Store:
             "INSERT OR REPLACE INTO frames (ts, encoder_id, dim, embedding) VALUES (?,?,?,?)",
             (ts, encoder_id, int(vec.shape[-1]), vec.tobytes()),
         )
+        self._tick()
+
+    def _tick(self) -> None:
+        self._uncommitted += 1
+        if self._uncommitted >= _COMMIT_EVERY:
+            self.db.commit()
+            self._uncommitted = 0
 
     def label(
         self,

@@ -157,10 +157,15 @@ export class FrameTap {
       this.undelivered++;
       return;
     }
-    const { delivered } = await res.json();
+    const { delivered, hz } = await res.json();
     this.stats.sent++;
     this.stats.delivered = delivered;
     this.undelivered = delivered > 0 ? 0 : this.undelivered + 1;
+
+    // Perception knows what the eligible skills need; we only know how to
+    // obey. A gate is fine at 0.5 fps and a rep counter is blind below 4, so
+    // this is what makes a counter possible at all.
+    if (typeof hz === "number" && hz > 0) this.setRate(hz);
   }
 
   /** RGBA bytes to a Float32Array of luma in 0..1. */

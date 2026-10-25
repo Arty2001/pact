@@ -55,6 +55,16 @@ const WINDOW_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 export class Engine implements DurableObject {
   private log: Logger;
 
+  /**
+   * Frames per second each room currently needs, as perception last asked.
+   *
+   * In memory rather than stored: it is a live negotiation, not a fact about
+   * the world, and a stale rate read back after a restart would be worse
+   * than the default. The publisher owns its own clock, so this reaches it
+   * on the next frame response rather than being pushed.
+   */
+  private rates = new Map<string, number>();
+
   constructor(
     private ctx: DurableObjectState,
     private env: { NEBIUS_API_KEY?: string },
@@ -199,6 +209,11 @@ export class Engine implements DurableObject {
       return;
     }
 
+    if (msg.type === "rate") {
+      this.rates.set(msg.room, msg.hz);
+      return;
+    }
+
     if (msg.type === "transition") {
       this.recordTransition(msg.transition);
       return;
@@ -275,7 +290,16 @@ export class Engine implements DurableObject {
       for (const ws of targets) this.send(ws, msg);
     }
 
-    return Response.json({ delivered: targets.length, bytes: bytes.byteLength });
+    // The rate goes back in the response rather than being pushed, because
+    // the browser owns its own clock and is already making this request. A
+    // counter needs 8 fps to see a rep at all and a gate is fine at 0.5, so
+    // without this round trip the publisher sends at its idle rate forever
+    // and fast skills are not merely inaccurate, they are blind.
+    return Response.json({
+      delivered: targets.length,
+      bytes: bytes.byteLength,
+      hz: this.rates.get(room) ?? null,
+    });
   }
 
   // --------------------------------------------------------------- the rows
@@ -298,9 +322,9 @@ export class Engine implements DurableObject {
       body.dependsOn ?? null,
       body.enterConf ?? 0.75,
       body.exitConf ?? 0.45,
-      body.dwellS ?? 2.0,
-      body.exitS ?? 2.0,
-      body.cooldownS ?? 10.0,
+      body.dwellS ?? defaultDwellS(body.kind ?? "object"),
+      body.exitS ?? defaultExitS(body.kind ?? "object"),
+      body.cooldownS ?? defaultCooldownS(body.kind ?? "object"),
       body.escalateAfterS ?? 60.0,
       body.classes ? JSON.stringify(body.classes) : null,
       body.margin ?? null,
@@ -876,6 +900,33 @@ function defaultHz(kind: Skill["kind"]): number {
     default:
       return 0.5;
   }
+}
+
+/**
+ * Timings a kind needs, which is the only thing separating a rep counter
+ * from a two-minute routine.
+ *
+ * A counter must promote in well under a second and release immediately, or
+ * reps merge into one event; an action wants seconds of dwell so a passing
+ * glance is not a session, and minutes of cooldown so one routine is not
+ * counted twice. Getting these from the generic defaults is why a squat
+ * counter created by the planner could only ever record one rep per ten
+ * seconds.
+ */
+function defaultDwellS(kind: Skill["kind"]): number {
+  if (kind === "counter") return 0.4;
+  if (kind === "gate") return 3;
+  return 2;
+}
+
+function defaultExitS(kind: Skill["kind"]): number {
+  return kind === "counter" ? 0.3 : 2;
+}
+
+function defaultCooldownS(kind: Skill["kind"]): number {
+  if (kind === "counter") return 0;
+  if (kind === "action") return 60;
+  return 10;
 }
 
 /** Target for the n-th occurrence of a progression. */
