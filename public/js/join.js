@@ -256,3 +256,201 @@ if (!navigator.mediaDevices?.getDisplayMedia) {
 
 gate.hidden = false;
 checkConfig().then((ok) => ok && checkClaim());
+
+// ------------------------------------------------------------------ voice --
+
+/*
+ * Talking to Pact from the device already in the room.
+ *
+ * Recognition runs here and only the transcript is sent, so the audio never
+ * crosses the network - the same bargain the motion gate makes with frames
+ * and the encoder makes with pixels. It also means this works from across
+ * the room, mid-set, which a button on a laptop at a desk does not.
+ */
+
+const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
+let heard = null;
+/** Whether the button is on. */
+let open = false;
+/** Whether it is actually listening, which is false while it talks. */
+let deaf = false;
+let lastSpoken = "";
+let spokeUntil = 0;
+
+/*
+ * This device has the microphone and the speaker in the same room, so left
+ * running it transcribes its own reply, answers that, and hears itself
+ * again. It goes deaf while thinking and talking, which costs nothing - the
+ * person is listening in that window, not talking.
+ */
+function deafen() {
+  deaf = true;
+  try {
+    heard?.stop();
+  } catch {
+    // Already stopped.
+  }
+}
+
+function undeafen() {
+  deaf = false;
+  if (!open || heard === null) return;
+  try {
+    heard.start();
+  } catch {
+    // Already running.
+  }
+}
+
+function isOwnEcho(text) {
+  if (Date.now() - spokeUntil > 1500) return false;
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const said = norm(lastSpoken);
+  const got = norm(text);
+  return got.length > 0 && (said.includes(got) || got.includes(said.slice(0, 40)));
+}
+
+function speak(text) {
+  const synth = globalThis.speechSynthesis;
+  if (!synth || !text) return;
+  synth.cancel();
+  lastSpoken = text;
+  deafen();
+
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.04;
+  const done = () => {
+    spokeUntil = Date.now();
+    // A speaker does not stop dead, and the first thing the mic hears after
+    // it is our own sentence coming back off the walls.
+    setTimeout(undeafen, 450);
+  };
+  u.onend = done;
+  u.onerror = done;
+  setTimeout(done, 1200 + text.length * 70);
+  synth.speak(u);
+}
+
+function showSaid(text, muted = false) {
+  const box = el("said");
+  box.hidden = !text;
+  box.textContent = text;
+  box.classList.toggle("muted", muted);
+}
+
+async function askPact(text) {
+  if (!text.trim()) return;
+  showSaid("…", true);
+  try {
+    const res = await fetch("/api/engine/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const { say: reply = "I lost that one." } = await res.json().catch(() => ({}));
+    showSaid(reply);
+    // speak() takes over the deafening from here; without a reply nothing
+    // would ever switch the microphone back on.
+    if (!reply) undeafen();
+    // Spoken here, by the device in the room. The console shows the same
+    // exchange but stays quiet, or every answer arrives twice.
+    speak(reply);
+  } catch {
+    showSaid("Could not reach the engine.", true);
+    undeafen();
+  }
+}
+
+function listen() {
+  if (!Speech || open) return;
+  heard = new Speech();
+  heard.lang = "en-US";
+  heard.interimResults = true;
+  heard.continuous = false;
+
+  heard.onresult = (e) => {
+    const last = e.results[e.results.length - 1];
+    const text = last[0].transcript.trim();
+    if (deaf || isOwnEcho(text)) return;
+    showSaid(text, true);
+    if (last.isFinal) {
+      deafen();
+      void askPact(text);
+    }
+  };
+  heard.onerror = (e) => {
+    // A quiet room gives "no-speech" and our own stop() gives "aborted".
+    // Neither is a reason to switch the microphone off.
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    hush();
+  };
+  heard.onend = () => {
+    // Chrome ends the session on every pause, so it has to be restarted
+    // while the button is still on or you get exactly one sentence - but
+    // never while we are the one talking.
+    if (open && !deaf) {
+      try {
+        heard.start();
+      } catch {
+        hush();
+      }
+    }
+  };
+
+  open = true;
+  el("listen").setAttribute("aria-pressed", "true");
+  el("listen-label").textContent = "Listening — tap to stop";
+  try {
+    heard.start();
+  } catch {
+    hush();
+  }
+}
+
+function hush() {
+  open = false;
+  deaf = false;
+  el("listen").setAttribute("aria-pressed", "false");
+  el("listen-label").textContent = "Talk to Pact";
+  try {
+    heard?.stop();
+  } catch {
+    // Already stopped.
+  }
+  heard = null;
+}
+
+if (Speech === null) {
+  el("listen").disabled = true;
+  el("listen-label").textContent = "No speech recognition here";
+} else {
+  el("listen").addEventListener("click", () => (open ? hush() : listen()));
+}
+
+/*
+ * Unprompted speech, heard where it matters.
+ *
+ * A nudge about the bathroom is useless on a laptop in another room, and
+ * this device is the one that is actually there. It listens to the Engine
+ * for a turn with no `heard` - the mark of something nobody asked for - and
+ * says it. The console shows the same line and stays quiet while a camera
+ * is publishing, so it is spoken once.
+ */
+function hearEngine() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/api/engine/ws`);
+  ws.onmessage = (e) => {
+    let msg;
+    try {
+      msg = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (msg.type !== "assistant" || msg.heard) return;
+    showSaid(msg.say ?? "");
+    speak(msg.say ?? "");
+  };
+  ws.onclose = () => setTimeout(hearEngine, 3000);
+}
+
+hearEngine();

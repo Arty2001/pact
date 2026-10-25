@@ -70,9 +70,21 @@ class Ledger:
         self.token = token
         self._ws: Any = None
         self._skills_cb: Callable[[list[dict[str, Any]]], None] | None = None
+        self._label_cb: Callable[[str, float, int, str], None] | None = None
 
     def on_registry(self, cb: Callable[[list[dict[str, Any]]], None]) -> None:
         self._skills_cb = cb
+
+    def on_label(self, cb: Callable[[str, float, int, str], None]) -> None:
+        """
+        A person's answer, on its way to becoming a training example.
+
+        The answer is decided in the control plane and the embedding it
+        describes lives here, so the label has to travel. Without this the
+        teacher was the only thing that could ever teach a skill anything,
+        and a teacher call fires on a tenth of a percent of frames.
+        """
+        self._label_cb = cb
 
     async def connect(self, encoder_id: str, dim: int) -> AsyncIterator[IncomingFrame]:
         """
@@ -107,6 +119,13 @@ class Ledger:
                             continue
                         if msg.get("type") == "registry" and self._skills_cb is not None:
                             self._skills_cb(msg.get("skills") or [])
+                        elif msg.get("type") == "label" and self._label_cb is not None:
+                            self._label_cb(
+                                str(msg.get("skillKey", "")),
+                                float(msg.get("at", 0)) / 1000.0,
+                                int(msg.get("label", 0)),
+                                str(msg.get("source", "human")),
+                            )
                         elif msg.get("type") == "frame":
                             yield IncomingFrame(
                                 room=str(msg.get("room", self.room)),
@@ -134,6 +153,17 @@ class Ledger:
     async def rate(self, room: str, hz: float) -> None:
         """Ask a room's publisher for a sample rate. Sent only when it changes."""
         await self._send({"type": "rate", "room": room, "hz": hz})
+
+    async def scores(self, room: str, hz: float, scores: dict[str, Any]) -> None:
+        """
+        A downsampled snapshot of what every eligible skill is scoring.
+
+        Sent for the console to draw, and stored nowhere. Scores are produced
+        several times a second per skill and the ledger keeping only
+        transitions is the entire point of the split; a live view of a number
+        is not a record of it, and nothing here outlives the socket.
+        """
+        await self._send({"type": "scores", "room": room, "hz": hz, "scores": scores})
 
     async def transition(self, payload: dict[str, Any]) -> None:
         await self._send({"type": "transition", "transition": payload})

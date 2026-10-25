@@ -1,0 +1,88 @@
+# Check every pull request. Deploy on demand.
+#
+# The deploy job depends on the check job, so a red build cannot reach
+# pact.lanvar.ai. That ordering is the whole point of the file: with two
+# people merging to main, the thing standing between a typo and production
+# should be a machine rather than whoever pushed last.
+#
+# Deploying is deliberately manual. Releases currently go out with a local
+# `npm run deploy`, so an automatic deploy job would fail on every merge for
+# want of credentials - and a workflow that is always red is a workflow both
+# of us learn to scroll past. Run it from the Actions tab instead, or make it
+# automatic later by adding the two secrets below and putting `push` back on
+# the deploy job's `if`.
+#
+# What this does NOT do is touch the Worker's runtime secrets. REALTIME_APP_ID,
+# REALTIME_APP_SECRET and NEBIUS_API_KEY are set once with `wrangler secret put`
+# and live on the Worker, not in the repo or in this workflow. A deploy leaves
+# them alone, so there is no way for this file to leak or clobber them.
+
+name: check and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Deploy on demand, from the Actions tab.
+  workflow_dispatch:
+
+# A second push to main while the first is still deploying should win rather
+# than race it. In-progress PR checks are cancelled; in-progress deploys are
+# not, because killing wrangler mid-upload is how you get a half-applied
+# migration.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 24 to match local. The test script uses --experimental-strip-types,
+          # which needs 22.6 or newer; anything older fails on the TypeScript
+          # test files rather than on the code under test.
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+  deploy:
+    needs: check
+    # Manual only, for now. Needs CLOUDFLARE_API_TOKEN and
+    # CLOUDFLARE_ACCOUNT_ID as repository secrets before it will succeed.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    # Named so the deploy shows up in the repo's Environments tab with a link
+    # to the live URL, and so branch protection can require it later.
+    environment:
+      name: production
+      url: https://pact.lanvar.ai
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Deploy to Cloudflare
+        # npx uses the wrangler pinned in devDependencies, so CI and a local
+        # `npm run deploy` run the same version. Letting CI float to latest is
+        # how a deploy starts failing on a day nobody changed anything.
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

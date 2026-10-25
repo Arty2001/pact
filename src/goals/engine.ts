@@ -1,7 +1,11 @@
-import { Logger, newTraceId } from "../log";
-import { evaluate, inWindow } from "./evaluate";
-import { plan } from "./planner";
-import { MIGRATIONS, SCHEMA } from "./schema";
+import { Logger, newTraceId } from "../log.ts";
+import { converse } from "./assistant.ts";
+import type { UiIntent } from "./assistant.ts";
+import type { ToolCall } from "./nebius.ts";
+import { evaluate, inWindow } from "./evaluate.ts";
+import { sequence, stepsOf } from "./sequence.ts";
+import { plan } from "./planner.ts";
+import { ADDITIONS, MIGRATIONS, SCHEMA } from "./schema.ts";
 import type {
   EngineMessage,
   Goal,
@@ -11,7 +15,7 @@ import type {
   Skill,
   Surface,
   Transition,
-} from "./types";
+} from "./types.ts";
 
 /**
  * The Engine is the control plane and the ledger, and there is one of them.
@@ -53,6 +57,18 @@ const TICK_MS = 15 * 60 * 1000;
  */
 const WINDOW_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How long a transition is kept.
+ *
+ * Longer than the 24-hour evaluation window, because the console shows a
+ * fortnight of occurrences and an explanation has to survive long enough to
+ * be asked for. Shorter than forever, which is what it was.
+ */
+const LEDGER_RETAIN_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** The same planner model. It already knows the vocabulary of this system. */
+const ASSISTANT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
+
 export class Engine implements DurableObject {
   private log: Logger;
 
@@ -81,7 +97,7 @@ export class Engine implements DurableObject {
     private env: { NEBIUS_API_KEY?: string },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
-    for (const statement of MIGRATIONS) {
+    for (const statement of [...ADDITIONS, ...MIGRATIONS]) {
       // Expected to fail on every boot after the one that applied it, because
       // SQLite has no ADD COLUMN IF NOT EXISTS. Swallowed rather than probed
       // for: reading back the table definition to decide would be more code
@@ -109,6 +125,7 @@ export class Engine implements DurableObject {
     }
 
     if (path === "/plan" && request.method === "POST") return this.plan(request);
+    if (path === "/assistant" && request.method === "POST") return this.assistant(request);
 
     if (path === "/skills") {
       if (request.method === "GET") return Response.json({ skills: this.skills() });
@@ -120,9 +137,70 @@ export class Engine implements DurableObject {
       if (request.method === "POST") return this.createGoal(request);
     }
 
+    // Today's tally, cleared. An occurrence is keyed by date, so a count
+    // from a run that is now known to have been wrong sits on screen until
+    // midnight with no way to say so - which is its own kind of lying about
+    // what the camera saw.
+    const resetMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)\/instances$/);
+    if (resetMatch && request.method === "DELETE") {
+      this.sql("DELETE FROM instances WHERE goal_key = ?", resetMatch[1]);
+      this.log.info("goal.evaluate", { goal: resetMatch[1], detail: "instances cleared" });
+      this.broadcastWatchers();
+      return Response.json({ ok: true });
+    }
+
+    // Ordered above the goal delete deliberately: its path pattern
+    // allows slashes, so it matches this one too and would answer it
+    // by deleting nothing and reporting ok.
     const goalMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)$/);
     if (goalMatch && request.method === "DELETE") {
-      this.sql("DELETE FROM goals WHERE key = ?", goalMatch[1]);
+      const key = goalMatch[1];
+      // Written out rather than left to ON DELETE CASCADE, which only fires
+      // when foreign keys are enforced and nothing here guarantees they are.
+      this.sql("DELETE FROM goal_skills WHERE goal_key = ?", key);
+      this.sql("DELETE FROM instances WHERE goal_key = ?", key);
+      this.sql("DELETE FROM goals WHERE key = ?", key);
+
+      // A skill no goal names any more is not merely clutter. Perception
+      // embeds it, scores it on every frame and reports it, and the console
+      // draws it a series - so an abandoned detector goes on costing a dot
+      // product per frame forever and crowding the chart it appears on.
+      // Delete a goal and whatever was only ever its goes with it; anything
+      // another goal still shares is kept by the same query.
+      const orphans = this.rows<{ key: string }>(
+        "SELECT key FROM skills WHERE key NOT IN (SELECT skill_key FROM goal_skills)",
+      ).map((r) => r.key);
+      for (const orphan of orphans) this.sql("DELETE FROM skills WHERE key = ?", orphan);
+
+      this.log.info("goal.settle", {
+        goal: key,
+        detail: "goal deleted",
+        orphaned_skills: orphans.join(",") || "none",
+      });
+      this.pushRegistry();
+      this.broadcastWatchers();
+      return Response.json({ ok: true, removedSkills: orphans });
+    }
+
+    const skillMatch = path.match(/^\/skills\/([A-Za-z0-9_\-/]+)$/);
+    if (skillMatch && request.method === "DELETE") {
+      // A skill a goal still names cannot go: the goal would be left asking
+      // for evidence nothing can produce, which reads as "never fired"
+      // rather than as the broken reference it is.
+      const used = this.rows<{ goal_key: string }>(
+        "SELECT goal_key FROM goal_skills WHERE skill_key = ?",
+        skillMatch[1],
+      ).map((r) => r.goal_key);
+      if (used.length > 0) {
+        this.log.warn("skill.rejected", {
+          detail: "delete refused, still in use",
+          skill: skillMatch[1],
+          goals: used.join(","),
+        });
+        return Response.json({ error: "in use", goals: used }, { status: 409 });
+      }
+      this.sql("DELETE FROM skills WHERE key = ?", skillMatch[1]);
+      this.pushRegistry();
       return Response.json({ ok: true });
     }
 
@@ -154,7 +232,46 @@ export class Engine implements DurableObject {
     for (const goal of this.goals()) {
       this.ensureInstance(goal);
     }
-    await this.ctx.storage.setAlarm(Date.now() + TICK_MS);
+
+    // Anything due gets said once and marked, rather than deleted: a nudge
+    // that fired is a thing that happened, and the ledger keeps those.
+    const due = this.rows<{ id: string; text: string; goal_key: string | null }>(
+      "SELECT id, text, goal_key FROM reminders WHERE done = 0 AND at <= ?",
+      Date.now(),
+    );
+    for (const r of due) {
+      this.sql("UPDATE reminders SET done = 1 WHERE id = ?", r.id);
+      this.log.info("question.asked", { detail: "reminder", prompt: r.text });
+      this.toWatchers({
+        type: "assistant",
+        heard: "",
+        say: r.text,
+        ui: { banner: r.text, tone: "nudge", focusGoal: r.goal_key ?? undefined },
+      });
+    }
+
+    // The ledger is append-only and nothing was ever removing from it. Every
+    // read is windowed to the last day, so rows older than the retention
+    // window are not merely unused - they are scanned past, forever, by a
+    // query that can never return them. Settled instances keep their own
+    // summary, so this loses no verdict.
+    const stale = Date.now() - LEDGER_RETAIN_MS;
+    const cut = this.rows<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM transitions WHERE at < ?",
+      stale,
+    )[0]?.n;
+    if (cut !== undefined && cut > 0) {
+      this.sql("DELETE FROM transitions WHERE at < ?", stale);
+      this.sql("DELETE FROM reminders WHERE done = 1 AND at < ?", stale);
+      this.log.info("goal.evaluate", { detail: `pruned ${cut} transitions past retention` });
+    }
+
+    // The next wake is whichever comes first: the regular tick, or a nudge.
+    const next = this.rows<{ at: number }>(
+      "SELECT at FROM reminders WHERE done = 0 ORDER BY at LIMIT 1",
+    )[0]?.at;
+    const tick = Date.now() + TICK_MS;
+    await this.ctx.storage.setAlarm(next !== undefined ? Math.min(next, tick) : tick);
   }
 
   /**
@@ -204,6 +321,15 @@ export class Engine implements DurableObject {
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({ role: "watcher" } satisfies SocketMeta);
+
+    // Hand a new watcher today's events immediately. A console that opens
+    // empty and fills in only as things happen shows nothing about a system
+    // that has been running all day.
+    try {
+      server.send(JSON.stringify({ type: "events", events: this.recentTransitions() }));
+    } catch {
+      // The socket can close between accept and first send.
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -233,6 +359,14 @@ export class Engine implements DurableObject {
 
     if (msg.type === "rate") {
       this.rates.set(msg.room, msg.hz);
+      return;
+    }
+
+    if (msg.type === "scores") {
+      // Straight out to the browsers and then gone. Nothing is persisted,
+      // which is what keeps this from quietly becoming the observations
+      // table the whole process split exists to avoid.
+      this.toWatchers({ type: "scores", room: msg.room, hz: msg.hz, scores: msg.scores });
       return;
     }
 
@@ -338,29 +472,64 @@ export class Engine implements DurableObject {
       return Response.json({ error: "key and label are required" }, { status: 400 });
     }
     const now = Date.now();
+    // Only a changed label invalidates the vector — the label IS the detector.
+    const prior = this.rows<Record<string, unknown>>(
+      "SELECT * FROM skills WHERE key = ?",
+      body.key,
+    )[0];
+    const keep = prior && String(prior.label) === body.label ? prior : undefined;
+
+    // The vector and the fit are carried separately because they depend on
+    // different things. A vector is the embedded label and nothing else. A
+    // fit is solved for one enter/exit pair, so a moved band leaves it
+    // describing a threshold that is no longer there — perception refits
+    // from fresh background instead.
+    const enterConf = body.enterConf ?? 0.75;
+    const exitConf = body.exitConf ?? 0.45;
+    const sameBand =
+      keep !== undefined &&
+      Number(keep.enter_conf) === enterConf &&
+      Number(keep.exit_conf) === exitConf;
+    const fit = sameBand ? keep : undefined;
+
     // Hoisted because the timing defaults depend on it: a screen action wants
     // a long exit and no cooldown, a camera action the opposite.
     const surface = asSurface(body.surface ?? null, "any");
+
     this.sql(
       `INSERT OR REPLACE INTO skills
         (key, kind, label, room, surface, depends_on, enter_conf, exit_conf, dwell_s, exit_s,
-         cooldown_s, escalate_after_s, classes, margin, sample_hz, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
+         w, encoder_id, dim, bias, temperature, weight_state, n_labels, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       body.key,
       body.kind ?? "object",
       body.label,
       body.room ?? null,
       surface,
       body.dependsOn ?? null,
-      body.enterConf ?? 0.75,
-      body.exitConf ?? 0.45,
+      enterConf,
+      exitConf,
       body.dwellS ?? defaultDwellS(body.kind ?? "object"),
       body.exitS ?? defaultExitS(body.kind ?? "object", surface),
       body.cooldownS ?? defaultCooldownS(body.kind ?? "object", surface),
       body.escalateAfterS ?? 60.0,
+      body.minCycleS ?? defaultMinCycleS(body.kind ?? "object"),
       body.classes ? JSON.stringify(body.classes) : null,
       body.margin ?? null,
       body.sampleHz ?? defaultHz(body.kind ?? "object"),
+      // Carried over when the label is unchanged. Editing a threshold used to
+      // wipe the weight vector and the fitted calibration, so perception
+      // re-embedded and re-fitted on whatever happened to be in frame at that
+      // second — which is how a squat counter ended up calibrated against a
+      // static scene and firing on 40% of all frames.
+      keep?.w ?? null,
+      keep?.encoder_id ?? null,
+      keep?.dim ?? null,
+      fit?.bias ?? 0.0,
+      fit?.temperature ?? 1.0,
+      fit ? String(fit.weight_state) : keep?.w ? "zeroshot" : "pending",
+      keep?.n_labels ?? 0,
       now,
     );
     // Push the registry so perception embeds the label without waiting for a
@@ -383,8 +552,8 @@ export class Engine implements DurableObject {
     this.sql(
       `INSERT OR REPLACE INTO goals
         (key, description, type, cadence, done_min, done_max, window_start, window_end,
-         tz, step_value, step_period, step_on, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         tz, sequence_window_s, step_value, step_period, step_on, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       body.key,
       body.description,
       body.type ?? "target",
@@ -394,6 +563,7 @@ export class Engine implements DurableObject {
       body.windowStart ?? null,
       body.windowEnd ?? null,
       body.tz ?? "UTC",
+      body.sequenceWindowS ?? 600,
       body.stepValue ?? null,
       body.stepPeriod ?? null,
       body.stepOn ?? null,
@@ -499,7 +669,118 @@ export class Engine implements DurableObject {
     }
 
     for (const goal of this.goalsUsing(t.skillKey)) this.settleIfDue(goal, log);
+    this.missedChance(t, log);
     this.broadcastWatchers();
+  }
+
+  /**
+   * A gate closing is an opportunity closing.
+   *
+   * evaluate() skips gates on purpose - a gate is a precondition, not a
+   * sub-goal - which means an unmet goal reads as "not yet" forever and
+   * nothing can tell "you haven't done it" apart from "you were standing
+   * right there and didn't". The difference is the whole product: a tracker
+   * that notices what you did NOT do is a different thing from one that logs
+   * what you did.
+   *
+   * One gate is usually shared by several goals, which is the useful part.
+   * Walking out of the bathroom closes the chance at moisturiser and floss
+   * and brushing together, so they are collected and spoken as one sentence
+   * rather than three.
+   */
+  private missedChance(t: Transition, log: Logger): void {
+    if (t.kind !== "exited") return;
+
+    const behind = this.rows<Record<string, unknown>>(
+      `SELECT g.* FROM goals g
+       JOIN goal_skills gs ON gs.goal_key = g.key
+       WHERE gs.skill_key = ? AND gs.role = 'gate'`,
+      t.skillKey,
+    ).map(toGoal);
+    if (behind.length === 0) return;
+
+    const missed: Array<{ goal: Goal; instance: Instance }> = [];
+    for (const goal of behind) {
+      // A limit is not an opportunity. Leaving the room without breaking it
+      // is the goal, and congratulating someone for that is noise.
+      if (goal.type === "limit") continue;
+      const instance = this.ensureInstance(goal);
+      if (instance.state === "done" || instance.nudgedAt !== null) continue;
+      if (!this.insideWindow(goal, Date.now())) continue;
+      missed.push({ goal, instance });
+    }
+    if (missed.length === 0) return;
+
+    // Marked before speaking, not after. The model call takes a second and
+    // another transition can arrive inside it, and saying it twice is worse
+    // than not saying it at all.
+    for (const m of missed) {
+      this.sql("UPDATE instances SET nudged_at = ? WHERE id = ?", Date.now(), m.instance.id);
+    }
+    log.info("goal.evaluate", {
+      goal: missed.map((m) => m.goal.key).join(","),
+      detail: `chance closed: ${t.skillKey} ended`,
+    });
+
+    const list = missed
+      .map((m) => `"${m.goal.description}" (${m.instance.observed} of ${m.goal.doneMin ?? 1})`)
+      .join(", ");
+    this.sayUnprompted(
+      `The person has just finished being where ${t.skillKey} applies, and left ` +
+        `without completing: ${list}. Tell them, in ONE short sentence, warmly ` +
+        `and without nagging. Mention every one of them in that sentence. Do ` +
+        `not offer to set a reminder unless they ask.`,
+      { focusGoal: missed[0].goal.key, tone: "nudge" },
+      log,
+    );
+  }
+
+  /**
+   * Say something nobody asked for.
+   *
+   * The same turn a microphone would produce, with the ledger standing in
+   * for the question. It goes out on the watcher socket with an empty
+   * `heard`, which is how every console knows to speak it rather than only
+   * show it.
+   */
+  private sayUnprompted(prompt: string, ui: UiIntent, log: Logger): void {
+    const key = this.env.NEBIUS_API_KEY;
+    if (!key) return;
+    const goals = this.goals();
+    const work = (async () => {
+      try {
+        const turn = await converse(key, ASSISTANT_MODEL, prompt, {
+          now: Date.now(),
+          tz: goals[0]?.tz ?? "UTC",
+          goals: goals.map((goal) => ({
+            goal,
+            instance: this.instances(goal.key)[0] ?? null,
+            uses: this.links(goal.key).map((l) => l.skillKey),
+          })),
+          skills: this.skills(),
+          recent: this.transitionsSince(
+            this.skills().map((s) => s.key),
+            Date.now() - 60 * 60 * 1000,
+          ),
+          questions: this.openQuestions().map((q) => ({
+            id: q.id,
+            skillKey: q.skillKey,
+            prompt: q.prompt,
+          })),
+          room: [...this.lastFrameAt.keys()][0] ?? null,
+        });
+        log.info("question.asked", { detail: "unprompted", prompt: turn.say });
+        this.toWatchers({
+          type: "assistant",
+          heard: "",
+          say: turn.say,
+          ui: { ...ui, ...turn.ui },
+        });
+      } catch (err) {
+        log.error("service.error", { detail: `unprompted: ${String(err).slice(0, 160)}` });
+      }
+    })();
+    this.ctx.waitUntil(work);
   }
 
   private settleIfDue(goal: Goal, log: Logger): void {
@@ -524,7 +805,26 @@ export class Engine implements DurableObject {
     log.info("goal.evaluate", {
       goal: goal.key,
       subgoal_results: verdict.subgoals.map((s) => `${s.skillKey}=${s.met ? "met" : s.why}`),
+      ...(verdict.sequence
+        ? {
+            passes: verdict.sequence.completions,
+            waiting_on: verdict.sequence.cursor,
+            resets: verdict.sequence.resets,
+          }
+        : {}),
     });
+
+    // Out of order is the sequenced answer to "why is my count low", and it
+    // is only an answer if it is said out loud. Silently crediting nothing
+    // is what sends someone looking at the detector for three days.
+    for (const skipped of verdict.sequence?.outOfOrder ?? []) {
+      log.warn("skill.rejected", {
+        goal: goal.key,
+        skill: skipped.skillKey,
+        detail: `step ${skipped.step} observed while waiting on step ${skipped.waitingOn}`,
+        at: skipped.at,
+      });
+    }
 
     this.sql("UPDATE instances SET observed = ? WHERE id = ?", verdict.observed, instance.id);
     if (alreadySettled) return;
@@ -546,6 +846,18 @@ export class Engine implements DurableObject {
       verdict.observed,
       instance.id,
     );
+    if (state === "violated" && instance.nudgedAt === null) {
+      // A limit is the one goal where the interesting moment is the failure,
+      // and it was only ever turning a chip red.
+      this.sql("UPDATE instances SET nudged_at = ? WHERE id = ?", Date.now(), instance.id);
+      this.sayUnprompted(
+        `The limit "${goal.description}" has just been broken, right now. Say ` +
+          `so in ONE short sentence. Be direct, not scolding.`,
+        { focusGoal: goal.key, tone: "alert" },
+        log,
+      );
+    }
+
     log.info("goal.settle", {
       goal: goal.key,
       state,
@@ -617,6 +929,188 @@ export class Engine implements DurableObject {
     return Response.json({ ok: true });
   };
 
+  /**
+   * Where an ordered goal's open pass has got to, for the console.
+   *
+   * Recomputed rather than stored, for the same reason the cursor itself is
+   * derived: a saved cursor is a second copy of something the ledger already
+   * says, and two copies eventually disagree. An unordered goal returns
+   * nothing at all, so the payload only grows for goals that have an order.
+   */
+  private sequenceView(goal: Goal): { waitingOn?: number | null; passes?: number } {
+    const links = this.links(goal.key);
+    if (stepsOf(links).length === 0) return {};
+    const transitions = this.transitionsSince(
+      links.map((l) => l.skillKey),
+      Date.now() - WINDOW_LOOKBACK_MS,
+    ).filter((t) => this.insideWindow(goal, t.at));
+    const out = sequence(links, transitions, goal.sequenceWindowS);
+    return { waitingOn: out.cursor, passes: out.completions };
+  }
+
+  // ------------------------------------------------------------- assistant
+
+  /**
+   * One spoken turn.
+   *
+   * Everything it is allowed to change it changes through here, never
+   * itself: the model returns tool calls and this applies them. A turn that
+   * could write to the ledger directly would be a turn nobody could replay,
+   * and replaying the ledger is the only reason any of this is trustworthy.
+   */
+  private assistant = async (request: Request): Promise<Response> => {
+    const body = (await request.json().catch(() => ({}))) as {
+      text?: string;
+      room?: string;
+    };
+    const text = (body.text ?? "").trim();
+    if (!text) return Response.json({ error: "nothing said" }, { status: 400 });
+
+    const key = this.env.NEBIUS_API_KEY;
+    if (!key) {
+      return Response.json(
+        { say: "I have no key to think with. Set NEBIUS_API_KEY and I will be back." },
+        { status: 200 },
+      );
+    }
+
+    const log = this.log.span(newTraceId());
+    const since = Date.now() - 60 * 60 * 1000;
+    const goals = this.goals();
+    const recent = this.transitionsSince(
+      this.skills().map((s) => s.key),
+      since,
+    );
+
+    log.info("question.asked", { detail: "heard", text });
+
+    let turn;
+    try {
+      turn = await converse(key, ASSISTANT_MODEL, text, {
+        now: Date.now(),
+        tz: goals[0]?.tz ?? "UTC",
+        goals: goals.map((goal) => ({
+          goal,
+          instance: this.instances(goal.key)[0] ?? null,
+          uses: this.links(goal.key).map((l) => l.skillKey),
+        })),
+        skills: this.skills(),
+        recent,
+        questions: this.openQuestions().map((q) => ({
+          id: q.id,
+          skillKey: q.skillKey,
+          prompt: q.prompt,
+        })),
+        room: [...this.lastFrameAt.keys()][0] ?? null,
+      });
+    } catch (err) {
+      log.error("service.error", { detail: `assistant: ${String(err).slice(0, 200)}` });
+      return Response.json({ say: "I could not reach my own head just then." });
+    }
+
+    const applied = this.applyActions(turn.actions, log);
+    log.info("question.answered", {
+      detail: "said",
+      say: turn.say,
+      actions: applied.join(",") || "none",
+      tokens: turn.usage.prompt + turn.usage.completion,
+    });
+
+    // Every watching console follows the same turn, so the UI rearranges
+    // around what was said rather than around what was clicked.
+    this.toWatchers({ type: "assistant", heard: text, say: turn.say, ui: turn.ui });
+    return Response.json({ say: turn.say, ui: turn.ui, applied });
+  };
+
+  /** What the model asked for, done by the only thing allowed to do it. */
+  private applyActions(actions: ToolCall[], log: Logger): string[] {
+    const done: string[] = [];
+    for (const call of actions) {
+      const a = call.args;
+      if (call.name === "label_frame") {
+        const skillKey = String(a.skill_key ?? "");
+        if (!skillKey) continue;
+        // "That one" means the last thing that happened, and the model is
+        // being asked to recall an epoch millisecond to say so. It gets it
+        // wrong, and a label pinned to the wrong second teaches the skill a
+        // picture of something else - so the moment is resolved here, from
+        // the ledger, and the model's guess is only a fallback.
+        const last = this.rows<{ at: number }>(
+          "SELECT at FROM transitions WHERE skill_key = ? ORDER BY at DESC LIMIT 1",
+          skillKey,
+        )[0]?.at;
+        const guess = Number(a.at ?? 0);
+        const plausible = guess > Date.now() - WINDOW_LOOKBACK_MS && guess <= Date.now();
+        const at = last ?? (plausible ? guess : Date.now());
+        // Down to perception, which holds the embedding the label describes.
+        // A label with nothing to attach to is dropped there rather than
+        // pinned to whatever frame happened to be nearest.
+        const room = [...this.lastFrameAt.keys()][0] ?? "";
+        for (const ws of this.perceptionSockets(room)) {
+          this.send(ws, {
+            type: "label",
+            room,
+            skillKey,
+            at,
+            label: a.happened === true ? 1 : 0,
+            source: "human",
+          });
+        }
+        log.info("question.answered", {
+          skill: skillKey,
+          detail: `labelled ${a.happened === true ? 1 : 0} by voice`,
+        });
+        done.push(`label_frame ${skillKey}`);
+      } else if (call.name === "answer_question") {
+        const id = String(a.id ?? "");
+        const value = String(a.value ?? "");
+        if (!id) continue;
+        // A model will invent an id rather than admit there is no question,
+        // and an UPDATE on one that does not exist succeeds at changing
+        // nothing - so it would be reported as done and nobody would know.
+        const real = this.rows<{ id: string }>(
+          "SELECT id FROM questions WHERE id = ? AND answered_at IS NULL",
+          id,
+        )[0];
+        if (real === undefined) {
+          log.warn("question.answered", {
+            detail: `no open question "${id}"; answer discarded`,
+          });
+          continue;
+        }
+        this.sql(
+          "UPDATE questions SET answer = ?, answered_at = ? WHERE id = ?",
+          value,
+          Date.now(),
+          id,
+        );
+        log.info("question.answered", { detail: `by voice: ${value}`, instance: id });
+        done.push(`answer_question ${id}`);
+      } else if (call.name === "remind") {
+        const at = Date.now() + Math.max(Number(a.in_minutes ?? 0), 0) * 60_000;
+        this.sql(
+          "INSERT OR REPLACE INTO reminders (id, at, text, goal_key, done) VALUES (?,?,?,?,0)",
+          crypto.randomUUID(),
+          at,
+          String(a.text ?? ""),
+          a.goal_key === undefined ? null : String(a.goal_key),
+        );
+        void this.ctx.storage.setAlarm(at);
+        done.push(`remind +${Number(a.in_minutes ?? 0)}m`);
+      } else if (call.name === "propose_adjustment") {
+        // Proposed, never applied. The one tool that can quietly make the
+        // system wrong does not get to do it without being told yes.
+        log.warn("skill.rejected", {
+          skill: String(a.skill_key ?? ""),
+          detail: `proposed: ${String(a.why ?? "")}`.slice(0, 160),
+        });
+        done.push(`proposed ${String(a.skill_key ?? "")}`);
+      }
+    }
+    if (done.length > 0) this.broadcastWatchers();
+    return done;
+  }
+
   // --------------------------------------------------------------- reading
 
   /** Everything the UI needs, in one request. */
@@ -627,6 +1121,7 @@ export class Engine implements DurableObject {
         ...goal,
         uses: this.links(goal.key),
         instances: this.instances(goal.key),
+        ...this.sequenceView(goal),
       })),
       questions: this.openQuestions(),
       rooms: [...this.lastFrameAt].map(([room, at]) => ({ room, secondsAgo: (Date.now() - at) / 1000 })),
@@ -845,17 +1340,52 @@ export class Engine implements DurableObject {
     }
   }
 
-  /** Nudge every watching browser to re-read /state. */
+  /** Nudge every watching browser to re-read /state, with today's events. */
   private broadcastWatchers(): void {
+    this.toWatchers({ type: "changed", events: this.recentTransitions() });
+  }
+
+  private toWatchers(payload: unknown): void {
+    const json = JSON.stringify(payload);
     for (const ws of this.ctx.getWebSockets()) {
       if (this.metaOf(ws)?.role === "watcher") {
         try {
-          ws.send(JSON.stringify({ type: "changed" }));
+          ws.send(json);
         } catch {
-          // Same race as above.
+          // Socket raced us and closed; the close handler cleans up.
         }
       }
     }
+  }
+
+  /**
+   * Today's transitions, newest first.
+   *
+   * Bounded rather than paged: this feeds a live column, and a console that
+   * can scroll into last week is answering a question nobody asked while
+   * watching.
+   */
+  private recentTransitions() {
+    const since = Date.now() - 24 * 60 * 60 * 1000;
+    return this.rows<Record<string, unknown>>(
+      "SELECT * FROM transitions WHERE at >= ? ORDER BY at DESC LIMIT 60",
+      since,
+    ).map((r) => ({
+      skillKey: String(r.skill_key),
+      kind: String(r.kind),
+      at: Number(r.at),
+      room: String(r.room),
+      traceId: String(r.trace_id),
+      score: Number(r.score),
+      reason: String(r.reason),
+      peak: r.peak === null ? null : Number(r.peak),
+      heldMs: r.held_ms === null ? null : Number(r.held_ms),
+      neededMs: r.needed_ms === null ? null : Number(r.needed_ms),
+      neededConf: r.needed_conf === null ? null : Number(r.needed_conf),
+      durationMs: r.duration_ms === null ? null : Number(r.duration_ms),
+      count: r.count === null ? null : Number(r.count),
+      verdictBy: r.verdict_by === null ? null : String(r.verdict_by),
+    }));
   }
 }
 
@@ -887,6 +1417,7 @@ function toSkill(r: Record<string, unknown>): Skill {
     exitS: Number(r.exit_s),
     cooldownS: Number(r.cooldown_s),
     escalateAfterS: Number(r.escalate_after_s),
+    minCycleS: Number(r.min_cycle_s ?? 0),
     classes: r.classes === null ? null : (JSON.parse(String(r.classes)) as string[]),
     margin: r.margin === null ? null : Number(r.margin),
     bias: Number(r.bias),
@@ -911,6 +1442,7 @@ function toGoal(r: Record<string, unknown>): Goal {
     windowStart: r.window_start === null ? null : String(r.window_start),
     windowEnd: r.window_end === null ? null : String(r.window_end),
     tz: String(r.tz),
+    sequenceWindowS: Number(r.sequence_window_s ?? 600),
     stepValue: r.step_value === null ? null : Number(r.step_value),
     stepPeriod: r.step_period === null ? null : (r.step_period as Goal["stepPeriod"]),
     stepOn: r.step_on === null ? null : (r.step_on as Goal["stepOn"]),
@@ -928,6 +1460,7 @@ function toInstance(r: Record<string, unknown>): Instance {
     targetMin: r.target_min === null ? null : Number(r.target_min),
     settledAt: r.settled_at === null ? null : Number(r.settled_at),
     settledBy: r.settled_by === null ? null : (r.settled_by as Instance["settledBy"]),
+    nudgedAt: r.nudged_at === null || r.nudged_at === undefined ? null : Number(r.nudged_at),
     createdAt: Number(r.created_at),
   };
 }
@@ -965,9 +1498,17 @@ function defaultHz(kind: Skill["kind"]): number {
  * counted twice. Getting these from the generic defaults is why a squat
  * counter created by the planner could only ever record one rep per ten
  * seconds.
+ *
+ * A counter's numbers are set by the shape of the state machine rather than
+ * by taste. Promotion always costs two frames - one to open candidacy, one
+ * to clear dwell - so any dwell below a single sample interval means exactly
+ * that floor, and that floor is already the shortest honest debounce there
+ * is. Anything longer asks a rep to hold its bottom position: measured at
+ * 4.6 Hz, half of all real squats cleared enter for one frame only, and were
+ * rejected at 178ms and 215ms against a 400ms dwell.
  */
 function defaultDwellS(kind: Skill["kind"]): number {
-  if (kind === "counter") return 0.4;
+  if (kind === "counter") return 0.05;
   if (kind === "gate") return 3;
   return 2;
 }
@@ -1001,6 +1542,18 @@ function defaultCooldownS(kind: Skill["kind"], surface: Surface): number {
   if (kind === "counter") return 0;
   if (kind === "action") return surface === "screen" ? 0 : 60;
   return 10;
+}
+
+/**
+ * The floor on how fast a kind can legitimately repeat.
+ *
+ * Only a counter has one. A squat is well over a second bottom-to-bottom, and
+ * a counter without this floor counts every entry into the pose — sitting
+ * down, bending over, pausing mid-set — because a pose detector has no notion
+ * of having to come back up.
+ */
+function defaultMinCycleS(kind: Skill["kind"]): number {
+  return kind === "counter" ? 0.7 : 0;
 }
 
 /** Target for the n-th occurrence of a progression. */

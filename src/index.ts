@@ -1,7 +1,7 @@
-import { Engine } from "./goals/engine";
-import { Hub } from "./hub";
-import { Sfu } from "./sfu";
-import type { Env } from "./types";
+import { Engine } from "./goals/engine.ts";
+import { Hub } from "./hub.ts";
+import { Sfu } from "./sfu.ts";
+import type { Env } from "./types.ts";
 
 export { Engine, Hub };
 

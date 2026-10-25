@@ -252,3 +252,63 @@ def test_a_rejection_says_which_constraint_actually_failed():
     assert slow[0].needed_conf == 0.75, "and it says what the score had to beat"
     assert slow[0].peak >= 0.75, "the peak cleared enter; that was never the problem"
     assert slow[0].score < p.exit_conf
+
+
+def test_a_counter_will_not_count_faster_than_a_rep_can_happen():
+    """
+    A counter counts entries into a pose, and a pose detector fires honestly
+    every time you are in that pose — sitting down, bending over, pausing
+    mid-set. Cooldown cannot express the constraint, because it is measured
+    from the end of the last session rather than from the last count.
+
+    This is the guard that stopped a squat counter reading 98 for 20 squats.
+    """
+    p = Params(
+        enter_conf=0.75,
+        exit_conf=0.45,
+        dwell_s=0.3,
+        exit_s=0.25,
+        cooldown_s=0.0,
+        min_cycle_s=1.5,
+    )
+    # A pose that flickers on and off every half second. Without the guard
+    # each return is a fresh count.
+    flicker = ([0.9] * 2 + [0.1] * 2) * 12
+    _, ev = run(flicker, p, dt=0.25)
+
+    assert count(ev, "entered") <= 2, "a 1.5s floor cannot admit more than two in six seconds"
+
+
+def test_the_minimum_cycle_measures_from_the_last_count_not_the_last_exit():
+    """
+    The distinction that cooldown gets wrong, shown both ways.
+
+    Cooldown runs from the moment a session ends, so it punishes a long hold
+    followed by a legitimate second rep, and forgives two counts half a
+    second apart as long as each session was brief. Measuring count-to-count
+    inverts both: a long session does not suppress the next rep, and a rapid
+    pair is refused however short the sessions were.
+    """
+    p = Params(
+        enter_conf=0.75, exit_conf=0.45, dwell_s=0.3, exit_s=0.25, cooldown_s=0.0, min_cycle_s=2.0
+    )
+
+    # A long hold, then a second entry immediately after it ends. Five and a
+    # half seconds since the count, so it is a real rep and it counts.
+    _, after_long = run([0.9] * 20 + [0.1] * 2 + [0.9] * 4, p, dt=0.25)
+    assert count(after_long, "entered") == 2, "a long session must not suppress the next rep"
+
+    # Two brief entries less than two seconds apart. Cooldown would allow
+    # these; count-to-count refuses the second.
+    _, rapid = run([0.9] * 3 + [0.1] * 2 + [0.9] * 3, p, dt=0.25)
+    assert count(rapid, "entered") == 1, "a second count inside the window is not a rep"
+
+
+def test_a_counter_with_no_minimum_cycle_behaves_as_before():
+    """The guard is opt-in; zero must be a true no-op."""
+    p = Params(
+        enter_conf=0.75, exit_conf=0.45, dwell_s=0.3, exit_s=0.25, cooldown_s=0.0, min_cycle_s=0.0
+    )
+    rep = [0.9] * 3 + [0.2] * 3
+    _, ev = run(rep * 5, p, dt=0.25)
+    assert count(ev, "entered") == 5

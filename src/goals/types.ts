@@ -90,6 +90,13 @@ export interface Skill {
   exitS: number;
   cooldownS: number;
   escalateAfterS: number;
+  /**
+   * Shortest believable gap between two counts, measured count-to-count.
+   * A pose detector fires honestly every time you are in the pose, so a
+   * counter needs a floor that cooldown cannot express: cooldown runs from
+   * the end of a session, not from the previous count.
+   */
+  minCycleS: number;
 
   /** Discriminator only. The last entry is always the implicit `none`. */
   classes: string[] | null;
@@ -145,6 +152,13 @@ export interface Goal {
    */
   tz: string;
 
+  /**
+   * Longest gap between two steps of one sequenced pass, in seconds. Zero
+   * disables the timeout. Ignored by a goal whose links carry no
+   * sequence index, which is every unordered goal.
+   */
+  sequenceWindowS: number;
+
   /** Progressions: 135 lb, +5 a week, only when the last one succeeded. */
   stepValue: number | null;
   stepPeriod: "week" | "month" | null;
@@ -184,6 +198,8 @@ export interface Instance {
   targetMin: number | null;
   settledAt: number | null;
   settledBy: SettledBy | null;
+  /** When this occurrence was last spoken about without being asked. */
+  nudgedAt: number | null;
   createdAt: number;
 }
 
@@ -250,13 +266,36 @@ export type EngineMessage =
       ts: number;
       jpegBase64: string;
     }
-  | { type: "rate"; room: string; hz: number };
+  | { type: "rate"; room: string; hz: number }
+  /**
+   * A person's answer, on its way to becoming a training example.
+   *
+   * The answer is decided here and the embedding it describes lives in
+   * perception, so the label has to travel. `at` is the moment being
+   * labelled, not the moment the answer arrived - the two are seconds apart
+   * and the frame belongs to the first one.
+   */
+  | { type: "label"; room: string; skillKey: string; at: number; label: 0 | 1; source: string };
 
 /** Perception -> Engine. */
 export type PerceptionMessage =
   | { type: "hello"; room: string; encoderId: string; dim: number }
   /** "this room needs N fps now", from the skills currently eligible there. */
   | { type: "rate"; room: string; hz: number }
+  /**
+   * A downsampled snapshot of what every eligible skill is scoring.
+   *
+   * Fanned to watching browsers and never written anywhere. That is not a
+   * loophole in the "the ledger never sees scores" rule, it is the rule: a
+   * live view of a number is not a record of it, and nothing here survives
+   * the socket closing.
+   */
+  | {
+      type: "scores";
+      room: string;
+      hz: number;
+      scores: Record<string, { score: number; phase: string }>;
+    }
   | { type: "transition"; transition: Transition }
   | { type: "weights"; skillKey: string; encoderId: string; dim: number; w: string; bias: number; temperature: number }
   | { type: "refit"; skillKey: string; nExamples: number; holdoutBefore: number; holdoutAfter: number };

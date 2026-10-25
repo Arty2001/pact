@@ -130,6 +130,10 @@ class Skill:
         return self.kind in SCORED_KINDS
 
 
+#: The implicit class every discriminator carries: none of the above.
+NONE = "none"
+
+
 @dataclass(frozen=True, slots=True)
 class Distribution:
     """A discriminator's output. The only kind that returns more than a number."""
@@ -144,6 +148,42 @@ class Distribution:
     @property
     def margin(self) -> float:
         return self.p1 - self.p2
+
+    @property
+    def detection(self) -> float:
+        """
+        How much better the best real class explains this frame than nothing
+        does: a two-way contest between them, which is what a detection
+        actually asks.
+
+        Three formulations were measured over 6,720 recorded frames.
+
+        p1, the winner's probability, cannot fall below 1/(K+1) - 0.345 here
+        - and peaks exactly when the discriminator is most certain, INCLUDING
+        when it is certain the answer is `none`. That opened sessions on 1,048
+        frames whose verdict was "none of these". It also had the narrowest
+        spread of anything tried, p10 to p90 of just 0.36: it looked decisive
+        because it sat high, not because it separated anything.
+
+        Zeroing on a `none` verdict fixes the first fault and adds a cliff -
+        0.68 to 0 on a thousandth of movement, crossed on 5% of all samples.
+
+        Dividing by the two together keeps every good property and recovers
+        the range: p10 to p90 of 0.66, nearly twice the original's, with 2.1%
+        of frames moving more than 0.3. `none` can only ever divide this
+        down, never raise it. And because the contest is against `none` alone,
+        adding a third real class does not dilute an unrelated one's score -
+        which plain max over the real classes could not say.
+        """
+        none = 0.0
+        best = 0.0
+        for prob, name in zip(self.probs, self.names, strict=True):
+            if name == NONE:
+                none = prob
+            else:
+                best = max(best, prob)
+        total = best + none
+        return best / total if total > 0 else 0.0
 
 
 class EncoderMismatch(RuntimeError):
@@ -183,7 +223,7 @@ def discriminate(skill: Skill, embedding: np.ndarray, encoder_id: str) -> Distri
     # `none` sits at zero, so a real class wins exactly when its cosine has
     # cleared the bias. No sentence to embed, and nothing to tune.
     probs = softmax(np.concatenate([logits, np.zeros(1)]))
-    names = (*skill.classes[: len(logits)], "none")
+    names = (*skill.classes[: len(logits)], NONE)
     order = np.argsort(probs)[::-1]
     return Distribution(
         probs=tuple(float(p) for p in probs),
@@ -243,16 +283,27 @@ def calibrate(
     if cos.size < 8:
         raise ValueError(f"need at least 8 background samples to calibrate, got {cos.size}")
 
+    span_in_logits = _logit(enter_conf) - _logit(exit_conf)
+    if span_in_logits <= 0:
+        # enter at or below exit is not a narrow band, it is an inverted one,
+        # and the arithmetic below turns it into a negative temperature that
+        # the old clamp quietly rounded up to 1e-6 - a perfect step function
+        # with no band at all for hysteresis to work in. That shipped, and a
+        # squat counter read 98 for 20 squats because every frame scored
+        # exactly 0 or exactly 1. Refuse it instead of producing it.
+        raise ValueError(
+            f"enter_conf {enter_conf} must sit above exit_conf {exit_conf}; "
+            "an inverted band has no hysteresis to calibrate"
+        )
+
     bias = float(np.quantile(cos, quantile))
     sigma = float(np.std(cos))
-    # A perfectly flat background (a frozen frame, a test fixture) would give
-    # a zero width and a divide by zero. Fall back to something small but
-    # finite so calibration degrades rather than explodes.
+    # A flat background - a frozen frame, a fixture - would divide by zero.
+    # Degrade to something narrow but finite rather than exploding.
     sigma = max(sigma, 1e-3)
 
-    span_in_logits = _logit(enter_conf) - _logit(exit_conf)
     temperature = (band_sigmas * sigma) / span_in_logits
-    return bias, float(max(temperature, 1e-6))
+    return bias, float(temperature)
 
 
 def _logit(p: float) -> float:
@@ -284,12 +335,25 @@ def loosen_for(params: Params, n_labels: int) -> Params:
     if that is weak for your room the session may be missed entirely. Running
     loose at the start is the mitigation, not a cure, which is why the manual
     entry path has to stay first class.
+
+    Crucially, the band moves as a unit. Lowering enter_conf on its own can
+    put it underneath exit_conf, and an inverted band is not a loose skill -
+    it is a skill with no hysteresis whose score becomes a step function. That
+    is exactly how a counter came to read 98 for 20 squats.
     """
-    enter, escalate = params.enter_conf, params.escalate_after_s
-    for threshold, e, esc in _WARMUP:
-        if n_labels <= threshold:
-            enter, escalate = e, esc
-            break
-    else:
+    band = next((b for b in _WARMUP if n_labels <= b[0]), None)
+    if band is None:
         return params
-    return replace(params, enter_conf=min(enter, params.enter_conf), escalate_after_s=escalate)
+    _, loose_enter, escalate = band
+
+    enter = min(loose_enter, params.enter_conf)
+    # Keep the gap the skill was configured with, so loosening never collapses
+    # or inverts it.
+    gap = max(params.enter_conf - params.exit_conf, 0.05)
+    exit_conf = max(min(params.exit_conf, enter - gap), 0.01)
+    return replace(
+        params,
+        enter_conf=enter,
+        exit_conf=exit_conf,
+        escalate_after_s=escalate,
+    )

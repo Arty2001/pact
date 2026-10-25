@@ -45,7 +45,7 @@ DEFAULT_IDLE_HZ = 0.5
 #: Ceiling on the adaptive rate. A bench press rep lasts two to four seconds,
 #: so counting one needs several samples inside it; below about 4 Hz reps are
 #: not merely miscounted, they are invisible.
-DEFAULT_MAX_HZ = 8.0
+DEFAULT_MAX_HZ = 15.0
 
 
 @dataclass(frozen=True, slots=True)

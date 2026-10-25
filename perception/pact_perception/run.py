@@ -39,6 +39,7 @@ import signal
 import sys
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -81,6 +82,33 @@ _CALIBRATE_AFTER = 60
 #: standing in front of the camera waiting to see whether it noticed them.
 _PROVISIONAL_AFTER = 20
 
+#: How often a room ships its score snapshot to the console. Four a second
+#: is already past what anyone reads off a moving line.
+_SNAPSHOT_EVERY_S = 0.25
+
+
+def rebanded_keys(
+    before: Mapping[str, Skill], after: Mapping[str, Skill]
+) -> set[str]:
+    """
+    Keys whose enter/exit band moved between two registry snapshots.
+
+    Bias and temperature are solved *for* a particular band, so a skill whose
+    thresholds were edited is carrying a fit aimed at thresholds that are no
+    longer there. Returning the key tells the caller to drop the fit and let
+    perception measure the background again. A skill that is new, or gone, is
+    not rebanded: there is no previous band to have moved away from.
+    """
+    return {
+        key
+        for key, now in after.items()
+        if (was := before.get(key)) is not None
+        and (
+            was.params.enter_conf != now.params.enter_conf
+            or was.params.exit_conf != now.params.exit_conf
+        )
+    }
+
 
 @dataclass
 class Room:
@@ -105,6 +133,15 @@ class Room:
     #: Last rate we asked this room's publisher for, so it is sent on change
     #: rather than on every frame.
     asked_hz: float = 0.0
+    #: This frame's score per skill, rebuilt each frame and sent as one
+    #: snapshot. Per-skill messages would be N times the traffic for a
+    #: picture that is only ever read all at once.
+    snapshot: dict[str, Any] = field(default_factory=dict)
+    last_sent: float = 0.0
+    #: Last (top class, decisive?) per discriminator, so an unchanged verdict
+    #: can stay quiet instead of repeating itself every frame.
+    verdicts: dict[str, tuple[str, bool]] = field(default_factory=dict)
+
     #: How many times each skill has been calibrated. Two, then never.
     refits: dict[str, int] = field(default_factory=dict)
     states: dict[str, State] = field(default_factory=dict)
@@ -136,13 +173,20 @@ class Runner:
         #: Queued because _remember runs inside the scoring path and must not
         #: await on a socket.
         self._pending_calibration: list[str] = []
+        #: Skills that gained a label and may now be worth refitting. Queued
+        #: because labels arrive on the socket task and a refit is not quick.
+        self._pending_labels: list[str] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
         #: recording that can be the whole run.
         self._ready = asyncio.Event()
+        #: Set when the registry changes, so labels get embedded off the
+        #: scoring path instead of waiting for a frame that may never come.
+        self._registry_changed = asyncio.Event()
 
         self.ledger.on_registry(self._on_registry)
+        self.ledger.on_label(self._on_label)
 
     # ---------------------------------------------------------- the registry
 
@@ -168,6 +212,7 @@ class Runner:
                 exit_s=float(row.get("exitS", 2.0)),
                 cooldown_s=float(row.get("cooldownS", 10.0)),
                 escalate_after_s=float(row.get("escalateAfterS", 60.0)),
+                min_cycle_s=float(row.get("minCycleS", 0.0)),
             )
             classes = row.get("classes") or []
             encoded = row.get("w")
@@ -188,11 +233,21 @@ class Runner:
                 n_labels=int(row.get("nLabels", 0)),
             )
 
+        rebanded = rebanded_keys(self.skills, fresh)
         self.skills = fresh
         for room in self.rooms.values():
             for key in list(room.states):
                 if key not in fresh:
                     del room.states[key]
+            for key in rebanded:
+                room.calibrated.discard(key)
+                room.refits.pop(key, None)
+        if rebanded:
+            self.log.info(
+                "probe.refit",
+                detail="band moved, recalibrating",
+                skills=len(rebanded),
+            )
 
         # Anything with no vector, or one fitted elsewhere, needs its label
         # embedded. Queued rather than done here because this callback runs
@@ -210,6 +265,34 @@ class Runner:
             needing_weights=len(self._pending_weights),
         )
         self._ready.set()
+        self._registry_changed.set()
+
+    def _on_label(self, skill_key: str, at: float, label: int, source: str) -> None:
+        """
+        Record an answer against the frame it was about.
+
+        Attached by proximity, because an answer arrives seconds after the
+        thing it describes and nobody hands it a frame timestamp. A label
+        with no frame within the tolerance is dropped rather than pinned to
+        whatever happened to be nearest, which would teach the skill a
+        picture of something else.
+        """
+        skill = self.skills.get(skill_key)
+        if skill is None:
+            return
+        frame_ts = self.store.nearest_frame_ts(at, tolerance=30.0)
+        if frame_ts is None:
+            self.log.warn(
+                "question.answered",
+                skill=skill_key,
+                detail="no frame near that moment; label dropped",
+            )
+            return
+        self.store.label(skill_key, frame_ts, label, source)
+        self.log.info(
+            "question.answered", skill=skill_key, detail=f"labelled {label} by {source}"
+        )
+        self._pending_labels.append(skill_key)
 
     async def _flush_calibration(self) -> None:
         while self._pending_calibration:
@@ -223,6 +306,26 @@ class Runner:
                 skill.bias,
                 skill.temperature,
             )
+
+    async def _embed_labels(self) -> None:
+        """
+        Embed labels as soon as the registry names them.
+
+        A vector is the encoded label and nothing else, so it needs no frame.
+        Embedding inside the frame loop meant a wall with no camera on it
+        never embedded at all, and the first frames after a camera appeared
+        were spent on nine encoder calls rather than on scoring.
+        """
+        while True:
+            await self._registry_changed.wait()
+            self._registry_changed.clear()
+            await self._fill_weights()
+
+    async def _flush_labels(self) -> None:
+        while self._pending_labels:
+            skill = self.skills.get(self._pending_labels.pop())
+            if skill is not None:
+                await self._maybe_refit(skill)
 
     async def _fill_weights(self) -> None:
         """Embed the labels of skills that have no usable vector yet."""
@@ -297,7 +400,7 @@ class Runner:
         """The fastest rate any currently eligible skill needs."""
         hz = self.cfg.idle_hz
         for skill in eligible:
-            need = 8.0 if skill.kind == "counter" else 2.0 if skill.kind != "gate" else 0.5
+            need = 12.0 if skill.kind == "counter" else 2.0 if skill.kind != "gate" else 0.5
             hz = max(hz, need)
         return min(hz, self.cfg.max_hz)
 
@@ -350,6 +453,14 @@ class Runner:
         for skill in self._eligible(room, surface):
             await self._score_one(skill, embedding.vector, now, room, room_name)
 
+        # One snapshot per frame, capped: a console redraws at human speed,
+        # and 8 Hz of socket traffic per camera buys nothing a person can see.
+        if room.snapshot and now - room.last_sent >= _SNAPSHOT_EVERY_S:
+            room.last_sent = now
+            await self.ledger.scores(
+                room_name, self._rate(self._eligible(room, surface)), dict(room.snapshot)
+            )
+
         hz = self._rate(self._eligible(room, surface))
         if abs(hz - room.asked_hz) > 1e-6:
             # The publisher owns its clock, so this is a request, not a
@@ -367,8 +478,18 @@ class Runner:
         try:
             if skill.kind == "discriminator":
                 dist = discriminate(skill, e, self.embedder.encoder_id)
-                value = dist.p1
-                self.log.info(
+                value = dist.detection
+                # A verdict that has not changed is not news. This fired at
+                # INFO on every frame for every discriminator - 1,877 lines
+                # in one session, drowning the events worth reading, and
+                # paying a JSON encode and a write inside the sampling loop
+                # that the frame rate was being measured against. The same
+                # argument that keeps skill.score at TRACE applies here.
+                verdict = (dist.top, dist.margin >= skill.margin)
+                changed = room.verdicts.get(skill.key) != verdict
+                room.verdicts[skill.key] = verdict
+                emit = self.log.info if changed else self.log.debug
+                emit(
                     "discriminator.margin",
                     skill=skill.key,
                     top=dist.top,
@@ -386,6 +507,11 @@ class Runner:
 
         self._remember(skill, e, room)
         self.log.trace("skill.score", skill=skill.key, score=round(value, 4))
+        phase = room.states.get(skill.key)
+        room.snapshot[skill.key] = {
+            "score": round(value, 4),
+            "phase": phase.phase if phase else "idle",
+        }
         state_now = room.states.get(skill.key)
         self.store.observe(
             skill.key,
@@ -755,6 +881,7 @@ class Runner:
 
         source = SfuSource(self.cfg.hub, self.log, hz=self.cfg.idle_hz)
         engine = asyncio.create_task(self._hold_socket())
+        embed = asyncio.create_task(self._embed_labels())
 
         async def follow() -> None:
             while True:
@@ -779,6 +906,7 @@ class Runner:
             async for room_name, surface, frame in source.frames():
                 await self._fill_weights()
                 await self._flush_calibration()
+                await self._flush_labels()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, room_name, surface
                 )
@@ -786,7 +914,7 @@ class Runner:
                 # on one clock, so the fastest room sets the pace.
                 source.set_rate(hz)
         finally:
-            for task in (engine, watch):
+            for task in (engine, watch, embed):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -794,23 +922,31 @@ class Runner:
 
     async def run_relay(self) -> None:
         """Frames arrive from the Engine; the browser owns the clock."""
-        async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
-            await self._fill_weights()
-            await self._flush_calibration()
-            with Image.open(io.BytesIO(frame.jpeg)) as im:
-                image = im.convert("RGB")
-            await self._on_frame(
-                image,
-                frame.seq,
-                frame.ts or time.time(),
-                "relay",
-                frame.room,
-                frame.surface,
-            )
+        embed = asyncio.create_task(self._embed_labels())
+        try:
+            async for frame in self.ledger.connect(self.embedder.encoder_id, self.embedder.dim):
+                await self._fill_weights()
+                await self._flush_calibration()
+                await self._flush_labels()
+                with Image.open(io.BytesIO(frame.jpeg)) as im:
+                    image = im.convert("RGB")
+                await self._on_frame(
+                    image,
+                    frame.seq,
+                    frame.ts or time.time(),
+                    "relay",
+                    frame.room,
+                    frame.surface,
+                )
+        finally:
+            embed.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await embed
 
     async def run_local(self, source: Any) -> None:
         """We own the clock: a folder or a camera, paced by the skills."""
         socket = asyncio.create_task(self._hold_socket())
+        embed = asyncio.create_task(self._embed_labels())
         try:
             # Wait for the registry rather than racing it. If the Engine is
             # unreachable this proceeds anyway after a moment, so a local
@@ -821,16 +957,17 @@ class Runner:
                 self.log.warn("service.error", detail="no registry; scoring nothing")
 
             async for frame in source.frames():
-                await self._fill_weights()
                 await self._flush_calibration()
+                await self._flush_labels()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, self.cfg.room, self.cfg.surface
                 )
                 source.set_rate(hz)
         finally:
-            socket.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await socket
+            for task in (socket, embed):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     async def _hold_socket(self) -> None:
         """Keep the Engine socket open while a local source drives the loop."""

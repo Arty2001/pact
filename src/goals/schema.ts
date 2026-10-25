@@ -22,6 +22,22 @@
  * including its trace id, is still there.
  */
 
+/**
+ * Columns added after the table first shipped.
+ *
+ * `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+ * so a new column never reaches a Durable Object that has been running since
+ * before it was written. Each of these runs on its own and is allowed to
+ * fail: SQLite raises "duplicate column name" when it is already there, which
+ * is the normal case on every boot after the first.
+ */
+export const ADDITIONS: readonly string[] = [
+  "ALTER TABLE skills ADD COLUMN min_cycle_s REAL NOT NULL DEFAULT 0.0",
+  "ALTER TABLE transitions ADD COLUMN needed_conf REAL",
+  "ALTER TABLE goals ADD COLUMN sequence_window_s REAL NOT NULL DEFAULT 600",
+  "ALTER TABLE instances ADD COLUMN nudged_at INTEGER",
+];
+
 export const SCHEMA = `
 CREATE TABLE IF NOT EXISTS skills (
   key              TEXT PRIMARY KEY,
@@ -44,6 +60,9 @@ CREATE TABLE IF NOT EXISTS skills (
   exit_s           REAL NOT NULL DEFAULT 2.0,
   cooldown_s       REAL NOT NULL DEFAULT 10.0,
   escalate_after_s REAL NOT NULL DEFAULT 60.0,
+  -- Shortest believable gap between two counts, count-to-count. Cooldown
+  -- measures from the end of a session and so cannot express this.
+  min_cycle_s      REAL NOT NULL DEFAULT 0.0,
 
   classes          TEXT,
   margin           REAL,
@@ -77,6 +96,10 @@ CREATE TABLE IF NOT EXISTS goals (
   window_start  TEXT,
   window_end    TEXT,
   tz            TEXT NOT NULL DEFAULT 'UTC',
+  -- Longest gap allowed between two steps of one sequenced pass, in
+  -- seconds. Zero means no limit. Without it a first step observed in the
+  -- morning would go on scoping later steps all day.
+  sequence_window_s REAL NOT NULL DEFAULT 600,
   step_value    REAL,
   step_period   TEXT,
   step_on       TEXT,
@@ -103,11 +126,26 @@ CREATE TABLE IF NOT EXISTS instances (
   -- Frozen at creation. This is what makes a progression work: raising next
   -- week's target must not retroactively raise this week's.
   target_min    REAL,
+  -- When this occurrence was last spoken about unprompted. One nudge per
+  -- occurrence: saying it every time someone walks past the sink is how an
+  -- assistant gets switched off.
+  nudged_at     INTEGER,
   settled_at    INTEGER,
   settled_by    TEXT,
   created_at    INTEGER NOT NULL,
   UNIQUE (goal_key, occurrence_on)
 );
+
+-- A nudge with a time on it. The only row in this schema about the future,
+-- which is why the Engine has an alarm and the Hub does not.
+CREATE TABLE IF NOT EXISTS reminders (
+  id       TEXT PRIMARY KEY,
+  at       INTEGER NOT NULL,
+  text     TEXT NOT NULL,
+  goal_key TEXT,
+  done     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS reminders_due ON reminders (done, at);
 
 CREATE TABLE IF NOT EXISTS questions (
   id             TEXT PRIMARY KEY,

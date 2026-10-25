@@ -30,12 +30,12 @@ import asyncio
 import contextlib
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 
+from .device import Device
 from .log import Logger
 from .sources import Frame
 
@@ -46,27 +46,6 @@ _ICE = RTCConfiguration(iceServers=[RTCIceServer(urls="stun:stun.cloudflare.com:
 _FIRST_FRAME_TIMEOUT_S = 20.0
 
 
-@dataclass(frozen=True, slots=True)
-class Device:
-    """One live publisher, as the Hub describes it."""
-
-    id: str
-    name: str
-    kind: str
-    session_id: str
-    track_names: tuple[str, ...]
-
-    @property
-    def room(self) -> str:
-        """
-        The slug a goal's skills are scoped to.
-
-        Derived from the name rather than the id so that re-joining with the
-        same device name lands in the same room and keeps its calibration,
-        which is what someone reconnecting a phone actually expects.
-        """
-        slug = "".join(c if c.isalnum() else "-" for c in self.name.lower())
-        return "-".join(p for p in slug.split("-") if p) or self.id[:8]
 
 
 class SfuSubscription:
@@ -282,8 +261,22 @@ class SfuSource:
         camera or a screen.
         """
         seen: dict[str, int] = {}
+        # A deadline, not a delay. Sleeping for the full interval and only
+        # then handing over a frame makes the period the interval PLUS
+        # however long scoring took, so a requested 8 Hz with 90ms of work
+        # per frame actually ran at 4.6 - and at 4.6 Hz the bottom of a fast
+        # squat is one frame, which no dwell can be short enough to catch.
+        due = time.monotonic()
         while not self._closed:
-            await asyncio.sleep(1.0 / self._hz)
+            due += 1.0 / self._hz
+            slack = due - time.monotonic()
+            if slack > 0:
+                await asyncio.sleep(slack)
+            else:
+                # Behind the clock. Carrying the debt forward would spend the
+                # next several periods sprinting to catch up a second that is
+                # already gone, so the deadline moves to now instead.
+                due = time.monotonic()
             for sub in list(self._subs.values()):
                 frame = sub.latest
                 if frame is None or seen.get(sub.device.id) == frame.seq:
@@ -306,4 +299,5 @@ def _device(d: dict[str, Any]) -> Device:
         kind=str(d.get("kind", "camera")),
         session_id=str(d.get("sfuSessionId", "")),
         track_names=tuple(str(t) for t in d.get("trackNames", [])),
+        given_room=str(d.get("room") or ""),
     )

@@ -1,0 +1,22 @@
+{
+  "name": "pact-launch-video",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render Pact out/pact.mp4 --concurrency=4",
+    "preview": "remotion render Pact out/preview.mp4 --scale=0.5 --concurrency=4",
+    "still": "remotion still Pact"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.410",
+    "@remotion/google-fonts": "4.0.410",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.410"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "typescript": "5.9.2"
+  }
+}

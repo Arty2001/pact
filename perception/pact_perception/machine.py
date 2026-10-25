@@ -68,6 +68,16 @@ class Params:
     exit_s: float = 2.0
     cooldown_s: float = 10.0
     escalate_after_s: float = 60.0
+    #: Shortest believable gap between two counts, measured count-to-count.
+    #:
+    #: A counter counts entries into a pose, and a pose detector fires
+    #: honestly every time you are in that pose - sitting down, bending to
+    #: tie a shoe, pausing halfway through a set. Cooldown cannot express
+    #: this, because it is measured from the moment a session ends rather
+    #: than from the previous count, so a detector that flickers back and
+    #: forth satisfies it trivially. A squat takes well over a second
+    #: bottom-to-bottom; anything faster is not a rep that happened.
+    min_cycle_s: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +94,8 @@ class State:
     active_since: float | None = None
     #: Entries into ACTIVE. Monotonic; a counter reads deltas of this.
     count: int = 0
+    #: When the last entry was credited, for the minimum cycle.
+    last_entered: float | None = None
     #: Whether this candidacy already escalated, so it only asks once.
     escalated: bool = False
 
@@ -126,7 +138,19 @@ def step(state: State, score: float, now: float, p: Params) -> tuple[State, Even
 
     if state.phase == "idle":
         if score >= p.enter_conf:
-            return State(phase="candidate", since=now, peak=score, count=state.count), None
+            # last_entered has to survive this hop. Building a fresh State
+            # here dropped it, so the refractory window was forgotten the
+            # instant the score rose again and the guard did nothing.
+            return (
+                State(
+                    phase="candidate",
+                    since=now,
+                    peak=score,
+                    count=state.count,
+                    last_entered=state.last_entered,
+                ),
+                None,
+            )
         # Peak is meaningless while idle, and leaving it set would inflate the
         # next rejection's report with a score from a previous attempt.
         return replace(state, peak=0.0), None
@@ -154,7 +178,7 @@ def step(state: State, score: float, now: float, p: Params) -> tuple[State, Even
                 else "dropped below exit before dwell"
             )
             return (
-                State(phase="idle", since=now, count=state.count),
+                State(phase="idle", since=now, count=state.count, last_entered=state.last_entered),
                 Event(
                     kind="rejected",
                     at=now,
@@ -170,7 +194,8 @@ def step(state: State, score: float, now: float, p: Params) -> tuple[State, Even
                     count=state.count,
                 ),
             )
-        if held >= p.dwell_s and score >= p.enter_conf:
+        too_soon = state.last_entered is not None and now - state.last_entered < p.min_cycle_s
+        if held >= p.dwell_s and score >= p.enter_conf and not too_soon:
             return (
                 State(
                     phase="active",
@@ -178,6 +203,7 @@ def step(state: State, score: float, now: float, p: Params) -> tuple[State, Even
                     peak=peak,
                     active_since=now,
                     count=state.count + 1,
+                    last_entered=now,
                 ),
                 Event(
                     kind="entered",
@@ -229,11 +255,17 @@ def step(state: State, score: float, now: float, p: Params) -> tuple[State, Even
             # A counter sets cooldown_s=0 and must be able to count the next
             # rep immediately, so skip a cooldown that would expire instantly.
             nxt: Phase = "cooldown" if p.cooldown_s > 0 else "idle"
-            return State(phase=nxt, since=now, count=state.count), event
+            return (
+                State(phase=nxt, since=now, count=state.count, last_entered=state.last_entered),
+                event,
+            )
 
         return replace(state, peak=peak, below_since=below), None
 
     # cooldown: suppress re-entry so one session cannot be credited twice.
     if now - state.since >= p.cooldown_s:
-        return State(phase="idle", since=now, count=state.count), None
+        return (
+            State(phase="idle", since=now, count=state.count, last_entered=state.last_entered),
+            None,
+        )
     return state, None
