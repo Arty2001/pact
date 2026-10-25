@@ -198,10 +198,14 @@ function announceGoals() {
 
 // ------------------------------------------------------------------ state --
 
+/** Set once a read has actually succeeded, so [] can be trusted as empty. */
+let loaded = false;
+
 async function load() {
   const res = await fetch("/api/engine/state");
   if (!res.ok) return;
   state = await res.json();
+  loaded = true;
   renderAll();
 }
 
@@ -225,12 +229,13 @@ function renderAll() {
  * saying stop.
  */
 function pruneTraces() {
-  // An empty skill list is what a failed read looks like as well as what an
-  // emptied registry looks like, and wiping every curve on the strength of
-  // it is how the chart kept erasing itself mid-session.
-  const skills = state.skills ?? [];
-  if (skills.length === 0) return;
-  const live = new Set(skills.map((s) => s.key));
+  // Only once a read has succeeded. An empty list before the first one is
+  // the module's own initial value and means nothing; after one it means
+  // the registry is empty, and refusing to act on that is what left deleted
+  // skills drawing curves of their own. A failed read never reaches here -
+  // load() returns before it assigns - so there is no third case.
+  if (!loaded) return;
+  const live = new Set((state.skills ?? []).map((s) => s.key));
   for (const key of [...traces.keys()]) if (!live.has(key)) traces.delete(key);
   if (focusSkill !== null && !live.has(focusSkill)) focusSkill = null;
   drawPlot();
@@ -802,6 +807,9 @@ function quietBecause() {
 
 
 function pushScore(skillKey, score, phase) {
+  // Refuse to start a series for something the registry no longer lists,
+  // or a deletion grows a fresh curve from the next frame in flight.
+  if (loaded && !(state.skills ?? []).some((s) => s.key === skillKey)) return;
   const s = seriesFor(skillKey);
   s.push({ score, phase });
   if (s.length > TRACE) s.shift();
@@ -859,7 +867,13 @@ let legendShape = "";
 function renderLegend(scores) {
   const host = $("legend");
   if (host === null) return;
-  const keys = Object.keys(scores).sort();
+  // A deleted skill can still arrive in one last scores message, because
+  // perception is told by a registry push that races the frame it is
+  // already scoring. The registry is the authority on what exists.
+  const live = loaded ? new Set((state.skills ?? []).map((s) => s.key)) : null;
+  const keys = Object.keys(scores)
+    .filter((k) => live === null || live.has(k))
+    .sort();
 
   const shape = keys.join(",");
   if (shape !== legendShape) {
