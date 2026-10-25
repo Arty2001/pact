@@ -458,6 +458,7 @@ function loudest() {
  */
 function renderLegend(scores) {
   const host = $("legend");
+  if (host === null) return;
   const keys = Object.keys(scores).sort();
 
   host.replaceChildren(
@@ -500,6 +501,7 @@ function renderLegend(scores) {
  */
 function renderCams() {
   const host = $("cams");
+  if (host === null) return;
   host.replaceChildren();
   host.hidden = devices.length === 0;
   if (devices.length === 0) return;
@@ -601,8 +603,8 @@ function engineSocket() {
       if (activeRoom !== null && msg.room !== activeRoom) return;
       $("r-rate").textContent = msg.hz ? `${msg.hz} Hz` : "—";
       for (const [key, s] of Object.entries(msg.scores ?? {})) pushScore(key, s.score, s.phase);
-      renderLegend(msg.scores ?? {});
       drawPlot();
+      renderLegend(msg.scores ?? {});
       renderNotices();
     } else if (msg.type === "events") {
       renderEvents(msg.events ?? []);

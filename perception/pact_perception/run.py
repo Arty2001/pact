@@ -414,7 +414,7 @@ class Runner:
         try:
             if skill.kind == "discriminator":
                 dist = discriminate(skill, e, self.embedder.encoder_id)
-                value = dist.p1
+                value = dist.detection
                 # A verdict that has not changed is not news. This fired at
                 # INFO on every frame for every discriminator - 1,877 lines
                 # in one session, drowning the events worth reading, and

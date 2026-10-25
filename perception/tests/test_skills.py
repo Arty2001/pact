@@ -331,3 +331,35 @@ def test_distribution_margin_is_top_minus_runner_up():
         p2=0.31,
     )
     assert d.margin == pytest.approx(0.27)
+
+
+# --------------------------------------------------------------- detection --
+
+def _dist(top: str, p1: float, p2: float = 0.2) -> Distribution:
+    return Distribution(
+        probs=(p1, p2), names=(top, "other"), top=top, p1=p1, runner_up="other", p2=p2
+    )
+
+
+def test_a_confident_none_is_not_a_detection() -> None:
+    """
+    The softmax floor is the whole problem. A winner cannot score less than
+    1/(K+1), so `none` winning at 0.64 used to clear an enter threshold of
+    0.60 and open a session on the confident absence of everything.
+    """
+    assert _dist("none", 0.64).detection == 0.0
+
+
+def test_a_real_class_scores_its_probability() -> None:
+    assert _dist("a person squatting", 0.82).detection == 0.82
+
+
+def test_detection_is_zero_however_sure_none_is() -> None:
+    assert _dist("none", 0.995).detection == 0.0
+
+
+def test_margin_is_unchanged_by_any_of_this() -> None:
+    """Margin is the escalation trigger and means the same for every class."""
+    d = _dist("none", 0.64, 0.30)
+    assert abs(d.margin - 0.34) < 1e-9
+    assert d.detection == 0.0

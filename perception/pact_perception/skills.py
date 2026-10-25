@@ -106,6 +106,10 @@ class Skill:
         return self.kind in SCORED_KINDS
 
 
+#: The implicit class every discriminator carries: none of the above.
+NONE = "none"
+
+
 @dataclass(frozen=True, slots=True)
 class Distribution:
     """A discriminator's output. The only kind that returns more than a number."""
@@ -120,6 +124,25 @@ class Distribution:
     @property
     def margin(self) -> float:
         return self.p1 - self.p2
+
+    @property
+    def detection(self) -> float:
+        """
+        What the state machine should see, on the same scale as every other
+        skill's score.
+
+        p1 is the winning class's probability, and a softmax over K classes
+        plus `none` cannot return less than 1/(K+1) for its winner - measured
+        at 0.345 on a three-way skill, with a median of 0.691. So p1 never
+        approaches zero, sits permanently high beside a calibrated detector
+        score, and is high precisely when the discriminator is CONFIDENT,
+        including when what it is confident about is `none`. On one recording
+        that drove the machine above its enter threshold on 1,048 frames
+        whose verdict was "none of these".
+
+        Confidence that nothing is there is not a detection. Zero.
+        """
+        return 0.0 if self.top == NONE else self.p1
 
 
 class EncoderMismatch(RuntimeError):
@@ -159,7 +182,7 @@ def discriminate(skill: Skill, embedding: np.ndarray, encoder_id: str) -> Distri
     # `none` sits at zero, so a real class wins exactly when its cosine has
     # cleared the bias. No sentence to embed, and nothing to tune.
     probs = softmax(np.concatenate([logits, np.zeros(1)]))
-    names = (*skill.classes[: len(logits)], "none")
+    names = (*skill.classes[: len(logits)], NONE)
     order = np.argsort(probs)[::-1]
     return Distribution(
         probs=tuple(float(p) for p in probs),
