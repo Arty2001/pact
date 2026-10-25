@@ -912,7 +912,55 @@ function teardown() {
  */
 const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
 let listener = null;
+/** The button's state: whether the user wants it listening at all. */
 let listening = false;
+/** Whether it is listening right now, which is false while it talks. */
+let deaf = false;
+/** What it last said, and when it stopped saying it. */
+let lastSpoken = "";
+let spokeUntil = 0;
+
+/**
+ * A room microphone hears the speaker in the same room.
+ *
+ * Left running, the assistant transcribes its own reply, treats it as a new
+ * question, answers that, and hears itself again. The recogniser is stopped
+ * for as long as it is thinking or talking - there is nothing worth hearing
+ * in that window anyway, because the person is listening.
+ */
+function deafen() {
+  deaf = true;
+  try {
+    listener?.stop();
+  } catch {
+    // Already stopped; the onend handler will not restart while deaf.
+  }
+}
+
+function undeafen() {
+  deaf = false;
+  if (!listening || listener === null) return;
+  try {
+    listener.start();
+  } catch {
+    // Already running, which is the harmless half of this race.
+  }
+}
+
+/**
+ * Did we just say this?
+ *
+ * Belt and braces for the moment between the speaker finishing and the
+ * recogniser being told to listen again, where a reverberant room can still
+ * deliver the tail of our own sentence.
+ */
+function isOwnEcho(text) {
+  if (Date.now() - spokeUntil > 1500) return false;
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const said = norm(lastSpoken);
+  const got = norm(text);
+  return got.length > 0 && (said.includes(got) || got.includes(said.slice(0, 40)));
+}
 
 function setAiState(text, thinking = false) {
   $("ai-state").textContent = text;
@@ -952,9 +1000,26 @@ function speak(text) {
   const synth = globalThis.speechSynthesis;
   if (!synth || !text) return;
   synth.cancel();
+  lastSpoken = text;
+  deafen();
+
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1.04;
   u.pitch = 1;
+
+  const done = () => {
+    spokeUntil = Date.now();
+    // A short wait before listening again: a speaker does not stop dead, and
+    // the first thing a mic hears after it is the end of our own sentence
+    // coming back off the walls.
+    setTimeout(undeafen, 450);
+  };
+  u.onend = done;
+  u.onerror = done;
+  // Some browsers never fire onend. Falling back on a length estimate is
+  // worse than a real event and far better than staying deaf forever.
+  setTimeout(done, 1200 + text.length * 70);
+
   synth.speak(u);
 }
 
@@ -970,9 +1035,11 @@ async function ask(text, { aloud = true } = {}) {
     });
     const { say = "I lost that one.", ui = {} } = await res.json().catch(() => ({}));
     showExchange(text, say, ui);
-    if (aloud) speak(say);
+    if (aloud && say) speak(say);
+    else undeafen();
   } catch {
     showExchange(text, "I could not reach the engine.");
+    undeafen();
   } finally {
     setAiState(listening ? "listening" : "idle", false);
   }
@@ -988,17 +1055,29 @@ function startListening() {
   listener.onresult = (e) => {
     const last = e.results[e.results.length - 1];
     const text = last[0].transcript.trim();
+    if (deaf || isOwnEcho(text)) return;
     // Interim results stream into the "you" line, so the band reacts while
     // you are still talking rather than after you stop.
     $("ai-heard").hidden = false;
     $("ai-heard").textContent = text;
-    if (last.isFinal) void ask(text);
+    if (last.isFinal) {
+      // Deaf from the moment there is something to answer: thinking and
+      // speaking are both windows where the only voice is ours.
+      deafen();
+      void ask(text);
+    }
   };
-  listener.onerror = () => stopListening();
+  listener.onerror = (e) => {
+    // "no-speech" and "aborted" are what a quiet room and our own stop()
+    // produce. Neither is a reason to turn the microphone off.
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    stopListening();
+  };
   listener.onend = () => {
     // Chrome ends a non-continuous session on every pause. Restart while the
-    // button is still pressed, or one sentence is all you ever get.
-    if (listening) {
+    // button is still pressed, or one sentence is all you ever get - but not
+    // while we are talking, which is the whole point.
+    if (listening && !deaf) {
       try {
         listener.start();
       } catch {
@@ -1019,6 +1098,7 @@ function startListening() {
 
 function stopListening() {
   listening = false;
+  deaf = false;
   $("mic").setAttribute("aria-pressed", "false");
   setAiState("idle");
   try {

@@ -266,14 +266,64 @@ checkConfig().then((ok) => ok && checkClaim());
 
 const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
 let heard = null;
+/** Whether the button is on. */
 let open = false;
+/** Whether it is actually listening, which is false while it talks. */
+let deaf = false;
+let lastSpoken = "";
+let spokeUntil = 0;
+
+/*
+ * This device has the microphone and the speaker in the same room, so left
+ * running it transcribes its own reply, answers that, and hears itself
+ * again. It goes deaf while thinking and talking, which costs nothing - the
+ * person is listening in that window, not talking.
+ */
+function deafen() {
+  deaf = true;
+  try {
+    heard?.stop();
+  } catch {
+    // Already stopped.
+  }
+}
+
+function undeafen() {
+  deaf = false;
+  if (!open || heard === null) return;
+  try {
+    heard.start();
+  } catch {
+    // Already running.
+  }
+}
+
+function isOwnEcho(text) {
+  if (Date.now() - spokeUntil > 1500) return false;
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  const said = norm(lastSpoken);
+  const got = norm(text);
+  return got.length > 0 && (said.includes(got) || got.includes(said.slice(0, 40)));
+}
 
 function speak(text) {
   const synth = globalThis.speechSynthesis;
   if (!synth || !text) return;
   synth.cancel();
+  lastSpoken = text;
+  deafen();
+
   const u = new SpeechSynthesisUtterance(text);
   u.rate = 1.04;
+  const done = () => {
+    spokeUntil = Date.now();
+    // A speaker does not stop dead, and the first thing the mic hears after
+    // it is our own sentence coming back off the walls.
+    setTimeout(undeafen, 450);
+  };
+  u.onend = done;
+  u.onerror = done;
+  setTimeout(done, 1200 + text.length * 70);
   synth.speak(u);
 }
 
@@ -295,11 +345,15 @@ async function askPact(text) {
     });
     const { say: reply = "I lost that one." } = await res.json().catch(() => ({}));
     showSaid(reply);
+    // speak() takes over the deafening from here; without a reply nothing
+    // would ever switch the microphone back on.
+    if (!reply) undeafen();
     // Spoken here, by the device in the room. The console shows the same
     // exchange but stays quiet, or every answer arrives twice.
     speak(reply);
   } catch {
     showSaid("Could not reach the engine.", true);
+    undeafen();
   }
 }
 
@@ -313,14 +367,24 @@ function listen() {
   heard.onresult = (e) => {
     const last = e.results[e.results.length - 1];
     const text = last[0].transcript.trim();
+    if (deaf || isOwnEcho(text)) return;
     showSaid(text, true);
-    if (last.isFinal) void askPact(text);
+    if (last.isFinal) {
+      deafen();
+      void askPact(text);
+    }
   };
-  heard.onerror = () => hush();
+  heard.onerror = (e) => {
+    // A quiet room gives "no-speech" and our own stop() gives "aborted".
+    // Neither is a reason to switch the microphone off.
+    if (e.error === "no-speech" || e.error === "aborted") return;
+    hush();
+  };
   heard.onend = () => {
     // Chrome ends the session on every pause, so it has to be restarted
-    // while the button is still on or you get exactly one sentence.
-    if (open) {
+    // while the button is still on or you get exactly one sentence - but
+    // never while we are the one talking.
+    if (open && !deaf) {
       try {
         heard.start();
       } catch {
@@ -341,6 +405,7 @@ function listen() {
 
 function hush() {
   open = false;
+  deaf = false;
   el("listen").setAttribute("aria-pressed", "false");
   el("listen-label").textContent = "Talk to Pact";
   try {
