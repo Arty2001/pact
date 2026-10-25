@@ -5,12 +5,12 @@
 # people merging to main, the thing standing between a typo and production
 # should be a machine rather than whoever pushed last.
 #
-# Deploying is deliberately manual. Releases currently go out with a local
-# `npm run deploy`, so an automatic deploy job would fail on every merge for
-# want of credentials - and a workflow that is always red is a workflow both
-# of us learn to scroll past. Run it from the Actions tab instead, or make it
-# automatic later by adding the two secrets below and putting `push` back on
-# the deploy job's `if`.
+# Deploying is automatic on main, and skips itself when it cannot work. A
+# merge deploys; a repo without credentials reports the deploy as skipped
+# rather than failed, because a workflow that is always red is a workflow
+# everyone learns to scroll past. Add CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID as repository secrets and the next merge ships
+# itself - nothing else to change.
 #
 # What this does NOT do is touch the Worker's runtime secrets. REALTIME_APP_ID,
 # REALTIME_APP_SECRET and NEBIUS_API_KEY are set once with `wrangler secret put`
@@ -36,6 +36,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Secrets cannot be read in a job-level `if`, so whether we are able to
+  # deploy is decided in a step and carried out as an output.
+  credentials:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.probe.outputs.ready }}
+    steps:
+      - id: probe
+        run: |
+          if [ -n "${{ secrets.CLOUDFLARE_API_TOKEN }}" ] && [ -n "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Cloudflare credentials set, so this merge will not deploy. Add CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to deploy on every merge to main."
+          fi
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -58,10 +74,13 @@ jobs:
         run: npm test
 
   deploy:
-    needs: check
-    # Manual only, for now. Needs CLOUDFLARE_API_TOKEN and
-    # CLOUDFLARE_ACCOUNT_ID as repository secrets before it will succeed.
-    if: github.event_name == 'workflow_dispatch'
+    needs: [check, credentials]
+    # Every merge to main, and on demand - but only once the credentials
+    # exist. `check` is in `needs`, so a red build cannot reach production.
+    if: >-
+      needs.credentials.outputs.ready == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     # Named so the deploy shows up in the repo's Environments tab with a link
     # to the live URL, and so branch protection can require it later.

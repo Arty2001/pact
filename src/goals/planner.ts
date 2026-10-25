@@ -86,7 +86,13 @@ Numbers. If the sentence contains one, it belongs in done_min, and on a counter 
 
 Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer an existing one even if its label is not a perfect match for your phrasing. Never reuse a skill whose surface is wrong for this goal.
 
-Always include exactly one gate, and give every non-gate skill a depends_on pointing at it. Call create_goal exactly once, last.`;
+Always include exactly one gate, and give every non-gate skill a depends_on pointing at it.
+
+THE GATE MUST MATCH THE SURFACE. A screen goal is gated by a screen skill - something visible in the shared window, like "a video player filling most of the screen". Never gate a screen goal on a person: a camera skill cannot see a screen share, and reusing one here is the single commonest way a goal is drafted that can never fire. "person_visible" is a camera gate. If the catalogue has no screen gate that fits, create one; a new gate is cheaper than a goal that never advances.
+
+The same holds in reverse. A camera goal is not gated by anything that lives in a browser window.
+
+Call create_goal exactly once, last.`;
 
 const TOOLS: Tool[] = [
   {
@@ -115,7 +121,9 @@ const TOOLS: Tool[] = [
             enum: ["camera", "screen"],
             description:
               "What this watches. 'screen' for a shared screen, 'camera' for a room camera. " +
-              "A skill is only ever scored against frames from its own surface.",
+              "A skill is only ever scored against frames from its own surface. Required: " +
+              "a skill with no surface is scored against BOTH, which is how a person " +
+              "detector ends up grading a screen recording.",
           },
           depends_on: {
             type: "string",
@@ -127,7 +135,7 @@ const TOOLS: Tool[] = [
             description: "Discriminator only: the mutually exclusive options.",
           },
         },
-        required: ["key", "kind", "label"],
+        required: ["key", "kind", "label", "surface"],
       },
     },
   },
@@ -236,8 +244,14 @@ export async function plan(
   const listing =
     catalogue.length === 0
       ? "(empty - this is the first goal, so new skills are expected)"
+      // key, kind, SURFACE, label. The surface is in here because without it
+      // the model reuses a camera gate on a screen goal and has no way to
+      // know it has done anything wrong.
       : catalogue
-          .map((s) => `  ${s.key}  ${s.kind}  "${s.label}"${s.room ? `  [${s.room}]` : ""}`)
+          .map(
+            (s) =>
+              `  ${s.key}  ${s.kind}  ${s.surface}  "${s.label}"${s.room ? `  [${s.room}]` : ""}`,
+          )
           .join("\n");
 
   const nebius = new Nebius(apiKey);
