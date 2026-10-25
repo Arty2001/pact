@@ -40,6 +40,11 @@
     <div id="notices"></div>
 
     <section class="card">
+      <!-- Every camera on the wall. Each runs the whole skill set on its own
+           frames, with its own motion gate and its own calibration, so this
+           is a choice of what to watch rather than of what is running. -->
+      <div class="cams" id="cams"></div>
+
       <div class="stage" id="stage">
         <video id="feed" autoplay muted playsinline></video>
         <div class="stage-empty" id="stage-empty">
@@ -56,12 +61,14 @@
               <div class="what" id="tally-what">—</div>
             </div>
           </div>
-          <div class="hud-bottom" id="probes"></div>
         </div>
       </div>
 
-      <!-- Signal: the score curve with both thresholds drawn, so a rep and a
-           near-miss are distinguishable without reading anything. -->
+      <!-- Signal: every skill scoring this camera, on one pair of axes.
+           The legend is the filter - a skill's colour on the chip is its
+           colour on the curve, and clicking one narrows the chart to it and
+           draws its thresholds, because an enter/exit band belongs to a
+           single skill and six of them stacked is noise. -->
       <div class="signal">
         <div class="readout">
           <div><b id="r-score">—</b>score now</div>
@@ -69,8 +76,9 @@
           <div><b class="lit" id="r-count">0</b>counted today</div>
           <div><b id="r-rate">—</b>sampling</div>
         </div>
-        <svg id="plot" viewBox="0 0 600 150" width="100%" height="140" preserveAspectRatio="none"
-             role="img" aria-label="Detection score over time against the enter and exit thresholds"></svg>
+        <div class="legend" id="legend"></div>
+        <svg id="plot" viewBox="0 0 600 150" width="100%" height="150" preserveAspectRatio="none"
+             role="img" aria-label="Detection scores over time against the enter and exit thresholds"></svg>
       </div>
     </section>
 

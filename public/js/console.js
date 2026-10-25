@@ -27,9 +27,36 @@ const TRACE = 200;
 let state = { skills: [], goals: [], questions: [], perception: [], rooms: [] };
 let devices = [];
 let current = null; // { device, pc }
-const trace = []; // [{ t, score, phase }]
+
+/** skillKey -> [{ score, phase }], one series per skill scoring this camera. */
+const traces = new Map();
+/** null shows every series; a key narrows the chart to it and draws its band. */
 let focusSkill = null;
+/** Which camera's scores the chart is showing. Every camera reports its own. */
+let activeRoom = null;
 let lastFrameAt = 0;
+let lastScoreAt = 0;
+
+/**
+ * A stable colour per skill.
+ *
+ * Hashed from the key rather than assigned by position, so a skill keeps its
+ * colour when another is added and the chart does not reshuffle under you.
+ * This is the one place hue does not carry state - a series needs identity,
+ * and state stays on the chip's text and border where it always was.
+ */
+const SERIES = 8;
+function hueOf(key) {
+  let h = 0;
+  for (let i = 0; i < key.length; i += 1) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return "var(--s" + (h % SERIES) + ")";
+}
+
+function seriesFor(skillKey) {
+  let s = traces.get(skillKey);
+  if (s === undefined) traces.set(skillKey, (s = []));
+  return s;
+}
 
 // ------------------------------------------------------------------ clock --
 
@@ -86,15 +113,20 @@ function renderNotices() {
   const box = $("notices");
   box.replaceChildren();
 
-  if ((state.perception ?? []).length === 0) {
-    box.append(
-      notice(
-        "bad",
-        "The watcher is offline",
-        "Cameras can still publish, but nothing is scoring their frames, so no goal can advance.",
-      ),
-    );
-  }
+  // Liveness comes from scores arriving, not from the last snapshot. The
+  // watcher's socket drops and reconnects in under two seconds on any
+  // deploy, and a banner driven by a snapshot latches on that blip and then
+  // sits there calling a working watcher offline.
+  const scoring = Date.now() - lastScoreAt < 15000;
+  if (scoring || (state.perception ?? []).length > 0) return;
+
+  box.append(
+    notice(
+      "bad",
+      "The watcher is offline",
+      "Cameras can still publish, but nothing is scoring their frames, so no goal can advance.",
+    ),
+  );
 }
 
 function notice(kind, title, body) {
@@ -174,7 +206,7 @@ function renderGoals() {
           return s && (s.kind === "counter" || s.kind === "action");
         });
         focusSkill = counter?.skillKey ?? null;
-        trace.length = 0;
+        drawPlot();
         renderTally();
       });
 
@@ -330,32 +362,51 @@ function drawPlot() {
   const svg = $("plot");
   const W = 600;
   const H = 150;
-  const skill = state.skills.find((s) => s.key === focusSkill) ?? null;
-  const enter = skill?.enterConf ?? 0.75;
-  const exit = skill?.exitConf ?? 0.45;
-
   const y = (v) => H - 12 - v * (H - 26);
   const parts = [];
 
-  parts.push(
-    `<rect class="plot-band" x="42" y="${y(enter)}" width="${W - 50}" height="${Math.max(0, y(exit) - y(enter))}"/>`,
-    line(42, y(enter), W - 8, y(enter), "plot-enter"),
-    line(42, y(exit), W - 8, y(exit), "plot-exit"),
-    label(0, y(enter) + 3, num(enter), "plot-lbl enter"),
-    label(0, y(exit) + 3, num(exit), "plot-lbl"),
+  // An enter/exit band belongs to one skill. Six of them stacked would be
+  // six overlapping rectangles and no readable threshold, so the band
+  // appears only once the chart has been narrowed to a single series.
+  const focus = focusSkill ? state.skills.find((s) => s.key === focusSkill) : null;
+  if (focus) {
+    const enter = focus.enterConf ?? 0.75;
+    const exit = focus.exitConf ?? 0.45;
+    parts.push(
+      '<rect class="plot-band" x="42" y="' + y(enter) + '" width="' + (W - 50) +
+        '" height="' + Math.max(0, y(exit) - y(enter)) + '"/>',
+      line(42, y(enter), W - 8, y(enter), "plot-enter"),
+      line(42, y(exit), W - 8, y(exit), "plot-exit"),
+      label(0, y(enter) + 3, num(enter), "plot-lbl enter"),
+      label(0, y(exit) + 3, num(exit), "plot-lbl"),
+    );
+  }
+
+  const shown = [...traces.entries()].filter(
+    ([key, pts]) => pts.length > 1 && (focusSkill === null || key === focusSkill),
   );
 
-  if (trace.length > 1) {
-    const step = (W - 50) / Math.max(TRACE - 1, 1);
-    const pts = trace.map((p, i) => `${42 + i * step},${y(p.score)}`);
-    parts.push(`<polyline class="plot-curve" points="${pts.join(" ")}"/>`);
-    const last = trace[trace.length - 1];
+  if (shown.length === 0) {
     parts.push(
-      `<circle class="plot-head" cx="${42 + (trace.length - 1) * step}" cy="${y(last.score)}" r="3.5"/>`,
+      '<text class="plot-wait" x="' + W / 2 + '" y="' + H / 2 +
+        '" text-anchor="middle">waiting for a watcher to report scores</text>',
     );
-  } else {
+    svg.innerHTML = parts.join("");
+    return;
+  }
+
+  const step = (W - 50) / Math.max(TRACE - 1, 1);
+  for (const [key, pts] of shown) {
+    const stroke = hueOf(key);
+    const d = pts.map((pt, i) => 42 + i * step + "," + y(pt.score)).join(" ");
     parts.push(
-      `<text class="plot-wait" x="${W / 2}" y="${H / 2}" text-anchor="middle">waiting for a watcher to report scores</text>`,
+      '<polyline class="plot-curve' + (focusSkill === key ? " lead" : "") +
+        '" points="' + d + '" style="stroke:' + stroke + '"/>',
+    );
+    const last = pts[pts.length - 1];
+    parts.push(
+      '<circle class="plot-head" cx="' + (42 + (pts.length - 1) * step) +
+        '" cy="' + y(last.score) + '" r="3" style="fill:' + stroke + '"/>',
     );
   }
 
@@ -367,48 +418,109 @@ const line = (x1, y1, x2, y2, cls) =>
 const label = (x, yy, t, cls) => `<text class="${cls}" x="${x}" y="${yy}">${t}</text>`;
 
 function pushScore(skillKey, score, phase) {
-  if (focusSkill === null) focusSkill = skillKey;
-  if (skillKey !== focusSkill) return;
-  trace.push({ score, phase });
-  if (trace.length > TRACE) trace.shift();
+  const s = seriesFor(skillKey);
+  s.push({ score, phase });
+  if (s.length > TRACE) s.shift();
 
+  // The readout follows the focused series, or the loudest one when the
+  // chart is showing everything - a readout averaging six skills is a
+  // number describing nothing.
+  const lead = focusSkill ?? loudest();
+  if (skillKey !== lead) return;
+  const pts = traces.get(lead) ?? [];
   $("r-score").textContent = num(score);
-  $("r-peak").textContent = num(Math.max(...trace.map((p) => p.score)));
+  $("r-peak").textContent = num(Math.max(...pts.map((pt) => pt.score)));
+}
 
-  // The probe reads the live phase, so the moment between "crossed" and
-  // "counted" is visible instead of being an invisible internal state.
-  drawPlot();
+/** The series currently reading highest, so the readout tracks the action. */
+function loudest() {
+  let best = null;
+  let top = -1;
+  for (const [key, pts] of traces) {
+    const v = pts.length ? pts[pts.length - 1].score : -1;
+    if (v > top) {
+      top = v;
+      best = key;
+    }
+  }
+  return best;
 }
 
 // ----------------------------------------------------------------- probes --
 
-function renderProbes(scores) {
-  const host = $("probes");
-  const rows = Object.entries(scores).slice(0, 4);
+/**
+ * The legend, which is also the filter.
+ *
+ * These used to float over the camera, where four of them covered the lower
+ * third of the frame and the thing being measured sat behind the
+ * measurements. Down here each carries its series colour, so reading the
+ * chart needs no key, and clicking narrows the chart to that one skill.
+ */
+function renderLegend(scores) {
+  const host = $("legend");
+  const keys = Object.keys(scores).sort();
+
   host.replaceChildren(
-    ...rows.map(([key, s]) => {
-      const el = document.createElement("div");
-      const cls = s.phase === "candidate" ? "is-pending" : s.phase === "idle" ? "is-idle" : "";
-      el.className = `probe ${cls}`;
-      el.innerHTML = `
-        <span class="k">${esc(key)}</span>
-        <span class="bar-mini"><i style="width:${Math.round(s.score * 100)}%"></i></span>
-        <span class="v">${num(s.score)}</span>`;
+    ...keys.map((key) => {
+      const s = scores[key];
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "sig is-" + (s.phase ?? "idle") + (focusSkill === key ? " on" : "");
+      el.title = state.skills.find((x) => x.key === key)?.label ?? key;
+      el.setAttribute("aria-pressed", String(focusSkill === key));
+      el.innerHTML =
+        '<i style="background:' + hueOf(key) + '"></i>' +
+        '<span class="k">' + esc(key) + "</span>" +
+        '<span class="v">' + num(s.score) + "</span>";
+      // Clicking the focused one clears the filter, so there is always a way
+      // back to the whole picture without hunting for a reset control.
       el.addEventListener("click", () => {
-        focusSkill = key;
-        trace.length = 0;
+        focusSkill = focusSkill === key ? null : key;
+        renderLegend(scores);
+        drawPlot();
       });
-      host.append(el);
       return el;
     }),
   );
 
-  const hit = rows.find(([, s]) => s.phase === "active");
+  const hit = keys.some((k) => scores[k].phase === "active");
   const box = document.querySelector(".bbox");
-  if (box) box.classList.toggle("hit", Boolean(hit));
+  if (box) box.classList.toggle("hit", hit);
 }
 
 // ------------------------------------------------------------------ video --
+
+/**
+ * One pill per camera on the wall, plus a way to add another.
+ *
+ * Every camera runs the whole skill set against its own frames, with its own
+ * motion gate and its own calibration fitted from its own background - so
+ * this strip chooses what to look at, not what is running. Hidden entirely
+ * when there is nothing to choose between.
+ */
+function renderCams() {
+  const host = $("cams");
+  host.replaceChildren();
+  host.hidden = devices.length === 0;
+  if (devices.length === 0) return;
+
+  for (const d of devices) {
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = "cam" + (current?.device?.id === d.id ? " on" : "");
+    el.setAttribute("aria-pressed", String(current?.device?.id === d.id));
+    el.innerHTML = '<i></i><span>' + esc(d.name) + "</span>";
+    el.addEventListener("click", () => void showCamera(d));
+    host.append(el);
+  }
+
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "cam add";
+  add.textContent = "+ Add";
+  add.addEventListener("click", () => $("add-camera").click());
+  host.append(add);
+}
 
 async function showCamera(device) {
   if (current?.device?.id === device.id) return;
@@ -416,15 +528,23 @@ async function showCamera(device) {
   try {
     const { pc, stream } = await subscribe(device);
     current = { device, pc };
+    // Scores are per camera, so switching has to drop the old camera's
+    // series rather than draw two rooms onto one pair of axes.
+    activeRoom = device.room ?? null;
+    traces.clear();
+    focusSkill = null;
     $("feed").srcObject = stream;
     $("stage-empty").hidden = true;
     $("hud").hidden = false;
     $("cam-name").textContent = device.name;
     $("cam-meta").textContent = `${device.kind} · ${device.trackNames.length} track`;
+    renderCams();
+    drawPlot();
   } catch {
     // A feed that will not connect should not blank the page; the goal data
     // beside it is still true.
     $("stage-empty").hidden = false;
+    renderCams();
   }
 }
 
@@ -452,8 +572,11 @@ function hubSocket() {
       teardown();
       $("stage-empty").hidden = false;
       $("hud").hidden = true;
+      renderCams();
     } else if (!current || !devices.some((d) => d.id === current.device.id)) {
       void showCamera(devices[0]);
+    } else {
+      renderCams();
     }
   };
   ws.onclose = () => setTimeout(hubSocket, 2500);
@@ -470,11 +593,17 @@ function engineSocket() {
       if (msg.events) renderEvents(msg.events);
     } else if (msg.type === "scores") {
       lastFrameAt = Date.now();
+      lastScoreAt = Date.now();
       scoresSeen += Object.keys(msg.scores ?? {}).length;
       renderMeta();
+      // Every camera reports its own scores on this one socket, so a frame
+      // from the camera you are not watching must not move this chart.
+      if (activeRoom !== null && msg.room !== activeRoom) return;
       $("r-rate").textContent = msg.hz ? `${msg.hz} Hz` : "—";
-      renderProbes(msg.scores ?? {});
       for (const [key, s] of Object.entries(msg.scores ?? {})) pushScore(key, s.score, s.phase);
+      renderLegend(msg.scores ?? {});
+      drawPlot();
+      renderNotices();
     } else if (msg.type === "events") {
       renderEvents(msg.events ?? []);
     }

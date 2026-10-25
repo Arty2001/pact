@@ -96,6 +96,22 @@
   --mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --display: "Hanken Grotesk", "Inter", ui-sans-serif, sans-serif;
 
+  /* Series identity for the chart, and the only place hue does not carry
+     state. A multi-series chart needs each line to be findable, which is a
+     different job from "proved / watching / pending" - so state stays on the
+     chip's text and border, and these touch nothing but the curve and its
+     dot. Eight is enough that a hash rarely collides and few enough that
+     every one stays distinguishable on this ground. The first two are the
+     brand's own hues, darkened to stay legible on light. */
+  --s0: #5E9400;
+  --s1: #5A46F0;
+  --s2: #0E8E8E;
+  --s3: #C96A00;
+  --s4: #C42C64;
+  --s5: #2563C9;
+  --s6: #7A3FBF;
+  --s7: #4A6572;
+
   --blur: saturate(165%) blur(20px);
 
   --r:  8px;
@@ -245,6 +261,37 @@ a { color: var(--proved-text); }
 }
 .card > header .note { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
 
+/* ------------------------------------------------------------ the cameras */
+
+/* One pill per camera. Hidden when there is nothing to choose between, so a
+   single-camera wall carries no chrome it does not need. */
+.cams {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 10px 10px 0;
+}
+.cam {
+  display: flex; align-items: center; gap: 7px;
+  font: inherit; font-size: 11.5px; font-weight: 500;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--glass-hi);
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cam i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--dimmer); flex: none;
+}
+.cam:hover { background: #fff; }
+.cam.on { border-color: var(--proved-edge); background: var(--proved-wash); color: var(--proved-text); }
+.cam.on i { background: var(--proved); box-shadow: 0 0 0 3px var(--proved-wash); }
+.cam.add { color: var(--dimmer); border-style: dashed; }
+.cam.add:hover { color: var(--fg); border-style: solid; }
+
 /* ------------------------------------------------------------ the stage */
 
 .stage {
@@ -254,7 +301,7 @@ a { color: var(--proved-text); }
   overflow: hidden;
   /* Inset by a hair so the glass edge stays visible around the frame -
      a dark rectangle flush to the border reads as a hole in the pane. */
-  margin: 5px 5px 0;
+  margin: 10px;
   border-radius: calc(var(--r3) - 6px);
 }
 .stage video { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -313,26 +360,6 @@ a { color: var(--proved-text); }
 .tally .sub { font-family: var(--mono); font-size: 11px; color: var(--on-dark-dim); }
 .tally .what { font-size: 13px; color: var(--on-dark); margin-top: 3px; font-weight: 500; }
 
-.hud-bottom { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
-
-/* Dark glass, because these sit on the frame rather than on the page. */
-.probe {
-  display: flex; align-items: center; gap: 9px;
-  background: rgba(7, 11, 16, .6);
-  backdrop-filter: saturate(140%) blur(14px);
-  -webkit-backdrop-filter: saturate(140%) blur(14px);
-  border: 1px solid rgba(255, 255, 255, .14);
-  border-radius: var(--r);
-  padding: 7px 11px;
-  pointer-events: auto;
-}
-.probe .k { font-family: var(--mono); font-size: 10.5px; color: var(--on-dark); }
-.probe .v { font-family: var(--mono); font-size: 10.5px; color: var(--on-dark-dim); font-variant-numeric: tabular-nums; }
-.bar-mini { width: 60px; height: 3px; background: rgba(255,255,255,.18); border-radius: 2px; overflow: hidden; flex: none; }
-.bar-mini i { display: block; height: 100%; background: var(--proved-on-dark); transition: width .18s ease-out; }
-.probe.is-pending .bar-mini i { background: var(--pending); }
-.probe.is-idle .bar-mini i { background: var(--on-dark-dim); }
-
 /* --------------------------------------------------------------- signal */
 
 .signal { padding: 14px 16px 16px; }
@@ -344,6 +371,30 @@ a { color: var(--proved-text); }
 }
 .readout .lit { color: var(--proved-text); }
 
+/* The legend is the filter. Each entry carries its series colour, so the
+   chart needs no separate key, and pressing one narrows the chart to it. */
+.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 11px; }
+.sig {
+  display: flex; align-items: center; gap: 7px;
+  font: inherit; font-family: var(--mono); font-size: 10.5px;
+  padding: 4px 9px 4px 7px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--glass-hi);
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sig i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.sig .v { color: var(--fg); font-variant-numeric: tabular-nums; }
+.sig:hover { background: #fff; }
+/* Pressed is a filter, not a verdict, so it reads as a selection: a ring and
+   a deeper plate rather than a hue, which would collide with the phase. */
+.sig.on { border-color: var(--dimmer); background: #fff; color: var(--fg); box-shadow: var(--lift); }
+/* Phase, where it has always been: on the text and the border. */
+.sig.is-candidate { border-color: var(--pending-edge); color: var(--pending-text); }
+.sig.is-active    { border-color: var(--proved-edge);  color: var(--proved-text); }
+
 /* The score plot. These were hex literals inside the drawing code, which
    meant the chart could not follow the palette and a theme change silently
    left it unreadable. */
@@ -351,8 +402,11 @@ a { color: var(--proved-text); }
 .plot-band  { fill: var(--proved); opacity: .07; }
 .plot-enter { stroke: var(--proved); opacity: .7; }
 .plot-exit  { stroke: var(--dimmer); opacity: .55; }
-.plot-curve { fill: none; stroke: var(--proved); stroke-width: 2; stroke-linejoin: round; }
-.plot-head  { fill: var(--proved-text); }
+/* Stroke and fill arrive per series from the drawing code, because identity
+   is per skill. Everything that is NOT identity stays here. */
+.plot-curve { fill: none; stroke-width: 1.5; stroke-linejoin: round; opacity: .55; }
+.plot-curve.lead { stroke-width: 2.6; opacity: 1; }
+.plot-head  { opacity: .9; }
 .plot-lbl       { fill: var(--dim); font-family: var(--mono); font-size: 10px; }
 .plot-lbl.enter { fill: var(--proved-text); }
 .plot-wait  { fill: var(--dimmer); font-family: var(--mono); font-size: 11px; }
