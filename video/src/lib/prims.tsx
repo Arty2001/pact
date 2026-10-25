@@ -9,11 +9,10 @@
  */
 
 import React from "react";
-import { AbsoluteFill, interpolate, useCurrentFrame, spring, useVideoConfig } from "remotion";
-import { C, EASE, EASE_IN, F, R, LIFT, LIFT2, INNER, T } from "./theme";
+import { AbsoluteFill, interpolate, useCurrentFrame } from "remotion";
+import { C, EASE, F, R, LIFT, LIFT2, INNER, T } from "./theme";
 
 const ease = { easing: (t: number) => bez(EASE[0], EASE[1], EASE[2], EASE[3], t) };
-const easeIn = { easing: (t: number) => bez(EASE_IN[0], EASE_IN[1], EASE_IN[2], EASE_IN[3], t) };
 
 /** Cubic bezier solved by bisection. Exact enough at 30fps, and dependency-free. */
 function bez(x1: number, y1: number, x2: number, y2: number, t: number): number {
@@ -39,14 +38,6 @@ export const inOut = (frame: number, from: number, dur: number) =>
     ...ease,
   });
 
-/** 1 to 0 over [from, from+dur), eased in. Exits are faster than entrances. */
-export const outIn = (frame: number, from: number, dur: number) =>
-  interpolate(frame, [from, from + dur], [1, 0], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-    ...easeIn,
-  });
-
 /** Rise and fade in one call, since almost everything enters that way. */
 export const Rise: React.FC<{
   at: number;
@@ -59,23 +50,6 @@ export const Rise: React.FC<{
   const p = inOut(f, at, dur);
   return (
     <div style={{ opacity: p, transform: `translateY(${(1 - p) * y}px)`, ...style }}>
-      {children}
-    </div>
-  );
-};
-
-/** A slow push-in across a whole scene. 2 to 5 percent, never more. */
-export const Push: React.FC<{
-  dur: number;
-  amount?: number;
-  children: React.ReactNode;
-}> = ({ dur, amount = 0.03, children }) => {
-  const f = useCurrentFrame();
-  const scale = interpolate(f, [0, dur], [1, 1 + amount], {
-    extrapolateRight: "clamp",
-  });
-  return (
-    <div style={{ width: "100%", height: "100%", transform: `scale(${scale})` }}>
       {children}
     </div>
   );
@@ -312,75 +286,6 @@ export const Mono: React.FC<{
   </span>
 );
 
-/**
- * A skill row, as the console draws it. Appears in five scenes, so it is a
- * primitive rather than five near-copies that drift apart.
- */
-export const SkillRow: React.FC<{
-  label: string;
-  kind: string;
-  tone?: Tone;
-  state?: string;
-  tag?: { text: string; tone: Tone };
-  indent?: number;
-  dimmed?: boolean;
-  at: number;
-  width?: number;
-}> = ({ label, kind, tone = "none", state, tag, indent = 0, dimmed, at, width = 720 }) => {
-  const f = useCurrentFrame();
-  const p = inOut(f, at, 16);
-  const k = toneKit(tone);
-  return (
-    <div
-      style={{
-        opacity: p * (dimmed ? 0.34 : 1),
-        transform: `translateY(${(1 - p) * 16}px)`,
-        marginLeft: indent,
-        width: width - indent,
-        display: "flex",
-        alignItems: "center",
-        gap: 16,
-        padding: "16px 20px",
-        borderRadius: R.r,
-        background: tone === "none" ? C.sunk : k.wash,
-        border: `1px solid ${tone === "none" ? C.hair : k.edge}`,
-      }}
-    >
-      <span
-        style={{
-          width: 10,
-          height: 10,
-          borderRadius: 999,
-          background: tone === "none" ? C.dimmer : k.solid,
-          flexShrink: 0,
-        }}
-      />
-      <span
-        style={{
-          fontFamily: F.ui,
-          fontSize: T.label,
-          color: C.fg,
-          fontWeight: 500,
-          flex: 1,
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-        }}
-      >
-        {label}
-      </span>
-      {tag && <Chip label={tag.text} tone={tag.tone} size={17} style={{ padding: "5px 11px" }} />}
-      <Mono size={17} color={C.dimmer}>
-        {kind}
-      </Mono>
-      {state && (
-        <Mono size={17} color={k.text} style={{ fontWeight: 700 }}>
-          {state}
-        </Mono>
-      )}
-    </div>
-  );
-};
-
 /** Section eyebrow. Mono, uppercase, tracked out. Orients without explaining. */
 export const Eyebrow: React.FC<{ children: React.ReactNode; at: number }> = ({
   children,
@@ -405,17 +310,6 @@ export const Eyebrow: React.FC<{ children: React.ReactNode; at: number }> = ({
   );
 };
 
-/** A spring, for the one or two elements allowed a little personality. */
-export const useWiggle = (at: number, strength = 1) => {
-  const f = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  return spring({
-    frame: f - at,
-    fps,
-    config: { damping: 11, mass: 0.55, stiffness: 150 },
-  }) * strength;
-};
-
 /**
  * A phase of a scene, entering and leaving with direction.
  *
@@ -431,15 +325,24 @@ export const useWiggle = (at: number, strength = 1) => {
  *
  * `from`/`to` are scene frames. `to` omitted means this phase runs to the
  * end of the scene and never leaves.
+ *
+ * `scale` is how a phase fills the frame. Every block is authored at a width
+ * that reads well in source, then scaled to the 1920x1080 it is actually
+ * delivered at; without it the cut renders as small diagrams adrift in a lot
+ * of empty ground, which is what made an otherwise correct layout look
+ * unfinished. Scaling rather than restating every font size keeps one number
+ * per phase instead of forty.
  */
 export const Phase: React.FC<{
   from: number;
   to?: number;
   /** Entrance travel in px. Exits use the same distance, upward. */
   travel?: number;
+  /** How much of the frame this phase fills. */
+  scale?: number;
   children: React.ReactNode;
   style?: React.CSSProperties;
-}> = ({ from, to, travel = 30, children, style }) => {
+}> = ({ from, to, travel = 30, scale = 1, children, style }) => {
   const f = useCurrentFrame();
   const ENTER = 15;
   // Exits are faster than entrances, always.
@@ -460,7 +363,7 @@ export const Phase: React.FC<{
         alignItems: "center",
         justifyContent: "center",
         opacity,
-        transform: `translateY(${y}px)`,
+        transform: `translateY(${y}px) scale(${scale})`,
         ...style,
       }}
     >
@@ -468,6 +371,17 @@ export const Phase: React.FC<{
     </AbsoluteFill>
   );
 };
+
+/**
+ * The same uplift for content that is not inside a Phase.
+ *
+ * Scenes that never swap layouts - beat 5 and beat 6, which are each one
+ * continuous picture - have no Phase to hang a scale on, and should not grow
+ * one just to carry a number.
+ */
+export const Fit: React.FC<{ s: number; children: React.ReactNode }> = ({ s, children }) => (
+  <div style={{ transform: `scale(${s})`, transformOrigin: "50% 50%" }}>{children}</div>
+);
 
 /**
  * The slow push every scene gets.
@@ -496,70 +410,5 @@ export const ScenePush: React.FC<{
     <AbsoluteFill style={{ transform: `scale(${scale})`, transformOrigin: "50% 50%" }}>
       {children}
     </AbsoluteFill>
-  );
-};
-
-/** A rectangle in a scene's absolute stage: x, y, width, height. */
-export type Box = [number, number, number, number];
-
-/**
- * One element becoming another.
- *
- * A hard cut between two shapes makes the audience rebuild the relationship
- * from scratch; a morph hands it to them. So the container travels and
- * resizes continuously while its contents cross-fade inside it - the old
- * content clearing before the new arrives, which is what stops the midpoint
- * reading as two things stacked.
- *
- * Used where the film says one thing becomes another and means it literally:
- * a sentence becoming a vector, a frame becoming a point.
- */
-export const MorphBox: React.FC<{
-  at: number;
-  dur?: number;
-  from: Box;
-  to: Box;
-  radius?: [number, number];
-  bg?: [string, string];
-  border?: [string, string];
-  before: React.ReactNode;
-  after: React.ReactNode;
-}> = ({
-  at,
-  dur = 26,
-  from,
-  to,
-  radius = [14, 6],
-  bg = ["transparent", "transparent"],
-  border = ["transparent", "transparent"],
-  before,
-  after,
-}) => {
-  const f = useCurrentFrame();
-  const p = inOut(f, at, dur);
-  const mix = (a: number, b: number) => a + (b - a) * p;
-
-  // The old content is gone before the new starts, so the box is briefly
-  // empty rather than briefly doubled.
-  const outOld = 1 - Math.min(1, p / 0.42);
-  const inNew = Math.max(0, (p - 0.52) / 0.48);
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        left: mix(from[0], to[0]),
-        top: mix(from[1], to[1]),
-        width: mix(from[2], to[2]),
-        height: mix(from[3], to[3]),
-        borderRadius: mix(radius[0], radius[1]),
-        background: p < 0.5 ? bg[0] : bg[1],
-        border: `1px solid ${p < 0.5 ? border[0] : border[1]}`,
-        overflow: "hidden",
-      }}
-    >
-      <div style={{ position: "absolute", inset: 0, opacity: outOld }}>{before}</div>
-      <div style={{ position: "absolute", inset: 0, opacity: inNew }}>{after}</div>
-    </div>
   );
 };

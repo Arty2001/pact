@@ -68,7 +68,7 @@ export const CostStream: React.FC<{ at: number }> = ({ at }) => {
       <div style={{ display: "flex", alignItems: "flex-start", gap: 30 }}>
         {/* The camera, and what it is being asked to do. */}
         <div style={{ width: 342, flexShrink: 0 }}>
-          <FootageSlot shot={4} note="any room" at={at} w={342} h={216} radius={R.r} />
+          <FootageSlot shot={1} note="any room" at={at} w={342} h={216} radius={R.r} />
           <div style={{ marginTop: 12, display: "flex", flexWrap: "wrap", gap: 8 }}>
             <Tag at={at + 8}>8 fps</Tag>
             <Tag at={at + 12}>1920×1080</Tag>

@@ -18,15 +18,15 @@ import { AbsoluteFill, Audio, Sequence, staticFile } from "remotion";
 import { GROUND, F, C, FPS } from "./lib/theme";
 import { loadFonts } from "./lib/fonts";
 
-import { S1Bug } from "./scenes/S1Bug";
-import { S2Type } from "./scenes/S2Type";
-import { S3Plan } from "./scenes/S3Plan";
-import { S4Live } from "./scenes/S4Live";
-import { S5Tree } from "./scenes/S5Tree";
-import { S6Count } from "./scenes/S6Count";
-import { S7Ladder } from "./scenes/S7Ladder";
-import { S8Change } from "./scenes/S8Change";
-import { S9Close } from "./scenes/S9Close";
+import { S1Problem } from "./scenes/S1Problem";
+import { S2Say } from "./scenes/S2Say";
+import { S3Breaks } from "./scenes/S3Breaks";
+import { S4Fifty } from "./scenes/S4Fifty";
+import { S5Most } from "./scenes/S5Most";
+import { S6Counts } from "./scenes/S6Counts";
+import { S7Cant } from "./scenes/S7Cant";
+import { S8Any } from "./scenes/S8Any";
+import { S9Pact } from "./scenes/S9Pact";
 import { Grain } from "./lib/grain";
 import { Backdrop, Chrome } from "./lib/backdrop";
 import { ScenePush } from "./lib/prims";
@@ -53,9 +53,12 @@ export const LEAD = Math.round(0.6 * FPS);
  * Per-scene length in frames.
  *
  * Each is max(line + lead + tail, what the animation needs). Where the second
- * term wins the scene holds in silence on purpose - beat 8 ends on the cost
- * cards with nothing said over them, which is the strongest place in the film
- * for the voice to stop.
+ * term wins, the scene holds in silence on purpose: beat 8 lets the gym log
+ * finish writing itself after the voice has stopped, and beat 9 holds on the
+ * mark, which is the one place in the film where silence is the point.
+ *
+ * The phrase timings the scenes animate against live in lib/beats.ts, measured
+ * from the same files these durations come from.
  */
 const SCENE_F = {
   s1: 690,
@@ -117,31 +120,31 @@ export const Pact: React.FC = () => (
     <Backdrop />
 
     <Beat span={CUT.s1} vo="b1" chapter="the problem" n={1}>
-      <S1Bug />
+      <S1Problem />
     </Beat>
     <Beat span={CUT.s2} vo="b2" chapter="you say it" n={2}>
-      <S2Type />
+      <S2Say />
     </Beat>
     <Beat span={CUT.s3} vo="b3" chapter="it breaks it down" n={3}>
-      <S3Plan />
+      <S3Breaks />
     </Beat>
     <Beat span={CUT.s4} vo="b4" chapter="fifty cost what one costs" n={4}>
-      <S4Live />
+      <S4Fifty />
     </Beat>
     <Beat span={CUT.s5} vo="b5" chapter="most of it never happens" n={5}>
-      <S5Tree />
+      <S5Most />
     </Beat>
     <Beat span={CUT.s6} vo="b6" chapter="then it counts" n={6}>
-      <S6Count />
+      <S6Counts />
     </Beat>
     <Beat span={CUT.s7} vo="b7" chapter="when it can't tell" n={7}>
-      <S7Ladder />
+      <S7Cant />
     </Beat>
     <Beat span={CUT.s8} vo="b8" chapter="one system, any goal" n={8}>
-      <S8Change />
+      <S8Any />
     </Beat>
     <Beat span={CUT.s9} vo="b9" chapter="the pact" n={9}>
-      <S9Close />
+      <S9Pact />
     </Beat>
 
     <Grain />
