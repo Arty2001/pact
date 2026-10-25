@@ -90,6 +90,7 @@ planning against.)
 | | Status |
 |---|---|
 | Browser camera / screen → wall | Working |
+| Screen share judged against a goal | Working, see [below](#watching-a-screen-rather-than-a-room) |
 | QR / one-time code pairing | Working |
 | Live device registry over WebSocket | Working |
 | RTSP / RTMP / MJPEG / ESP32 ingest | Working, via [the bridge](bridge/) |
@@ -168,6 +169,60 @@ recorded once. Nothing to expire, nothing to reconcile.
 The **Engine** is the opposite — its whole job is the part that must outlive
 every socket. Folding them together would cost the Hub the property that
 makes it simple, so they stay apart.
+
+### Watching a screen rather than a room
+
+A publisher can share a screen instead of a camera, and a goal can be about
+what is on it: *"study Python for an hour"* rather than *"brush my teeth"*.
+The plumbing is identical — same tap, same relay, same state machines — but
+four of the assumptions underneath it are about rooms, and each one fails
+quietly rather than loudly on a screen.
+
+**Every skill declares a surface.** `camera`, `screen`, or `any`, and a skill
+only ever scores frames from its own. The reason is not that a screen skill
+scored against a bathroom camera returns a wrong answer — it returns a low
+one, which looks like the thing simply not happening. It is that scoring also
+*calibrates*: `bias` and `temperature` are fitted from whatever frames a skill
+has seen, so mixing surfaces means a sink detector learns its idea of an
+ordinary frame partly from screenshots of a code editor, and drifts in a way
+nothing reports. `any` is the default, so every skill written before this
+existed behaves exactly as it did.
+
+**A still screen is not an empty room.** The motion gate rests on an
+assumption that is true of a room and false of a screen: that stillness means
+nothing is happening. Reading a document for twenty minutes is motionless and
+is exactly the behaviour a goal wants to credit, so gating it would make the
+system go quiet during the thing it is watching. A screen is therefore never
+hard-gated. It falls back to a five-second heartbeat in the publisher, which
+is a slowdown rather than a blindfold — roughly a fifth the cost of an active
+screen instead of zero cost and zero information.
+
+**The cheap layer cannot read, and the split is the design rather than a
+limitation.** C-RADIO recognises the *look* of a screen — an editor, a
+spreadsheet, a video player, a terminal — and cannot tell one file from
+another. So the gate names a recognisable kind of screen and the child names
+the specific thing, and when the child is undecided the teacher, which can
+read, settles it. Its verdict becomes a label like any other, so the question
+gets cheaper the more often it is asked. The planner is told this explicitly,
+because a screen gate written as *"VS Code with main.py open"* is a detector
+that can never fire.
+
+**Escalation needs legible frames.** 640px in the browser and 512px at the
+teacher are right for a camera and quietly wrong for a screen: at that size a
+1920px desktop's body text is a grey smear, so the one component that could
+tell Python from JavaScript answers UNSURE forever — and that reads as a model
+that cannot do the task rather than as a picture that never held the answer.
+Screens upload at 1280px and reach the teacher at 1024px. A teacher call on a
+screen costs roughly four times the input tokens of one on a camera, which is
+affordable only because escalation is rare.
+
+Screen actions also get different timings, for a reason the camera defaults
+get backwards. A camera action has a 60-second cooldown so one trip to the
+bathroom is not recorded as three. An accumulating screen goal sums sessions
+rather than counting them, so a cooldown charges a minute of lost credit for
+every glance at a message, and a choppy hour scores as half of one. Screen
+actions get no cooldown and a 20-second exit, long enough to ride out a
+switched tab.
 
 ### The motion gate runs in the browser
 
@@ -399,6 +454,14 @@ which is the question anyone actually asks.
   Put Cloudflare Access in front of it before pointing it at anything private.
 - **No recording.** Frames are relayed and never stored. Perception keeps
   embeddings, not images, on a week's retention.
+- **A shared screen is not redacted.** Screen frames go through the Worker
+  like any other, at a higher resolution so the teacher can read them, and
+  whatever else is on your screen goes with them — other windows, a
+  notification, an open inbox. On escalation they are sent to Nebius. Nothing
+  is stored at either end, but a screen carries far more than a gym camera
+  does and the same "never stored" promise is a much weaker one here. There
+  is no per-window capture and no redaction; share a single window rather
+  than a whole desktop if that matters.
 - **No cloud transcoding.** The SFU forwards bytes untouched.
 - **Audio is not published.** A wall of simultaneous audio is unusable.
 
@@ -417,7 +480,12 @@ dimensions so the true number is likely better, but it is not five.
 
 **The calibration background is biased by the gate.** Still frames never
 reach the encoder, so the distribution a skill calibrates against is "frames
-interesting enough to embed", not the room at rest.
+interesting enough to embed", not the room at rest. A screen skill escapes
+this one — screens are not hard-gated — and walks into a worse version of it:
+if you code all day, coding *is* your screen's background, so a "code for an
+hour" skill calibrates its bias against the very thing it is meant to detect
+and may never cross its own threshold. Goals about what you do unusually work
+better here than goals about what you do constantly.
 
 **Thresholds must bracket the real distribution.** If `exit_conf` sits below
 the median score, sessions open and never close. Read the numbers off a

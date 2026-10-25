@@ -74,6 +74,24 @@ python -m pact_perception.run --room <device-name> --embed local --source relay 
   --hub https://pact.lanvar.ai
 ```
 
+### `--surface`
+
+Whether a locally driven run is looking at a room or at a shared screen.
+A skill only scores frames from its own surface, and a motionless screen is
+never gated — see "Watching a screen rather than a room" in the root README
+for why both of those matter.
+
+Only `--source folder` and `--source camera` consult this. A `relay` or `sfu`
+frame carries its own surface, because the publisher that chose a camera or a
+screen is the only party that knows for certain, and a flag that disagreed
+with it would silently mis-scope every skill.
+
+```bash
+# replaying recorded screenshots rather than recorded footage
+python -m pact_perception.run --source folder --folder traces/desk \
+  --surface screen --embed local --hub http://localhost:8787
+```
+
 ### About `--embed stub`
 
 A fake encoder with no model behind it. It is deterministic and it responds to

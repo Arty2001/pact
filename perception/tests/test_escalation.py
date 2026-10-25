@@ -75,14 +75,24 @@ class FakeTeacher:
 
     verdict: Verdict | None
     calls: list[tuple[str, int]] = None  # type: ignore[assignment]
+    #: (surface, context) of each call, which is what tells a screen
+    #: escalation apart from a camera one.
+    asked: list[tuple[str, str]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self.calls = []
+        self.asked = []
 
     def adjudicate(
-        self, label: str, frames: list[Image.Image], classes: tuple[str, ...] = ()
+        self,
+        label: str,
+        frames: list[Image.Image],
+        classes: tuple[str, ...] = (),
+        surface: str = "camera",
+        context: str = "",
     ) -> Verdict | None:
         self.calls.append((label, len(frames)))
+        self.asked.append((surface, context))
         return self.verdict
 
 

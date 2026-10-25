@@ -179,8 +179,18 @@ function renderSkills() {
       // weight_state is worth surfacing: "pending" is not broken, it means
       // perception has not embedded the label yet, and that distinction is
       // the difference between waiting and debugging.
+      // The surface is shown only when it is an opinion. Marking every
+      // legacy skill "any" would add a column of noise to say nothing; a
+      // skill that watches screens is the one worth picking out, because a
+      // screen skill paired with a camera publisher is the quiet way for a
+      // goal to never advance.
+      const surface =
+        s.surface && s.surface !== "any"
+          ? `<span class="kind kind-${esc(s.surface)}">${esc(s.surface)}</span>`
+          : "";
       li.innerHTML =
         `<span class="kind kind-${esc(s.kind)}">${esc(s.kind)}</span>` +
+        surface +
         `<b>${esc(s.key)}</b>` +
         `<span class="slabel">${esc(s.label)}</span>` +
         `<span class="wstate wstate-${esc(s.weightState)}">${esc(s.weightState)}</span>` +
@@ -266,15 +276,24 @@ function addSkillRow(preset = {}) {
   const li = document.createElement("li");
   li.className = "skill-row";
 
+  // Not every field the planner drafts deserves a widget. `dependsOn` is the
+  // gate tree and `accumulate` is "sum this across the day", and both are
+  // things the planner reasons about and a person almost never retypes - but
+  // they were previously dropped on the floor here, which quietly flattened
+  // every drafted parent/child pair into two unrelated skills.
+  li.dataset.dependsOn = preset.dependsOn ?? "";
+  li.dataset.accumulate = preset.accumulate ? "1" : "";
+
   const key = input("key", preset.key ?? "", "person_in_bathroom");
   const label = input("label", preset.label ?? "", "a person standing at a bathroom sink");
   const kind = select("kind", ["gate", "object", "action", "counter", "discriminator", "metric"], preset.kind ?? "object");
+  const surface = select("surface", ["any", "camera", "screen"], preset.surface ?? "any");
   const role = select("role", ["gate", "required", "discriminating"], preset.role ?? "required");
 
   const drop = button("×", "btn-ghost btn-sm", () => li.remove());
   drop.classList.add("row-drop");
 
-  li.append(kind, key, label, role, drop);
+  li.append(kind, surface, key, label, role, drop);
   skillRows.append(li);
 }
 
@@ -323,19 +342,49 @@ function applyPlan(plan) {
 el("goal-form").addEventListener("submit", async (e) => {
   if (e.submitter?.value !== "save") return;
 
+  // Read by name rather than by position: the row has grown a field twice
+  // now, and a positional destructure silently reassigns every value when it
+  // does.
   const rows = [...skillRows.children].map((li) => {
-    const [kind, key, label, role] = li.querySelectorAll("select, input");
-    return { kind: kind.value, key: key.value.trim(), label: label.value.trim(), role: role.value };
+    const at = (name) => li.querySelector(`[name="${name}"]`)?.value ?? "";
+    return {
+      kind: at("kind"),
+      surface: at("surface"),
+      key: at("key").trim(),
+      label: at("label").trim(),
+      role: at("role"),
+      dependsOn: li.dataset.dependsOn || null,
+      accumulate: li.dataset.accumulate === "1",
+    };
   });
 
   // Skills are created before the goal that references them, because the
   // join row carries a foreign key and a goal pointing at nothing would be
   // a goal that can never settle.
-  for (const r of rows.filter((r) => r.key && r.label)) {
+  //
+  // Gates go first for the same reason one level down: depends_on is itself
+  // a foreign key into this table, so a child written before its parent is
+  // a child whose gate chain is broken from birth.
+  const writing = rows.filter((r) => r.key && r.label);
+  const named = new Set(writing.map((r) => r.key));
+  const ordered = [...writing].sort(
+    (a, b) => (a.kind === "gate" ? -1 : 0) - (b.kind === "gate" ? -1 : 0),
+  );
+
+  for (const r of ordered) {
     await fetch("/api/engine/skills", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: r.key, kind: r.kind, label: r.label }),
+      body: JSON.stringify({
+        key: r.key,
+        kind: r.kind,
+        label: r.label,
+        surface: r.surface,
+        // Only if the parent is actually among the skills being written. A
+        // dangling key would leave the child permanently ineligible, which
+        // looks exactly like a detector that does not work.
+        dependsOn: r.dependsOn && named.has(r.dependsOn) ? r.dependsOn : null,
+      }),
     });
   }
 
@@ -353,7 +402,15 @@ el("goal-form").addEventListener("submit", async (e) => {
       tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
       uses: rows
         .filter((r) => r.key)
-        .map((r) => ({ skillKey: r.key, role: r.role, minCount: r.kind === "counter" ? 5 : null })),
+        .map((r) => ({
+          skillKey: r.key,
+          role: r.role,
+          minCount: r.kind === "counter" ? 5 : null,
+          // Without this an action goal settles on its first session of any
+          // length, so thirty seconds of the right window being open would
+          // credit a whole hour.
+          accumulate: r.accumulate,
+        })),
     }),
   });
 

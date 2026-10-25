@@ -57,6 +57,7 @@ from .skills import (
     SCORED_KINDS,
     EncoderMismatch,
     Skill,
+    applies_to,
     calibrate,
     discriminate,
     loosen_for,
@@ -96,6 +97,11 @@ class Room:
     """
 
     gate: MotionGate
+    #: What this room last sent: "camera" or "screen". A device is one or the
+    #: other for the life of its publish, so this is effectively fixed, but it
+    #: is read off the frames rather than configured because the publisher is
+    #: the only party that actually knows.
+    surface: str = "camera"
     #: Last rate we asked this room's publisher for, so it is sent on change
     #: rather than on every frame.
     asked_hz: float = 0.0
@@ -170,6 +176,7 @@ class Runner:
                 key=key,
                 kind=kind,
                 label=str(row.get("label", "")),
+                surface=str(row.get("surface") or "any"),
                 w=decode_weights(encoded, dim) if encoded else None,
                 bias=float(row.get("bias", 0.0)),
                 temperature=float(row.get("temperature", 1.0)),
@@ -252,18 +259,25 @@ class Runner:
             self.log.info("service.start", detail="watching", room=name)
         return room
 
-    def _eligible(self, room: Room) -> list[Skill]:
+    def _eligible(self, room: Room, surface: str = "any") -> list[Skill]:
         """
-        Skills whose gate chain is open.
+        Skills whose gate chain is open, and which are about this surface.
 
         A skill with no parent is always eligible; one with a parent is
         eligible only while that parent is active. The chain is walked rather
         than cached because it is at most a few links deep and a stale cache
         here would let a child fire in the wrong room.
+
+        The surface test is the same idea one level up. A screen skill has no
+        business scoring a bathroom camera, and the reason to enforce it is
+        not the wrong answer - which would be a harmlessly low score - but
+        that scoring also calibrates. See `skills.applies_to`.
         """
         out: list[Skill] = []
         for skill in self.skills.values():
             if skill.kind not in SCORED_KINDS or not skill.ready:
+                continue
+            if not applies_to(skill, surface):
                 continue
             parent = skill.depends_on
             open_chain = True
@@ -288,11 +302,18 @@ class Runner:
         return min(hz, self.cfg.max_hz)
 
     async def _on_frame(
-        self, image: Any, seq: int, now: float, source: str, room_name: str
+        self,
+        image: Any,
+        seq: int,
+        now: float,
+        source: str,
+        room_name: str,
+        surface: str = "camera",
     ) -> float:
         """Score one frame. Returns the sample rate the next one should use."""
         room = self.room(room_name)
-        self.log.debug("frame.sampled", seq=seq, source=source, room=room_name)
+        room.surface = surface
+        self.log.debug("frame.sampled", seq=seq, source=source, room=room_name, surface=surface)
 
         motion = room.gate.check(image)
         # A motion gate cannot see a person standing still, and that is
@@ -302,7 +323,13 @@ class Runner:
         # fact happening the whole time. So the gate only guards the idle
         # case, which is the case it was there to make cheap.
         busy = any(st.phase != "idle" for st in room.states.values())
-        if not motion.passed and not busy:
+        # A screen is never gated here. The gate's premise - that stillness
+        # means nothing is happening - is true of a room and false of a
+        # screen, where reading a page motionlessly for twenty minutes is the
+        # behaviour a goal most wants to credit. The publisher has already
+        # throttled a still screen to a slow heartbeat, so the saving is
+        # taken there, where it is a slowdown rather than a blindfold.
+        if not motion.passed and not busy and surface != "screen":
             # The cheapest possible outcome: no embedding, no scores, nothing
             # sent. An empty room should cost nothing.
             self.log.debug(
@@ -320,10 +347,10 @@ class Runner:
         room.recent.append((now, image))
         self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id)
 
-        for skill in self._eligible(room):
+        for skill in self._eligible(room, surface):
             await self._score_one(skill, embedding.vector, now, room, room_name)
 
-        hz = self._rate(self._eligible(room))
+        hz = self._rate(self._eligible(room, surface))
         if abs(hz - room.asked_hz) > 1e-6:
             # The publisher owns its clock, so this is a request, not a
             # command. Sent only on change: a counter going eligible is the
@@ -419,7 +446,12 @@ class Runner:
 
         frames = [img for _, img in list(room.recent)[-FRAMES_PER_CALL:]]
         verdict = await asyncio.to_thread(
-            self.teacher.adjudicate, skill.label, frames, skill.classes
+            self.teacher.adjudicate,
+            skill.label,
+            frames,
+            skill.classes,
+            room.surface,
+            self._context_for(skill),
         )
         if verdict is None:
             await self._emit(skill, event, room_name=room_name)
@@ -452,6 +484,30 @@ class Runner:
             verdict_by="vlm" if label == 0 else None,
             room_name=room_name,
         )
+
+    def _context_for(self, skill: Skill) -> str:
+        """
+        The labels of the gates above this skill, outermost first.
+
+        A child only ever escalates while its whole chain is open, so these
+        are facts the cheap layer has already settled. Handing them to the
+        teacher narrows "is this person writing Python" to the part that is
+        genuinely undecided, given that a code editor is known to be on
+        screen. The walk is bounded the same way `_eligible` bounds its own,
+        because a registry with a cycle in it should degrade rather than hang.
+        """
+        chain: list[str] = []
+        parent = skill.depends_on
+        hops = 0
+        while parent and hops < 8:
+            above = self.skills.get(parent)
+            if above is None:
+                break
+            if above.label:
+                chain.append(above.label)
+            parent = above.depends_on
+            hops += 1
+        return "; ".join(reversed(chain))
 
     async def _maybe_refit(self, skill: Skill) -> None:
         """
@@ -720,10 +776,12 @@ class Runner:
         try:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._ready.wait(), timeout=15.0)
-            async for room_name, frame in source.frames():
+            async for room_name, surface, frame in source.frames():
                 await self._fill_weights()
                 await self._flush_calibration()
-                hz = await self._on_frame(frame.image, frame.seq, frame.ts, source.name, room_name)
+                hz = await self._on_frame(
+                    frame.image, frame.seq, frame.ts, source.name, room_name, surface
+                )
                 # One rate for the whole source: it polls every subscription
                 # on one clock, so the fastest room sets the pace.
                 source.set_rate(hz)
@@ -741,7 +799,14 @@ class Runner:
             await self._flush_calibration()
             with Image.open(io.BytesIO(frame.jpeg)) as im:
                 image = im.convert("RGB")
-            await self._on_frame(image, frame.seq, frame.ts or time.time(), "relay", frame.room)
+            await self._on_frame(
+                image,
+                frame.seq,
+                frame.ts or time.time(),
+                "relay",
+                frame.room,
+                frame.surface,
+            )
 
     async def run_local(self, source: Any) -> None:
         """We own the clock: a folder or a camera, paced by the skills."""
@@ -759,7 +824,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 hz = await self._on_frame(
-                    frame.image, frame.seq, frame.ts, source.name, self.cfg.room
+                    frame.image, frame.seq, frame.ts, source.name, self.cfg.room, self.cfg.surface
                 )
                 source.set_rate(hz)
         finally:
