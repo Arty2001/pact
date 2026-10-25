@@ -72,6 +72,13 @@ export interface Skill {
   exitS: number;
   cooldownS: number;
   escalateAfterS: number;
+  /**
+   * Shortest believable gap between two counts, measured count-to-count.
+   * A pose detector fires honestly every time you are in the pose, so a
+   * counter needs a floor that cooldown cannot express: cooldown runs from
+   * the end of a session, not from the previous count.
+   */
+  minCycleS: number;
 
   /** Discriminator only. The last entry is always the implicit `none`. */
   classes: string[] | null;
