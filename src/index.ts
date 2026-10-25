@@ -1,8 +1,9 @@
+import { Engine } from "./goals/engine";
 import { Hub } from "./hub";
 import { Sfu } from "./sfu";
 import type { Env } from "./types";
 
-export { Hub };
+export { Engine, Hub };
 
 /**
  * Router.
@@ -10,8 +11,10 @@ export { Hub };
  * Static files are served by the assets binding before this ever runs, so
  * everything here is /api/*. Two groups:
  *
- *   /api/hub/*  -> forwarded to the single Hub Durable Object (control plane)
- *   /api/sfu/*  -> forwarded to Cloudflare Realtime, with our secret attached
+ *   /api/hub/*     -> the Hub Durable Object: who is live right now
+ *   /api/sfu/*     -> Cloudflare Realtime, with our secret attached
+ *   /api/engine/*  -> the Engine Durable Object: goals, skills, the ledger
+ *   /api/frames/*  -> a sampled JPEG on its way to perception
  *
  * Media never passes through this Worker. The browser talks WebRTC straight to
  * the SFU; we only broker the SDP handshake because it needs the app secret.
@@ -28,6 +31,17 @@ export default {
     // Lets the UI say "not configured yet" instead of failing at handshake time.
     if (path === "/api/config") {
       return Response.json({ sfuReady: Boolean(env.REALTIME_APP_ID && env.REALTIME_APP_SECRET) });
+    }
+
+    // Frames and the goal ledger both live in the Engine. Frames are a
+    // separate prefix only because the publisher posts them to a URL it
+    // builds itself, and a short one is easier to read in a trace.
+    if (path.startsWith("/api/engine/") || path.startsWith("/api/frames/")) {
+      const engine = env.ENGINE.get(env.ENGINE.idFromName("engine"));
+      const rest = path.startsWith("/api/engine")
+        ? path.slice("/api/engine".length)
+        : path.slice("/api".length);
+      return engine.fetch(new Request(new URL(rest, url), request));
     }
 
     if (path.startsWith("/api/hub/")) {

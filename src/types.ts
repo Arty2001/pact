@@ -28,6 +28,10 @@ export type ClientMessage = { type: "publish"; device: Device };
 
 export interface Env {
   HUB: DurableObjectNamespace;
+  ENGINE: DurableObjectNamespace;
   REALTIME_APP_ID?: string;
   REALTIME_APP_SECRET?: string;
+  /** Nebius Token Factory, for the planner. The teacher's copy lives in
+   *  perception, because escalation needs frames and frames stay put. */
+  NEBIUS_API_KEY?: string;
 }

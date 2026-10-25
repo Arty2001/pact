@@ -19,6 +19,9 @@
 /** The closed vocabulary. Shared with perception's logger, same names. */
 export type Event =
   | "skill.transition"
+  // Recorded here as well as in perception, because a near-miss has to be
+  // explainable from the ledger alone months later.
+  | "skill.rejected"
   | "discriminator.margin"
   | "question.asked"
   | "question.answered"

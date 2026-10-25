@@ -1,0 +1,228 @@
+/**
+ * Shapes for the goal model: skills, goals, instances, questions, and the
+ * transitions perception sends up.
+ *
+ * Literal unions rather than enums throughout, matching `DeviceKind` in
+ * `src/types.ts`. These values cross a wire and land in SQLite as text, and a
+ * union is already the thing that is stored; an enum would be a second
+ * representation to keep in step with it.
+ */
+
+/**
+ * The six kinds of skill. They differ only in their numbers and in which part
+ * of the output is read, which is what makes a rep counter configuration
+ * rather than new machinery.
+ *
+ *   gate           is it active now? everything beneath it is skipped if not
+ *   object         is it active now? a condition, not an event
+ *   action         how long it stayed active. one session, with a duration
+ *   counter        how many times it entered active. each entry is one rep
+ *   discriminator  which one of K. the only kind returning a distribution
+ *   metric         nothing. no camera can see it, so it asks you instead
+ */
+export type SkillKind = "gate" | "object" | "action" | "counter" | "discriminator" | "metric";
+
+/** Kinds perception scores. A metric never reaches the encoder. */
+export const SCORED_KINDS: readonly SkillKind[] = [
+  "gate",
+  "object",
+  "action",
+  "counter",
+  "discriminator",
+];
+
+/**
+ * How a skill came to have a weight vector.
+ *
+ * `pending` exists because the planner cannot compute one. Skill creation
+ * happens here, in the Worker, while the text encoder lives in perception, so
+ * a skill is born with a label and no vector and is filled in on perception's
+ * next poll. Worth knowing when reading the ledger: a pending skill is not
+ * broken, it is young.
+ */
+export type WeightState = "pending" | "zeroshot" | "fitted";
+
+/** Who or what settled an instance. This column is the whole trust model. */
+export type SettledBy = "camera" | "vlm" | "human";
+
+/** A goal you want to hit, or one you want to avoid. The rule is inverted. */
+export type GoalType = "target" | "limit";
+
+/** What a skill does for a goal that references it. */
+export type SkillRole = "gate" | "required" | "discriminating";
+
+export type InstanceState = "pending" | "active" | "done" | "violated" | "missed";
+
+/**
+ * One skill. Shared by every goal rather than owned by one, which is what
+ * makes the second goal in a room nearly free.
+ */
+export interface Skill {
+  key: string;
+  kind: SkillKind;
+  /** What a camera would literally see. This text is the zero-shot weight. */
+  label: string;
+  room: string | null;
+  /** Self-referencing: the gate tree, written by the planner. */
+  dependsOn: string | null;
+
+  enterConf: number;
+  exitConf: number;
+  dwellS: number;
+  exitS: number;
+  cooldownS: number;
+  escalateAfterS: number;
+
+  /** Discriminator only. The last entry is always the implicit `none`. */
+  classes: string[] | null;
+  /** Discriminator only: the top class must beat the runner-up by this. */
+  margin: number | null;
+
+  /**
+   * The fitted score calibration. `sigmoid((w . e - bias) / temperature)`.
+   * Not optional decoration: with bias at zero and temperature at one, every
+   * score lands between 0.475 and 0.599 and `enterConf` is unreachable.
+   */
+  bias: number;
+  temperature: number;
+
+  /**
+   * Which embedding space `w` was fitted in, as `model/adaptor@resolution`.
+   * A vector is meaningless under a different encoder and the failure is
+   * silent, so perception refuses to score on a mismatch rather than
+   * returning confident nonsense.
+   */
+  encoderId: string | null;
+  dim: number | null;
+  weightState: WeightState;
+  /** Labels collected. A young skill runs looser and asks more often. */
+  nLabels: number;
+
+  /**
+   * Frames per second this skill needs. Per skill because the range is wide:
+   * a gate asking "is anyone here" is fine at 0.5, while a bench press rep
+   * lasts two to four seconds and is invisible below about 4. The sampler
+   * takes the maximum over whatever is currently eligible.
+   */
+  sampleHz: number;
+
+  createdAt: number;
+}
+
+export interface Goal {
+  key: string;
+  description: string;
+  type: GoalType;
+  /** "daily" | "weekly:3" | "weekly:5". Parsed when materialising occurrences. */
+  cadence: string;
+  doneMin: number | null;
+  doneMax: number | null;
+  /** Local wall-clock window, e.g. ["17:00", "02:00"]. May cross midnight. */
+  windowStart: string | null;
+  windowEnd: string | null;
+  /**
+   * The user's zone, as an IANA name. Required rather than inferred: a window
+   * of 17:00 to 02:00 is meaningless without one, and a Durable Object runs
+   * in UTC.
+   */
+  tz: string;
+
+  /** Progressions: 135 lb, +5 a week, only when the last one succeeded. */
+  stepValue: number | null;
+  stepPeriod: "week" | "month" | null;
+  stepOn: "success" | "always" | null;
+
+  createdAt: number;
+}
+
+/** The join table. This row is the sharing. */
+export interface GoalSkill {
+  goalKey: string;
+  skillKey: string;
+  role: SkillRole;
+  /** Which class of a shared discriminator THIS goal wants. */
+  classKey: string | null;
+  /** Counters: "at least 5 reps". */
+  minCount: number | null;
+  /** Actions: sum durations across the day rather than settling on one. */
+  accumulate: boolean;
+  sequenceIndex: number | null;
+}
+
+/**
+ * One occurrence of one goal, and how it ended.
+ *
+ * `targetMin` is frozen when the instance is created rather than read from the
+ * goal at settle time. That is what makes progressions work: this week's
+ * target stays this week's target even after next week's has been raised.
+ */
+export interface Instance {
+  id: string;
+  goalKey: string;
+  /** The local date this occurrence belongs to, as YYYY-MM-DD. */
+  occurrenceOn: string;
+  state: InstanceState;
+  observed: number;
+  targetMin: number | null;
+  settledAt: number | null;
+  settledBy: SettledBy | null;
+  createdAt: number;
+}
+
+export interface Question {
+  id: string;
+  instanceId: string;
+  skillKey: string;
+  prompt: string;
+  /** Pre-filled, so the common case is one tap rather than a form. */
+  proposedValue: string | null;
+  askedAt: number;
+  answeredAt: number | null;
+  answer: string | null;
+}
+
+/**
+ * What perception sends up. The only thing that crosses the process boundary.
+ *
+ * Perception computes several scores a second and none of them appear here.
+ * That is the "7,200 scores an hour becomes one event" property expressed as
+ * a wire format: if a score could be posted, it eventually would be, and the
+ * control plane would drown in them.
+ */
+export interface Transition {
+  skillKey: string;
+  kind: "entered" | "exited" | "rejected" | "escalate";
+  at: number;
+  room: string;
+  traceId: string;
+  score: number;
+  reason: string;
+
+  dwellMs?: number;
+  durationMs?: number;
+  heldMs?: number;
+  neededMs?: number;
+  peak?: number;
+  count?: number;
+
+  /** Discriminator outcome, when one was involved in this transition. */
+  classKey?: string;
+  p1?: number;
+  p2?: number;
+  margin?: number;
+  /** Set when a teacher call resolved this rather than the camera alone. */
+  verdictBy?: SettledBy;
+}
+
+/** Engine -> perception. The registry, pushed rather than polled for. */
+export type EngineMessage =
+  | { type: "registry"; skills: Skill[]; encoderId: string | null }
+  | { type: "frame"; room: string; seq: number; ts: number; jpegBase64: string }
+  | { type: "rate"; room: string; hz: number };
+
+/** Perception -> Engine. */
+export type PerceptionMessage =
+  | { type: "hello"; room: string; encoderId: string; dim: number }
+  | { type: "transition"; transition: Transition }
+  | { type: "weights"; skillKey: string; encoderId: string; dim: number; w: string; bias: number; temperature: number }
+  | { type: "refit"; skillKey: string; nExamples: number; holdoutBefore: number; holdoutAfter: number };

@@ -12,9 +12,17 @@
   },
 
   "durable_objects": {
-    "bindings": [{ "name": "HUB", "class_name": "Hub" }]
+    "bindings": [
+      { "name": "HUB", "class_name": "Hub" },
+      { "name": "ENGINE", "class_name": "Engine" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Hub"] }],
+  // Each new class needs its own tag. v1 is already applied in production,
+  // so editing it would be a no-op at best and a rejected deploy at worst.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Hub"] },
+    { "tag": "v2", "new_sqlite_classes": ["Engine"] }
+  ],
 
   "routes": [
     { "pattern": "pact.lanvar.ai", "custom_domain": true }
