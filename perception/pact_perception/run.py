@@ -132,6 +132,10 @@ class Room:
     #: picture that is only ever read all at once.
     snapshot: dict[str, Any] = field(default_factory=dict)
     last_sent: float = 0.0
+    #: Last (top class, decisive?) per discriminator, so an unchanged verdict
+    #: can stay quiet instead of repeating itself every frame.
+    verdicts: dict[str, tuple[str, bool]] = field(default_factory=dict)
+
     #: How many times each skill has been calibrated. Two, then never.
     refits: dict[str, int] = field(default_factory=dict)
     states: dict[str, State] = field(default_factory=dict)
@@ -411,7 +415,17 @@ class Runner:
             if skill.kind == "discriminator":
                 dist = discriminate(skill, e, self.embedder.encoder_id)
                 value = dist.p1
-                self.log.info(
+                # A verdict that has not changed is not news. This fired at
+                # INFO on every frame for every discriminator - 1,877 lines
+                # in one session, drowning the events worth reading, and
+                # paying a JSON encode and a write inside the sampling loop
+                # that the frame rate was being measured against. The same
+                # argument that keeps skill.score at TRACE applies here.
+                verdict = (dist.top, dist.margin >= skill.margin)
+                changed = room.verdicts.get(skill.key) != verdict
+                room.verdicts[skill.key] = verdict
+                emit = self.log.info if changed else self.log.debug
+                emit(
                     "discriminator.margin",
                     skill=skill.key,
                     top=dist.top,

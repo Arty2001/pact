@@ -111,6 +111,13 @@
 
 * { box-sizing: border-box; }
 
+/* The browser's own [hidden] rule is an author-level loss waiting to happen:
+   it has the same specificity as any class, so a later `.stage-empty {
+   display: flex }` silently wins and the element stays on screen while the
+   code believes it is gone. That is exactly how "No camera is publishing"
+   came to be drawn over a live camera. */
+[hidden] { display: none !important; }
+
 html { font-size: 16px; }
 
 body {
