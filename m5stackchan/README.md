@@ -78,7 +78,8 @@ src/
                     produce smooth motion.
   main.c            Boot, calibration, travel self-test, idle behaviour.
 backup/
-  factory-firmware-*.bin   Full 16 MB dump of the shipped XiaoZhi firmware.
+  factory-firmware.bin     Your own dump of the shipped firmware. Not in git -
+                           see "Restoring the factory firmware" below.
 ```
 
 ### Sign convention
@@ -98,11 +99,17 @@ python flash_and_read.py     # build, flash COM4, print 50s of serial
 
 ## Restoring the factory firmware
 
-Replacing the stock firmware means losing the XiaoZhi voice agent. It is
-recoverable:
+Replacing the stock firmware means losing the XiaoZhi voice agent, so **dump
+your own image before you flash anything**. The dump is not in this repository
+and should not be: it is the vendor's proprietary binary, not ours to
+redistribute, and the one off your device is the one that matches your device.
 
 ```bash
-python -m esptool --port COM4 write-flash 0x0 backup/factory-firmware-7c4fadae2ff8.bin
+# Do this FIRST, before flashing. 16 MB, about a minute.
+python -m esptool --port COM4 read-flash 0x0 0x1000000 backup/factory-firmware.bin
+
+# And to go back:
+python -m esptool --port COM4 write-flash 0x0 backup/factory-firmware.bin
 ```
 
 ## Not built yet
