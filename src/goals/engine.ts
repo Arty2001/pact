@@ -645,6 +645,49 @@ export class Engine implements DurableObject {
     // looking ordinary and never advance, and nothing would say why. Refused
     // here rather than discovered a week later.
     const doing = (body.uses ?? []).filter((u) => u.role !== "gate");
+
+    // A gate watching a different surface from the thing beneath it does not
+    // fail cleanly. A camera gate over a screen goal fires on the people
+    // INSIDE whatever video is playing, so the goal reports the content of
+    // the media instead of the fact of it and appears to work intermittently
+    // - which is worse than broken, because nobody debugs something that
+    // sometimes gives the right answer. The planner is told this plainly and
+    // still does it, so it is checked here too. `any` means the skill was
+    // written with no opinion and matches either.
+    const surfaceOf = (key: string): string => {
+      const row = this.rows<{ surface: string }>(
+        "SELECT surface FROM skills WHERE key = ?",
+        key,
+      )[0];
+      return row?.surface ?? "any";
+    };
+    for (const gate of (body.uses ?? []).filter((u) => u.role === "gate")) {
+      const gateSurface = surfaceOf(gate.skillKey);
+      if (gateSurface === "any") continue;
+      const wrong = doing.find((u) => {
+        const s = surfaceOf(u.skillKey);
+        return s !== "any" && s !== gateSurface;
+      });
+      if (wrong !== undefined) {
+        this.log.warn("skill.rejected", {
+          goal: body.key,
+          skill: gate.skillKey,
+          detail: `gate watches ${gateSurface}, ${wrong.skillKey} watches ${surfaceOf(wrong.skillKey)}`,
+        });
+        return Response.json(
+          {
+            error:
+              `the gate "${gate.skillKey}" watches a ${gateSurface} and ` +
+              `"${wrong.skillKey}" watches a ${surfaceOf(wrong.skillKey)}. A gate ` +
+              "has to watch the same surface as the thing it gates, or it can " +
+              "never open for it - and a camera gate over a screen goal fires " +
+              "on the people inside whatever video is playing.",
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     if ((body.uses ?? []).length > 0 && doing.length === 0) {
       return Response.json(
         {
