@@ -425,8 +425,22 @@ function renderGoals() {
 
       // Fourteen days. A faint cell for a day with nothing, never an empty
       // hole: absence should read as texture rather than a broken chain.
+      //
+      // The padding is the whole point and it was missing, so a goal made
+      // today drew one lone cell and a goal made yesterday drew two. On a
+      // card that is otherwise full width, a stray eleven-pixel square reads
+      // as a rendering fault rather than as a history that has not happened
+      // yet. Days with no occurrence are hollow, so they stay distinct from
+      // a day that exists and is still pending.
       const streak = el.querySelector(".streak");
-      for (const i of [...(g.instances ?? [])].reverse().slice(-14)) {
+      const days = [...(g.instances ?? [])].reverse().slice(-14);
+      for (let k = days.length; k < 14; k++) {
+        const d = document.createElement("i");
+        d.className = "none";
+        d.title = "no occurrence yet";
+        streak.append(d);
+      }
+      for (const i of days) {
         const d = document.createElement("i");
         d.className = i.state;
         d.title = `${i.occurrenceOn}: ${i.state}${i.settledBy ? ` · settled by ${i.settledBy}` : ""}`;
