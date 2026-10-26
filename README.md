@@ -274,15 +274,66 @@ any threshold fires immediately or never.
 
 ## Nebius and NVIDIA
 
-| | Model | Where |
-|---|---|---|
-| The 24/7 encoder | `nvidia/C-RADIOv3-B` | self-hosted, Nebius AI Cloud or local |
-| The planner | `nvidia/nemotron-3-super-120b-a12b` | Nebius Token Factory |
-| The teacher | `nvidia/Nemotron-3.5-Super-VL` | Nebius Token Factory |
+Three NVIDIA open models, each doing the job it is actually good at.
 
-C-RADIO is the vision encoder *inside* Nemotron 3.5 Super VL, so the edge
-index and the cloud teacher share one visual representation — the teacher's
-judgements land in a space the skills can actually learn from.
+| | Model | Where | Called |
+|---|---|---|---|
+| The 24/7 encoder | `nvidia/C-RADIOv3-B` + siglip2 | Nebius AI Cloud (or a laptop) | every sampled frame |
+| The planner | `nvidia/nemotron-3-super-120b-a12b` | Nebius Token Factory | once per goal written |
+| The assistant | `nvidia/nemotron-3-super-120b-a12b` | Nebius Token Factory | once per thing said to it |
+| The teacher | `nvidia/Nemotron-3.5-Super-VL` | Nebius Token Factory | only when a moment is ambiguous |
+
+**C-RADIO is the vision encoder *inside* Nemotron 3.5 Super VL.** That is the
+whole reason this works rather than a coincidence worth mentioning: the edge
+index and the cloud teacher share one visual representation, so the teacher's
+verdict is a label in the same space the skill's own vector lives in. A
+verdict from a model with a different encoder would be an opinion the skill
+could not learn from.
+
+### Where the split pays
+
+The encoder runs on everything and the reasoning models run on almost
+nothing. A camera at 8 Hz is 28,800 frames an hour through C-RADIO; the
+teacher sees four of them, and only when the state machine genuinely cannot
+decide. Token Factory is what makes that affordable - a 120B model priced per
+token is free at a tenth of a percent of frames and would be unthinkable at
+all of them.
+
+It also made the label loop possible at all. Nemotron 3.5 Super VL can look
+at the frames a person just complained about and *write* candidate labels for
+them, which closes a gap nothing else could: an embedding cannot be turned
+back into words, so when a skill stops matching there is no way to ask the
+vector what it should have said. Something that can see has to write it, and
+then the recorded embeddings choose between the candidates by separation over
+spread. Generating and choosing are different jobs and neither model can do
+the other one.
+
+### Nebius AI Cloud: the encoder sleeps when nothing is watching
+
+The encoder's instance is started when a camera arrives and stopped ten
+minutes after the last one leaves, driven from the Hub - a publisher socket
+opening *is* a camera arriving. Nothing on the platform scales to zero on its
+own (Serverless Endpoints run until stopped), so the control plane does it:
+`POST /compute/v1/instances/start` on the first publisher, `stop` on the
+grace timer. Idle cost becomes the disk alone.
+
+Two traps, both load-bearing. A stop/start through the Compute API **does not
+preserve local disk**, and the store holds every embedding and label the
+system has - so `/data` must be a network disk or the skills forget
+everything on the first sleep. And bare `nvidia/cuda` runtime images ship no
+Python, so the GPU build uses a PyTorch CUDA base and skips installing the
+CPU wheel over the top of a working GPU build.
+
+### Tavily: a target the system did not invent
+
+Pact's claim is that it does not take your word for whether something
+happened. That sits oddly beside a target it made up. "Do some squats every
+day" names no number, so one gets looked up and the goal keeps the URL - a
+person can then disagree with the guidance rather than with Pact. Only when
+the sentence has no number in it: "ten squats" means ten, and a cited URL is
+kept only if it was actually among the results, because a model asked for a
+citation will sometimes produce the shape of a reference rather than a
+reference.
 
 Two traps worth knowing. Every model id in Nebius's own documentation
 examples is decommissioned, including the one in their quickstart, so treat
