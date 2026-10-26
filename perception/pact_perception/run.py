@@ -69,6 +69,9 @@ from .teacher import FRAMES_PER_CALL, Teacher
 
 #: Background cosines kept per skill, for calibration. Twenty minutes at
 #: 0.5 Hz, which is enough for a stable quantile without unbounded growth.
+#: How far back to read a label off when the complaint named no window.
+_RELABEL_RECENT_S = 90.0
+
 _CALIBRATION_WINDOW = 600
 
 #: Enough samples for a stable high quantile. A skill is not scored before
@@ -185,7 +188,7 @@ class Runner:
         #: because labels arrive on the socket task and a refit is not quick.
         self._pending_labels: list[str] = []
         #: (skill, room) pairs waiting for a label to be chosen for them.
-        self._pending_relabel: list[tuple[str, str]] = []
+        self._pending_relabel: list[tuple[str, str, float, float]] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
@@ -406,14 +409,14 @@ class Runner:
             self._registry_changed.clear()
             await self._fill_weights()
 
-    def _on_relabel(self, skill_key: str, room_name: str) -> None:
+    def _on_relabel(self, skill_key: str, room_name: str, start: float, end: float) -> None:
         """Queued, because choosing a label costs a vision call."""
-        self._pending_relabel.append((skill_key, room_name))
+        self._pending_relabel.append((skill_key, room_name, start, end))
 
     async def _flush_relabel(self) -> None:
         while self._pending_relabel:
-            skill_key, room_name = self._pending_relabel.pop()
-            await self._relabel(skill_key, room_name)
+            skill_key, room_name, start, end = self._pending_relabel.pop()
+            await self._relabel(skill_key, room_name, start, end)
 
     async def _flush_labels(self) -> None:
         while self._pending_labels:
@@ -769,7 +772,9 @@ class Runner:
             hops += 1
         return "; ".join(reversed(chain))
 
-    async def _relabel(self, skill_key: str, room_name: str) -> None:
+    async def _relabel(
+        self, skill_key: str, room_name: str, start: float = 0.0, end: float = 0.0
+    ) -> None:
         """
         Work out what this skill SHOULD have said, and propose it.
 
@@ -796,11 +801,19 @@ class Runner:
             return
 
         now = time.time()
-        # What the person is complaining about: the last minute. Against what
-        # this skill has scored for the ten before that, which is the best
-        # available picture of "ordinary" on this surface.
-        want = self.store.scored_frames(skill_key, now - 90, now, limit=200)
-        other = self.store.scored_frames(skill_key, now - 3600, now - 240, limit=600)
+        # The window the complaint named, or the recent past if it named
+        # none. Taking the last ninety seconds regardless was wrong for the
+        # case this feature exists for: "you missed that all morning" is
+        # about this morning, and by the time it has been said the camera is
+        # pointed at someone talking.
+        hi = end if end > 0 else now
+        lo = start if start > 0 and start < hi else hi - _RELABEL_RECENT_S
+        # Against what this skill has scored OUTSIDE that window, which is
+        # the best available picture of "ordinary" on this surface. Taken
+        # from the hour around it rather than all of history, so a label is
+        # chosen to separate today's room from today's room.
+        other = self.store.scored_frames(skill_key, lo - 3600, lo - 60, limit=600)
+        want = self.store.scored_frames(skill_key, lo, hi, limit=200)
         if want.size == 0 or other.size == 0:
             self.log.warn(
                 "probe.refit",
@@ -809,7 +822,12 @@ class Runner:
             )
             return
 
-        frames = [img for _, img in list(room.recent)[-FRAMES_PER_CALL:]]
+        # Frames from the window if any are still in hand, newest otherwise.
+        # A complaint about twenty minutes ago has nothing left in the ring
+        # buffer, and showing the teacher the present instead would have it
+        # describe a person talking to a laptop.
+        held = [img for ts, img in room.recent if lo <= ts <= hi]
+        frames = (held or [img for _, img in room.recent])[-FRAMES_PER_CALL:]
         candidates = await asyncio.to_thread(
             self.teacher.propose, frames, skill.label, room.surface
         )

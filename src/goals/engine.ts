@@ -235,7 +235,16 @@ export class Engine implements DurableObject {
     const relabelMatch = path.match(/^\/skills\/(.+)\/relabel$/);
     if (relabelMatch && request.method === "POST") {
       const key = asKey(decodeURIComponent(relabelMatch[1]));
-      return Response.json({ ok: true, asked: this.askRelabel(key) });
+      const body = (await request.json().catch(() => ({}))) as { minutesBack?: number };
+      // Clamped the same way a spoken correction is: a window of days read
+      // off a request body would have perception describe last Tuesday.
+      const minutes = Math.min(Math.max(Number(body.minutesBack ?? 0), 0), MAX_CORRECTION_MIN);
+      // Both ends or neither. Half a window would have perception read the
+      // label off a span open at one end, which is not a span.
+      const stamp = Date.now();
+      const from = minutes > 0 ? stamp - minutes * 60_000 : undefined;
+      const to = from === undefined ? undefined : stamp;
+      return Response.json({ ok: true, asked: this.askRelabel(key, from, to) });
     }
 
     const proposalMatch = path.match(/^\/proposals\/(.+)$/);
@@ -1374,7 +1383,10 @@ export class Engine implements DurableObject {
         // have is not describing what to look for, and re-reading the label
         // off frames that are explicitly the wrong thing would propose a
         // detector for them.
-        if (a.happened === true) this.askRelabel(skillKey);
+        // The same window the label was pinned to. The frames that prove
+        // the complaint are the ones the complaint is about, and they stop
+        // being in front of the camera the moment someone turns to speak.
+        if (a.happened === true) this.askRelabel(skillKey, from, to);
         done.push(`label_frame ${skillKey}`);
       } else if (call.name === "answer_question") {
         const id = String(a.id ?? "");
@@ -1437,11 +1449,11 @@ export class Engine implements DurableObject {
    * The room is left to perception: it knows which surface the skill
    * scores and which of its rooms has frames.
    */
-  private askRelabel(skillKey: string): number {
+  private askRelabel(skillKey: string, from?: number, to?: number): number {
     const room = [...this.lastFrameAt.keys()][0] ?? "";
     let asked = 0;
     for (const ws of this.perceptionSockets(room)) {
-      this.send(ws, { type: "relabel", room, skillKey });
+      this.send(ws, { type: "relabel", room, skillKey, from, to });
       asked += 1;
     }
     if (asked === 0) {

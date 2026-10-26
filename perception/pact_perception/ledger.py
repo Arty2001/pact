@@ -71,7 +71,7 @@ class Ledger:
         self._ws: Any = None
         self._skills_cb: Callable[[list[dict[str, Any]]], None] | None = None
         self._label_cb: Callable[[str, float, float, int, str], None] | None = None
-        self._relabel_cb: Callable[[str, str], None] | None = None
+        self._relabel_cb: Callable[[str, str, float, float], None] | None = None
 
     def on_registry(self, cb: Callable[[list[dict[str, Any]]], None]) -> None:
         self._skills_cb = cb
@@ -91,7 +91,7 @@ class Ledger:
         """
         self._label_cb = cb
 
-    def on_relabel(self, cb: Callable[[str, str], None]) -> None:
+    def on_relabel(self, cb: Callable[[str, str, float, float], None]) -> None:
         """
         A request to work out what a skill should have been looking for.
 
@@ -153,9 +153,14 @@ class Ledger:
                                 str(msg.get("source", "human")),
                             )
                         elif msg.get("type") == "relabel" and self._relabel_cb is not None:
+                            # Zeroes mean "no window given", which the
+                            # handler reads as the recent past. A control
+                            # plane that knows the span sends it.
                             self._relabel_cb(
                                 str(msg.get("skillKey", "")),
                                 str(msg.get("room") or self.room),
+                                float(msg.get("from") or 0) / 1000.0,
+                                float(msg.get("to") or 0) / 1000.0,
                             )
                         elif msg.get("type") == "frame":
                             yield IncomingFrame(

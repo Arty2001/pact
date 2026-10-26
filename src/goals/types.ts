@@ -308,7 +308,22 @@ export type EngineMessage =
    * the frames, something that can see them, and the embeddings to measure
    * any candidate against what this skill normally scores.
    */
-  | { type: "relabel"; room: string; skillKey: string };
+  | {
+      type: "relabel";
+      room: string;
+      skillKey: string;
+      /**
+       * The stretch being complained about, inclusive epoch ms.
+       *
+       * Carried rather than guessed at because the complaint already knows
+       * it: "I was doing that all morning" names a window, and reading the
+       * label off the last ninety seconds instead would describe whatever
+       * is in front of the camera now - which, by the time someone has
+       * finished saying it, is a person talking to a laptop.
+       */
+      from?: number;
+      to?: number;
+    };
 
 /** Perception -> Engine. */
 export type PerceptionMessage =
