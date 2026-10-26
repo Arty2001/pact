@@ -306,6 +306,58 @@ def calibrate(
     return bias, float(temperature)
 
 
+@dataclass(frozen=True, slots=True)
+class Ranked:
+    """One candidate label, measured against real frames."""
+
+    label: str
+    #: Mean cosine inside the window minus mean cosine outside it. Says a
+    #: threshold can exist at all.
+    separation: float
+    #: Standard deviation inside the window. Says whether a FIXED threshold
+    #: can hold, which is the only kind this system has.
+    spread: float
+    #: separation / spread. What actually decides it.
+    ratio: float
+
+
+def rank_candidates(
+    want: np.ndarray,
+    other: np.ndarray,
+    vectors: dict[str, np.ndarray],
+) -> list[Ranked]:
+    """
+    Order candidate labels by how well each separates these frames.
+
+    Pure, and separate from the call that produced the candidates, because
+    this is the part with a right answer. Generating labels needs something
+    that can see; choosing between them is arithmetic over embeddings
+    already recorded, and arithmetic belongs somewhere it can be tested.
+
+    The ratio rather than the separation is the sort key, and the difference
+    is not academic. A label keyed on something that changes - the clip
+    playing inside a video player, rather than the player - scores high on
+    the frames it was read off and swings as the content does. Measured on
+    real frames, the template SigLIP 2's own documentation recommends buys
+    about 5% more separation for 24% more spread: a bigger number and a
+    worse detector. A fixed threshold over time cannot use separation it
+    cannot rely on.
+    """
+    ranked: list[Ranked] = []
+    for label, w in vectors.items():
+        hit, miss = want @ w, other @ w
+        # A spread of exactly zero means every frame in the window embedded
+        # identically, which in practice means one frame. Treated as maximal
+        # uncertainty rather than as a perfect detector: dividing by an
+        # epsilon would hand first place to the least evidence.
+        spread = float(hit.std())
+        separation = float(hit.mean() - miss.mean())
+        ratio = separation / spread if spread > 1e-6 else 0.0
+        ranked.append(Ranked(label, separation, spread, ratio))
+    ranked.sort(key=lambda r: r.ratio, reverse=True)
+    return ranked
+
+
 def _logit(p: float) -> float:
     return float(np.log(p / (1.0 - p)))
 

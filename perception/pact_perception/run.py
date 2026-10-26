@@ -62,6 +62,7 @@ from .skills import (
     calibrate,
     discriminate,
     loosen_for,
+    rank_candidates,
     score,
 )
 from .store import Store
@@ -834,38 +835,34 @@ class Runner:
         if not candidates:
             return
 
-        scored: list[tuple[float, float, str]] = []
-        for text in [*candidates, skill.label]:
-            try:
-                w = self.embedder.encode_text([text])[0]
-            except Exception as err:
-                self.log.error("service.error", detail=f"encode_text failed: {err}")
-                return
-            hit, miss = want @ w, other @ w
-            spread = float(hit.std()) or 1e-6
-            # Margin over what this skill normally sees, divided by how much
-            # it wobbles across the frames it is supposed to match. The ratio
-            # rather than the margin, because a label that separates well and
-            # swings badly holds no fixed threshold.
-            scored.append((float(hit.mean() - miss.mean()) / spread, float(hit.mean()), text))
+        # The label in use is ranked alongside the candidates, not assumed
+        # to be worse. A proposal is only worth making if it beats what is
+        # already there on the same frames by the same measure.
+        texts = [*candidates, skill.label]
+        try:
+            vectors = dict(zip(texts, self.embedder.encode_text(texts), strict=False))
+        except Exception as err:
+            self.log.error("service.error", detail=f"encode_text failed: {err}")
+            return
 
-        scored.sort(reverse=True)
-        best, current = scored[0], next(s for s in scored if s[2] == skill.label)
+        ranked = rank_candidates(want, other, vectors)
+        best = ranked[0]
+        current = next(r for r in ranked if r.label == skill.label)
         self.log.info(
             "probe.refit",
             skill=skill_key,
-            detail="label proposed",
+            detail=f'label proposed: "{best.label}"',
             n_examples=len(candidates),
-            holdout_before=round(current[0], 4),
-            holdout_after=round(best[0], 4),
-            accepted=best[2] != skill.label,
+            holdout_before=round(current.ratio, 4),
+            holdout_after=round(best.ratio, 4),
+            accepted=best.label != skill.label,
         )
         await self.ledger.proposal(
             skill_key,
-            best[2],
-            round(best[0], 4),
-            round(current[0], 4),
-            [c for _, _, c in scored[:4] if c != skill.label],
+            best.label,
+            round(best.ratio, 4),
+            round(current.ratio, 4),
+            [r.label for r in ranked[:4] if r.label != skill.label],
         )
 
     async def _maybe_refit(self, skill: Skill) -> None:
