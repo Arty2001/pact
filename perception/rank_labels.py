@@ -10,11 +10,20 @@ calibration cycle and a session each time.
 
 Two numbers decide it. SEPARATION is the mean cosine on the frames you want
 minus the mean on the frames you do not, and it is what makes a threshold
-possible at all. STABILITY is the standard deviation across the frames you
+possible at all. SPREAD is the standard deviation across the frames you
 want: a label keyed on something that changes - the clip playing inside a
 video player, rather than the player - swings as the content does, and no
 fixed threshold can hold it. A big separation with a big spread is a label
 that works on the first clip and stops.
+
+Their RATIO is the thing to maximise, and it is why the published prompt
+templates are the wrong advice here. "This is a photo of {}." is what SigLIP
+2's own documentation recommends, and measured on real frames it buys about
+5% more separation for 24% more spread - a worse detector. Those templates
+are tuned for cross-class ranking, where every class shares the prefix and
+only the argmax matters. This system asks one question of one skill against
+a fixed threshold over time, where a wobble is a false positive and a shared
+prefix buys nothing.
 """
 
 from __future__ import annotations
@@ -69,12 +78,50 @@ def load(db: Path, a: float, b: float) -> np.ndarray:
     return np.stack([np.frombuffer(blob, dtype=np.float32).reshape(dim) for blob, dim in rows])
 
 
+#: SigLIP 2 is documented as wanting "This is a photo of {}." and is noted as
+#: being more sensitive to phrasing than CLIP. Worth knowing whether that
+#: holds for OUR frames, which are screenshots rather than photographs.
+TEMPLATES: dict[str, str] = {
+    "bare": "{}",
+    "siglip2-doc": "This is a photo of {}.",
+    "clip-classic": "a photo of {}",
+    "screenshot": "a screenshot of {}",
+    "screen-showing": "a computer screen showing {}",
+    "on-screen": "{} on a computer screen",
+}
+
+
+def rank(embedder, pos, neg, named: dict[str, str]) -> list[tuple]:
+    out = []
+    for name, label in named.items():
+        w = embedder.encode_text([label])[0]
+        p_, n_ = pos @ w, neg @ w
+        out.append((float(p_.mean() - n_.mean()), float(p_.std()), name, label, float(p_.mean())))
+    out.sort(key=lambda r: r[0], reverse=True)
+    return out
+
+
+def report(scored: list[tuple], title: str) -> None:
+    print()
+    print(f"  {title}")
+    print(f"  {'':<16} {'separation':>10} {'spread':>8} {'sep/spread':>11}")
+    for sep, sd, name, label, _mean in scored:
+        # The ratio is what decides it. Separation says a threshold can
+        # exist; spread says whether a FIXED one can hold, which is the only
+        # kind this system has.
+        print(f"  {name:<16} {sep:>10.4f} {sd:>8.4f} {sep / sd:>11.2f}   {label[:48]}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--positives", nargs=2, metavar=("FROM", "TO"), required=True)
     ap.add_argument("--negatives", nargs=2, metavar=("FROM", "TO"), required=True)
     ap.add_argument("--store", type=Path, default=Path("traces/perception.db"))
     ap.add_argument("--resolution", type=int, default=384)
+    ap.add_argument(
+        "--template-of",
+        help="A label to wrap in each template, instead of ranking candidates.",
+    )
     args = ap.parse_args()
 
     day = datetime.date.today()
@@ -87,14 +134,12 @@ def main() -> None:
     print(f"  {len(pos)} frames you want, {len(neg)} you do not\n")
     embedder = LocalEmbedder(resolution=args.resolution)
 
-    scored = []
-    for name, label in CANDIDATES.items():
-        w = embedder.encode_text([label])[0]
-        p = pos @ w
-        n = neg @ w
-        scored.append((float(p.mean() - n.mean()), float(p.std()), name, label, float(p.mean())))
+    if args.template_of:
+        named = {k: v.format(args.template_of) for k, v in TEMPLATES.items()}
+        report(rank(embedder, pos, neg, named), f"templates around: {args.template_of!r}")
+        return
 
-    scored.sort(key=lambda r: r[0], reverse=True)
+    scored = rank(embedder, pos, neg, CANDIDATES)
     print(f"  {'':<17} {'separation':>10} {'spread':>8} {'mean':>8}")
     for sep, sd, name, label, mean in scored:
         print(f"  {name:<17} {sep:>10.4f} {sd:>8.4f} {mean:>8.4f}")

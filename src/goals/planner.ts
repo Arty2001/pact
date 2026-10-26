@@ -91,6 +91,8 @@ SHORT AND CONCRETE BEATS LONG AND DESCRIPTIVE. Measured, not assumed: eight cand
 
 The encoder was trained on pictures and their captions, so it knows WHAT A THING IS. It does not reason about layout. Name the kind of thing in the plainest words someone would caption it with, add the one or two features that separate it from its neighbours, and stop. Every further clause about bars, edges, corners and positions dilutes the sentence with terms that match nothing.
 
+A BARE NOUN PHRASE. No "a photo of", no "a screenshot of", no "on a computer screen", and no trailing full stop. This is the opposite of the advice published for models of this family, and it was measured here: the documented wrapper buys about 5% more separation and costs 24% more wobble frame to frame, which is a worse detector. Those templates are built for ranking many classes against one image, where every class carries the same prefix and only the winner matters. This asks one question of one skill against a fixed threshold over time, where a wobble is a false count. Naming the surface in the words - "on a computer screen" - measured worst of everything tried, because the skill already knows its surface and saying it again spends the sentence on nothing.
+
 NEVER WRITE A BRAND OR PRODUCT NAME. Not TikTok, not YouTube, not VS Code, not Instagram, not Excel. The label is embedded as a picture of a scene, and a name is a word about a scene - it spends the sentence on something the detector cannot use and leaves the actual appearance undescribed. "an app's UI elements" is the same mistake twice over: a name, and a detail too small to survive the averaging.
 
 Name the kind of thing instead, plainly:
