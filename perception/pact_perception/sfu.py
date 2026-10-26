@@ -71,13 +71,18 @@ class SfuSubscription:
         self._last_at = time.time()
         #: Why the drain stopped, if it did. Empty while it is running.
         self.ended = ""
+        #: Held, because asyncio keeps only a weak reference to a bare task
+        #: and this one may be collected mid-stream if nothing owns it. Set
+        #: here and not only in the track handler: close() reads it, and a
+        #: subscription that never received a track is exactly the one that
+        #: gets closed - so leaving it unset turned a slow SFU into an
+        #: AttributeError that took the whole reconcile pass down with it,
+        #: stranding every other camera in the same sweep.
+        self._drain_task: asyncio.Task[None] | None = None
 
     @property
     def silent_for(self) -> float:
         return time.time() - self._last_at
-        #: Held, because asyncio keeps only a weak reference to a bare task
-        #: and this one may be collected mid-stream if nothing owns it.
-        self._drain_task: asyncio.Task[None] | None = None
 
     async def connect(self) -> None:
         async with httpx.AsyncClient(base_url=self.hub, timeout=30.0) as http:

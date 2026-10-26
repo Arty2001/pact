@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import io
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -258,6 +259,89 @@ class Teacher:
         )
         return verdict
 
+    def propose(
+        self,
+        frames: list[Image.Image],
+        failing: str,
+        surface: str = "screen",
+        n: int = 5,
+    ) -> list[str]:
+        """
+        Write candidate labels for what these frames actually show.
+
+        This exists because an embedding cannot be turned back into words. A
+        label starts as the encoding of a sentence, and a refit moves the
+        vector away from it - so when a skill stops matching there is no way
+        to ask the vector what it has become, and no way to read off what it
+        SHOULD have said. Something that can see the frames has to write it.
+
+        Generating and choosing are deliberately different jobs. The teacher
+        can describe a screen and cannot know which phrasing separates it
+        from everything else this camera sees; the embeddings know exactly
+        that and cannot write a sentence. So this returns candidates, and
+        the caller scores them against real frames.
+        """
+        if not frames:
+            return []
+
+        px = _FRAME_PX.get(surface, _FRAME_PX["camera"])
+        ask = (
+            f'An automatic detector is looking for "{failing}" and is not '
+            "matching these frames, which the person says it should.\n\n"
+            f"Write {n} different short captions of what is actually in "
+            "these frames, one per line, numbered. Rules:\n"
+            "- Name the kind of thing in the plainest words. No brand or "
+            "product names.\n"
+            "- A bare noun phrase. No 'a photo of', no 'a screenshot of', "
+            "no trailing full stop.\n"
+            "- Describe what FILLS the frame, never a small detail like a "
+            "button, a badge or a tab.\n"
+            "- One still frame must be able to show it. Nothing about "
+            "motion, sequence or intent.\n"
+            "- Vary them: some broader, some more specific. Do not rephrase "
+            "the same sentence five times.\n"
+            "Output only the numbered lines."
+        )
+        content: list[dict[str, Any]] = [{"type": "text", "text": ask}]
+        for frame in frames[:FRAMES_PER_CALL]:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{_jpeg_b64(frame, px)}"},
+                }
+            )
+
+        started = time.perf_counter()
+        try:
+            res = self._client.post(
+                "/chat/completions",
+                json={
+                    "model": self.model,
+                    "max_tokens": _MIN_MAX_TOKENS,
+                    "temperature": 0.6,
+                    "messages": [{"role": "user", "content": content}],
+                },
+            )
+            res.raise_for_status()
+        except Exception as err:
+            self.log.error("service.error", detail=f"teacher propose failed: {err}")
+            return []
+
+        body = res.json()
+        message = (body.get("choices") or [{}])[0].get("message") or {}
+        text = (message.get("content") or "").strip()
+        usage = body.get("usage") or {}
+        self.log.info(
+            "teacher.call",
+            skill=failing,
+            detail="proposing labels",
+            frames=len(frames[:FRAMES_PER_CALL]),
+            prompt_tokens=int(usage.get("prompt_tokens", 0)),
+            completion_tokens=int(usage.get("completion_tokens", 0)),
+            ms=round((time.perf_counter() - started) * 1000.0, 1),
+        )
+        return _candidates(text, n)
+
     def close(self) -> None:
         self._client.close()
 
@@ -296,6 +380,32 @@ def _parse(text: str) -> tuple[str, float, str]:
     if answer == "UNSURE":
         confidence = 0.0
     return answer, confidence, reason or first
+
+
+def _candidates(text: str, n: int) -> list[str]:
+    """
+    Numbered lines, cleaned into labels.
+
+    The house style is enforced here as well as asked for, because a model
+    told not to write a trailing full stop writes one anyway often enough to
+    matter, and a label is compared character for character against the one
+    it replaces.
+    """
+    out: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"^\s*[-*\d]+[.)]?\s*", "", line).strip()
+        line = line.strip("\"'").rstrip(".").strip()
+        line = re.sub(
+            r"^(this is |a photo of |a screenshot of |an image of )", "", line, flags=re.I
+        )
+        if 10 <= len(line) <= 140 and line.lower() not in {c.lower() for c in out}:
+            out.append(line)
+        if len(out) >= n:
+            break
+    return out
 
 
 def _jpeg_b64(image: Image.Image, px: int = 512) -> str:

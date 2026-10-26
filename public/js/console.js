@@ -33,7 +33,7 @@ const TRACE = 200;
  */
 const QUIET_MS = 20000;
 
-let state = { skills: [], goals: [], questions: [], perception: [], rooms: [] };
+let state = { skills: [], goals: [], questions: [], proposals: [], perception: [], rooms: [] };
 let devices = [];
 /** deviceId -> { device, pc, pane, toasts }. Several at once, on purpose. */
 const feeds = new Map();
@@ -226,7 +226,7 @@ function renderAll() {
   announceGoals();
   renderGoals();
   renderSkills();
-  renderQuestions();
+  renderWaiting();
   renderMeta();
   renderNotices();
   renderTally();
@@ -425,8 +425,22 @@ function renderGoals() {
 
       // Fourteen days. A faint cell for a day with nothing, never an empty
       // hole: absence should read as texture rather than a broken chain.
+      //
+      // The padding is the whole point and it was missing, so a goal made
+      // today drew one lone cell and a goal made yesterday drew two. On a
+      // card that is otherwise full width, a stray eleven-pixel square reads
+      // as a rendering fault rather than as a history that has not happened
+      // yet. Days with no occurrence are hollow, so they stay distinct from
+      // a day that exists and is still pending.
       const streak = el.querySelector(".streak");
-      for (const i of [...(g.instances ?? [])].reverse().slice(-14)) {
+      const days = [...(g.instances ?? [])].reverse().slice(-14);
+      for (let k = days.length; k < 14; k++) {
+        const d = document.createElement("i");
+        d.className = "none";
+        d.title = "no occurrence yet";
+        streak.append(d);
+      }
+      for (const i of days) {
         const d = document.createElement("i");
         d.className = i.state;
         d.title = `${i.occurrenceOn}: ${i.state}${i.settledBy ? ` · settled by ${i.settledBy}` : ""}`;
@@ -541,7 +555,13 @@ function renderSkills() {
         <span style="display:flex; gap:6px; align-items:center">
           <span class="chip ${w}">${esc(s.weightState)}</span>
           <span class="chip">${s.sampleHz} Hz</span>
+          <button type="button" class="chip act" title="Work out what this should be looking for">rethink</button>
         </span>`;
+      // Reachable without speaking. The voice path covers the complaint as
+      // it is made, but someone scrolling a list of skills and seeing one
+      // that has never fired is having the same thought, and asking them to
+      // say it out loud to act on it is a worse product.
+      el.querySelector(".act").addEventListener("click", () => rethink(s.key));
       return el;
     }),
   );
@@ -549,10 +569,20 @@ function renderSkills() {
 
 // -------------------------------------------------------------- questions --
 
-function renderQuestions() {
+/**
+ * Everything that needs a person, in one place.
+ *
+ * Questions and label proposals share this card because they are the same
+ * kind of thing from where you are sitting: the system has got as far as it
+ * can on its own and the next step is yours. Splitting them into two cards
+ * would mean the one you are not looking at goes unanswered.
+ */
+function renderWaiting() {
   const qs = state.questions ?? [];
-  $("q-card").hidden = qs.length === 0;
+  const props = state.proposals ?? [];
+  $("q-card").hidden = qs.length === 0 && props.length === 0;
   $("questions").replaceChildren(
+    ...props.map(proposalItem),
     ...qs.map((q) => {
       const el = document.createElement("div");
       el.className = "q-item";
@@ -565,6 +595,68 @@ function renderQuestions() {
       return el;
     }),
   );
+}
+
+/**
+ * A proposed label, with the measurement that argues for it.
+ *
+ * The number is shown rather than hidden behind "I think this is better",
+ * because it is the only reason to believe the proposal at all - it is
+ * separation over spread on frames already recorded, so a person can tell
+ * a real improvement from a model being agreeable. The runners-up are
+ * offered too: the ranking knows which phrase separates these frames, and
+ * you know which one describes what you actually meant.
+ */
+function proposalItem(p) {
+  const times = (p.ratio_after / Math.max(p.ratio_before, 0.01)).toFixed(1);
+  const el = document.createElement("div");
+  el.className = "q-item";
+  el.innerHTML =
+    `<div class="q-prompt">Should <b>${esc(p.skill_key)}</b> look for ` +
+    `“${esc(p.label)}” instead of “${esc(p.was)}”?</div>` +
+    `<div class="q-note">Separates ${times}x better on the frames you just showed me.</div>` +
+    `<div class="q-acts"></div>`;
+  const acts = el.querySelector(".q-acts");
+  acts.append(btn("Use it", "primary", () => decide(p.skill_key, true, p.label)));
+  for (const other of (p.runners_up ?? []).slice(0, 2)) {
+    acts.append(btn(`“${other}”`, "ghost", () => decide(p.skill_key, true, other)));
+  }
+  acts.append(btn("Keep current", "ghost", () => decide(p.skill_key, false)));
+  return el;
+}
+
+/**
+ * Ask what a skill should have been looking for.
+ *
+ * Twenty minutes, because this is pressed about something that has already
+ * been going on - nobody opens the skill list to report the present. The
+ * answer comes back as a proposal in the waiting card, not as a change.
+ */
+async function rethink(skillKey) {
+  const res = await fetch(`/api/engine/skills/${encodeURIComponent(skillKey)}/relabel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ minutesBack: 20 }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.asked) {
+    // The usual reason is that nothing is listening, and saying "thinking"
+    // over silence is the lie that costs the most trust.
+    toast({ kind: "warn", lead: "Can't", line: "no perception worker connected" });
+    return;
+  }
+  toast({ lead: "Looking", line: `at what ${skillKey} should match`, sub: "last 20 minutes" });
+}
+
+async function decide(skillKey, accept, label) {
+  const res = await fetch(`/api/engine/proposals/${encodeURIComponent(skillKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accept, label }),
+  });
+  if (!res.ok) toast({ kind: "warn", lead: "Failed", line: `couldn’t change ${skillKey}` });
+  else if (accept) toast({ lead: "Relabelled", line: skillKey, sub: label });
+  void load();
 }
 
 async function answer(id, value) {

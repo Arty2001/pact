@@ -215,6 +215,32 @@ class Store:
         ).fetchall()
         return [float(r[0]) for r in rows]
 
+    def scored_frames(
+        self, skill_key: str, since: float, until: float, limit: int = 600
+    ) -> np.ndarray:
+        """
+        Embeddings of frames this skill has already scored, in a window.
+
+        Joined through observations rather than taken from `frames` directly,
+        which gets the surface right for free: a skill only ever scores its
+        own surface, so anything it has an observation for is a frame it
+        could legitimately be compared against. The frames table has no
+        surface of its own, and picking negatives from the wrong one would
+        flatter any label at all.
+        """
+        rows = self.db.execute(
+            """SELECT f.embedding, f.dim
+               FROM observations o JOIN frames f ON f.ts = o.ts
+               WHERE o.skill_key = ? AND o.ts BETWEEN ? AND ?
+               ORDER BY o.ts DESC LIMIT ?""",
+            (skill_key, since, until, limit),
+        ).fetchall()
+        if not rows:
+            return np.zeros((0, 0), dtype=np.float32)
+        return np.stack(
+            [np.frombuffer(blob, dtype=np.float32).reshape(dim) for blob, dim in rows]
+        )
+
     def cosines(self, skill_key: str, limit: int = 600) -> np.ndarray:
         rows = self.db.execute(
             "SELECT cos FROM observations WHERE skill_key = ? ORDER BY ts DESC LIMIT ?",

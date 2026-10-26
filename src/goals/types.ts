@@ -298,6 +298,31 @@ export type EngineMessage =
       to?: number;
       label: 0 | 1;
       source: string;
+    }
+  /**
+   * Work out what this skill should have been looking for, and say so.
+   *
+   * Distinct from a label, which is one more piece of evidence toward a
+   * refit that needs tens of them. This asks for the sentence itself to be
+   * reconsidered, which perception can answer from one complaint: it has
+   * the frames, something that can see them, and the embeddings to measure
+   * any candidate against what this skill normally scores.
+   */
+  | {
+      type: "relabel";
+      room: string;
+      skillKey: string;
+      /**
+       * The stretch being complained about, inclusive epoch ms.
+       *
+       * Carried rather than guessed at because the complaint already knows
+       * it: "I was doing that all morning" names a window, and reading the
+       * label off the last ninety seconds instead would describe whatever
+       * is in front of the camera now - which, by the time someone has
+       * finished saying it, is a person talking to a laptop.
+       */
+      from?: number;
+      to?: number;
     };
 
 /** Perception -> Engine. */
@@ -334,4 +359,23 @@ export type PerceptionMessage =
        * that do anything", and a declined fit answers it.
        */
       accepted?: boolean;
+    }
+  /**
+   * A label perception measured as better than the one in use.
+   *
+   * Carried as a proposal rather than a write because a label is the whole
+   * detector: it is what the vector started as, what a refit drifts away
+   * from, and the only part of a skill a person can read. Changing it is a
+   * change to what the system believes, so it arrives with the numbers that
+   * argue for it and waits.
+   */
+  | {
+      type: "proposal";
+      skillKey: string;
+      label: string;
+      /** Separation over spread, for the proposed label and the current one. */
+      ratioAfter: number;
+      ratioBefore: number;
+      /** The ones that lost, so a person can pick a different winner. */
+      runnersUp: string[];
     };

@@ -62,6 +62,7 @@ from .skills import (
     calibrate,
     discriminate,
     loosen_for,
+    rank_candidates,
     score,
 )
 from .store import Store
@@ -69,6 +70,9 @@ from .teacher import FRAMES_PER_CALL, Teacher
 
 #: Background cosines kept per skill, for calibration. Twenty minutes at
 #: 0.5 Hz, which is enough for a stable quantile without unbounded growth.
+#: How far back to read a label off when the complaint named no window.
+_RELABEL_RECENT_S = 90.0
+
 _CALIBRATION_WINDOW = 600
 
 #: Enough samples for a stable high quantile. A skill is not scored before
@@ -184,6 +188,8 @@ class Runner:
         #: Skills that gained a label and may now be worth refitting. Queued
         #: because labels arrive on the socket task and a refit is not quick.
         self._pending_labels: list[str] = []
+        #: (skill, room) pairs waiting for a label to be chosen for them.
+        self._pending_relabel: list[tuple[str, str, float, float]] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
@@ -195,6 +201,7 @@ class Runner:
 
         self.ledger.on_registry(self._on_registry)
         self.ledger.on_label(self._on_label)
+        self.ledger.on_relabel(self._on_relabel)
 
     # ---------------------------------------------------------- the registry
 
@@ -402,6 +409,15 @@ class Runner:
             await self._registry_changed.wait()
             self._registry_changed.clear()
             await self._fill_weights()
+
+    def _on_relabel(self, skill_key: str, room_name: str, start: float, end: float) -> None:
+        """Queued, because choosing a label costs a vision call."""
+        self._pending_relabel.append((skill_key, room_name, start, end))
+
+    async def _flush_relabel(self) -> None:
+        while self._pending_relabel:
+            skill_key, room_name, start, end = self._pending_relabel.pop()
+            await self._relabel(skill_key, room_name, start, end)
 
     async def _flush_labels(self) -> None:
         while self._pending_labels:
@@ -757,6 +773,98 @@ class Runner:
             hops += 1
         return "; ".join(reversed(chain))
 
+    async def _relabel(
+        self, skill_key: str, room_name: str, start: float = 0.0, end: float = 0.0
+    ) -> None:
+        """
+        Work out what this skill SHOULD have said, and propose it.
+
+        Someone saying "that is happening, why are you not counting it" is
+        the most informative thing a person ever tells this system, and
+        until now all it bought was one row in training_examples - a single
+        yes against a vector that needs about forty before a refit beats the
+        sentence it started from. The complaint is immediate; the learning
+        was not.
+
+        So the complaint is answered immediately instead. The teacher can
+        see the frames and writes candidate captions; the embeddings cannot
+        write anything but know exactly which caption separates these frames
+        from everything else this skill has scored. Generating and choosing
+        are different jobs and neither model can do the other one.
+
+        Nothing is applied here. A label is the detector, so replacing one
+        is a change to what the system believes, and that belongs to the
+        person who noticed it was wrong.
+        """
+        skill = self.skills.get(skill_key)
+        room = self.rooms.get(room_name)
+        if skill is None or room is None or self.teacher is None:
+            return
+
+        now = time.time()
+        # The window the complaint named, or the recent past if it named
+        # none. Taking the last ninety seconds regardless was wrong for the
+        # case this feature exists for: "you missed that all morning" is
+        # about this morning, and by the time it has been said the camera is
+        # pointed at someone talking.
+        hi = end if end > 0 else now
+        lo = start if start > 0 and start < hi else hi - _RELABEL_RECENT_S
+        # Against what this skill has scored OUTSIDE that window, which is
+        # the best available picture of "ordinary" on this surface. Taken
+        # from the hour around it rather than all of history, so a label is
+        # chosen to separate today's room from today's room.
+        other = self.store.scored_frames(skill_key, lo - 3600, lo - 60, limit=600)
+        want = self.store.scored_frames(skill_key, lo, hi, limit=200)
+        if want.size == 0 or other.size == 0:
+            self.log.warn(
+                "probe.refit",
+                skill=skill_key,
+                detail="not enough recorded frames either side to choose a label",
+            )
+            return
+
+        # Frames from the window if any are still in hand, newest otherwise.
+        # A complaint about twenty minutes ago has nothing left in the ring
+        # buffer, and showing the teacher the present instead would have it
+        # describe a person talking to a laptop.
+        held = [img for ts, img in room.recent if lo <= ts <= hi]
+        frames = (held or [img for _, img in room.recent])[-FRAMES_PER_CALL:]
+        candidates = await asyncio.to_thread(
+            self.teacher.propose, frames, skill.label, room.surface
+        )
+        if not candidates:
+            return
+
+        # The label in use is ranked alongside the candidates, not assumed
+        # to be worse. A proposal is only worth making if it beats what is
+        # already there on the same frames by the same measure.
+        texts = [*candidates, skill.label]
+        try:
+            vectors = dict(zip(texts, self.embedder.encode_text(texts), strict=False))
+        except Exception as err:
+            self.log.error("service.error", detail=f"encode_text failed: {err}")
+            return
+
+        ranked = rank_candidates(want, other, vectors)
+        best = ranked[0]
+        current = next(r for r in ranked if r.label == skill.label)
+        self.log.info(
+            "probe.refit",
+            skill=skill_key,
+            detail=f'label proposed: "{best.label}"',
+            n_examples=len(candidates),
+            holdout_before=round(current.ratio, 4),
+            holdout_after=round(best.ratio, 4),
+            accepted=best.label != skill.label,
+        )
+        await self.ledger.proposal(
+            skill_key,
+            best.label,
+            round(best.ratio, 4),
+            round(current.ratio, 4),
+            [r.label for r in ranked[:4] if r.label != skill.label],
+        )
+
     async def _maybe_refit(self, skill: Skill) -> None:
         """
         Refit this skill's probe if there are enough labels to try.
@@ -1053,6 +1161,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, room_name, surface
                 )
@@ -1074,6 +1183,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 with Image.open(io.BytesIO(frame.jpeg)) as im:
                     image = im.convert("RGB")
                 await self._on_frame(
@@ -1105,6 +1215,7 @@ class Runner:
             async for frame in source.frames():
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, self.cfg.room, self.cfg.surface
                 )

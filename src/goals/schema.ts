@@ -147,6 +147,27 @@ CREATE TABLE IF NOT EXISTS reminders (
 );
 CREATE INDEX IF NOT EXISTS reminders_due ON reminders (done, at);
 
+-- A better label, measured but not yet applied.
+--
+-- One row per skill, newest replacing older: a proposal is a question
+-- waiting for an answer, and two of them open at once for the same skill is
+-- two answers for one decision. It is kept out of the skills table because
+-- a label IS the detector - writing one straight onto the row would change
+-- what the system believes on the strength of a vision call, and nobody
+-- would see the before and after numbers that justified it.
+CREATE TABLE IF NOT EXISTS proposals (
+  skill_key    TEXT PRIMARY KEY,
+  label        TEXT NOT NULL,
+  -- What it would replace, captured when proposed. The skill's own label
+  -- can change under a pending proposal, and then the numbers below would
+  -- be a comparison against something that is no longer there.
+  was          TEXT NOT NULL,
+  ratio_after  REAL NOT NULL,
+  ratio_before REAL NOT NULL,
+  runners_up   TEXT NOT NULL DEFAULT '[]',
+  at           INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS questions (
   id             TEXT PRIMARY KEY,
   instance_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,

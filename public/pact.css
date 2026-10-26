@@ -543,6 +543,8 @@ a { color: var(--proved-text); }
    goal is actually working. */
 .streak { display: flex; gap: 3px; }
 .streak i { width: 11px; height: 11px; border-radius: 3px; background: var(--sunk); }
+/* A day that has not come round yet: present, but not a record. */
+.streak i.none { background: none; box-shadow: inset 0 0 0 1px var(--hair); }
 .streak i.done { background: var(--proved); }
 .streak i.violated { background: var(--bad); }
 .streak i.active { background: var(--watch); }
@@ -568,6 +570,18 @@ a { color: var(--proved-text); }
 .chip.watching { background: var(--watch-wash);   color: var(--watch-text);   border-color: var(--watch-edge); }
 .chip.pending  { background: var(--pending-wash); color: var(--pending-text); border-color: var(--pending-edge); }
 .chip.bad      { background: var(--bad-wash);     color: var(--bad-text);     border-color: var(--bad-edge); }
+
+/* A chip that does something. Quiet until pointed at: it sits in a row
+   of chips that only report, and a button shouting among them would
+   read as the row's subject rather than one of its controls. */
+.chip.act {
+  cursor: pointer;
+  border-color: var(--line);
+  background: transparent;
+  transition: background .14s ease, color .14s ease;
+}
+.chip.act:hover  { background: var(--watch-wash); color: var(--watch-text); }
+.chip.act:focus-visible { outline: 2px solid var(--watch-edge); outline-offset: 1px; }
 
 /* ---------------------------------------------------------------- skills */
 
@@ -639,6 +653,9 @@ a { color: var(--proved-text); }
 .q-item:last-child { border-bottom: 0; }
 .q-prompt { font-size: 13px; margin-bottom: 10px; }
 .q-acts { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+/* The measurement under a proposal. Quieter than the question but still
+   readable, because it is the whole reason to say yes. */
+.q-note { font-size: 11.5px; color: var(--dimmer); margin: -5px 0 9px; }
 
 /* --------------------------------------------------------------- buttons */
 
