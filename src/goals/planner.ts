@@ -74,7 +74,8 @@ It AVERAGES THE WHOLE FRAME into one summary. It does not look at regions. So an
 
   bad:  "a red notification badge"        (a small detail, averaged away)
   bad:  "a browser tab bar at the top"    (same)
-  good: "a tall vertical video filling the centre of the screen with dark bars either side"
+  bad:  "a black screen with one tall bright rectangle in the middle"  (a composition, not a thing)
+  good: "a short-form vertical video player"
 
 So:
 
@@ -86,12 +87,16 @@ So:
     the screen is asked to settle it:
       good: "Python source code being edited, with def and import statements visible"
 
+SHORT AND CONCRETE BEATS LONG AND DESCRIPTIVE. Measured, not assumed: eight candidate labels scored against 952 frames of a real screen share. "a short-form vertical video player" - five words - separated those frames from others better than a twenty-word description of bars and buttons, and swung a third less from frame to frame. Compositional labels did worst of all: "a mostly black widescreen display with a single narrow upright panel of bright image centred in it" scored 0.0018, which is nothing.
+
+The encoder was trained on pictures and their captions, so it knows WHAT A THING IS. It does not reason about layout. Name the kind of thing in the plainest words someone would caption it with, add the one or two features that separate it from its neighbours, and stop. Every further clause about bars, edges, corners and positions dilutes the sentence with terms that match nothing.
+
 NEVER WRITE A BRAND OR PRODUCT NAME. Not TikTok, not YouTube, not VS Code, not Instagram, not Excel. The label is embedded as a picture of a scene, and a name is a word about a scene - it spends the sentence on something the detector cannot use and leaves the actual appearance undescribed. "an app's UI elements" is the same mistake twice over: a name, and a detail too small to survive the averaging.
 
-Describe appearance, layout, shape, colour and proportion instead:
-  instead of "TikTok"     -> "a tall vertical video filling the centre with dark bars either side and a column of round buttons down the right"
-  instead of "VS Code"    -> "a dark code editor with a file tree down the left and syntax-highlighted code in the centre"
-  instead of "a spreadsheet app" -> "a dense grid of small rectangular cells in pale rows filling the whole screen"
+Name the kind of thing instead, plainly:
+  instead of "TikTok"            -> "a short-form vertical video player"
+  instead of "VS Code"           -> "a dark code editor with syntax-highlighted code"
+  instead of "a spreadsheet app" -> "a spreadsheet of numbers in a grid"
 
 THE CHILD MUST SAY SOMETHING THE GATE DOES NOT. Copying the gate's label onto the child gives two detectors scoring the identical sentence, which costs two embeddings and tells you nothing the gate already did not. The gate names the KIND of screen; the child names the state that counts - what is different about the screen while the thing is actually happening. If you genuinely cannot tell them apart, make the child the more specific of the two, never a copy.
 
