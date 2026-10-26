@@ -5,6 +5,14 @@ import type { ToolCall } from "./nebius.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
 import { sequence, stepsOf } from "./sequence.ts";
 import { plan } from "./planner.ts";
+import {
+  type ComputeState,
+  decide,
+  start as startInstance,
+  statusOf,
+  stop as stopInstance,
+  Tokens,
+} from "../compute.ts";
 import { ADDITIONS, MIGRATIONS, SCHEMA } from "./schema.ts";
 import type {
   EngineMessage,
@@ -132,7 +140,15 @@ export class Engine implements DurableObject {
 
   constructor(
     private ctx: DurableObjectState,
-    private env: { NEBIUS_API_KEY?: string },
+    // Narrowed to what the Engine actually reads, so the bindings it has no
+    // business touching are not even in scope here. The two compute fields
+    // are optional and the feature is simply off without them, which is the
+    // laptop deployment.
+    private env: {
+      NEBIUS_API_KEY?: string;
+      NEBIUS_INSTANCE_ID?: string;
+      NEBIUS_COMPUTE_TOKEN?: string;
+    },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
     for (const statement of [...ADDITIONS, ...MIGRATIONS]) {
@@ -160,6 +176,13 @@ export class Engine implements DurableObject {
 
     if (path === "/state" && request.method === "GET") {
       return Response.json(this.state());
+    }
+
+    // How many cameras are publishing, from the Hub. Idempotent by design:
+    // it is a count, not an event.
+    if (path === "/compute/publishers" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { publishers?: number };
+      return this.onPublishers(Math.max(0, Math.trunc(Number(body.publishers ?? 0))));
     }
 
     if (path === "/plan" && request.method === "POST") return this.plan(request);
@@ -307,6 +330,10 @@ export class Engine implements DurableObject {
    * looking at it.
    */
   async alarm(): Promise<void> {
+    // Before the goals, because this is the one thing on the tick that is
+    // costing money while it waits.
+    await this.tickCompute();
+
     for (const goal of this.goals()) {
       this.ensureInstance(goal);
     }
@@ -1581,6 +1608,144 @@ export class Engine implements DurableObject {
     }));
   }
 
+  /**
+   * How long nothing may want the encoder before its machine is stopped.
+   *
+   * Ten minutes is a compromise with a cold start, not a guess. Bringing the
+   * encoder back costs about a minute of a person watching a blank console,
+   * so stopping eagerly to save a few cents of compute spends the one thing
+   * the product cannot afford to waste. Ten minutes covers a tab refresh, a
+   * walk to the other room, and a phone that locked itself.
+   */
+  private static readonly IDLE_GRACE_MS = 10 * 60_000;
+
+  /** Built lazily, because most deploys have no compute token at all. */
+  private tokens: Tokens | null = null;
+
+  private computeConfig() {
+    return {
+      instanceId: this.env.NEBIUS_INSTANCE_ID,
+      token: this.env.NEBIUS_COMPUTE_TOKEN,
+    };
+  }
+
+  /**
+   * Record the live publisher count and act on it.
+   *
+   * The count is written before anything is decided, so a cloud call that
+   * fails still leaves the Engine knowing the truth - the alarm will act on
+   * it a minute later. Deciding first and recording after would mean a
+   * failed start also forgot why it wanted to start.
+   */
+  private async onPublishers(publishers: number): Promise<Response> {
+    const now = Date.now();
+    const was = this.computeRow();
+    // Only stamped on the transition to nothing-live. Re-stamping on every
+    // notification would push the deadline forward for ever and the machine
+    // would never stop.
+    const idleSince = publishers > 0 ? 0 : was.idle_since || now;
+    this.sql(
+      `INSERT INTO compute (id, publishers, idle_since, state, changed_at)
+       VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET publishers = ?, idle_since = ?, changed_at = ?`,
+      publishers,
+      idleSince,
+      was.state,
+      now,
+      publishers,
+      idleSince,
+      now,
+    );
+    await this.tickCompute();
+    return Response.json({ ok: true, publishers, state: this.computeRow().state });
+  }
+
+  private computeRow(): {
+    publishers: number;
+    idle_since: number;
+    state: ComputeState;
+    changed_at: number;
+  } {
+    const row = this.rows<{
+      publishers: number;
+      idle_since: number;
+      state: string;
+      changed_at: number;
+    }>("SELECT publishers, idle_since, state, changed_at FROM compute WHERE id = 1")[0];
+    return {
+      publishers: row?.publishers ?? 0,
+      idle_since: row?.idle_since ?? 0,
+      state: (row?.state ?? "unknown") as ComputeState,
+      changed_at: row?.changed_at ?? 0,
+    };
+  }
+
+  /**
+   * Ask the cloud what the machine is doing, and start or stop it if needed.
+   *
+   * Called from the publisher notification and from the alarm, because the
+   * two cover different failures. The notification is how a camera gets a
+   * machine quickly; the alarm is how a stop still happens when the last
+   * publisher left and then nothing else ever arrived to ask.
+   */
+  private async tickCompute(): Promise<void> {
+    const cfg = this.computeConfig();
+    if (!cfg.instanceId || !cfg.token) return;
+    this.tokens ??= new Tokens(cfg.token);
+
+    const row = this.computeRow();
+    let state: ComputeState;
+    try {
+      state = await statusOf(cfg, this.tokens);
+    } catch (err) {
+      // Reported, not swallowed, and nothing is attempted on top of it. A
+      // status read that failed means the next decision would be made on a
+      // belief rather than a fact, and the expensive mistakes here are all
+      // made confidently.
+      this.log.warn("service.error", {
+        detail: `could not read encoder instance: ${String(err).slice(0, 120)}`,
+      });
+      return;
+    }
+
+    if (state !== row.state) {
+      this.sql("UPDATE compute SET state = ?, changed_at = ? WHERE id = 1", state, Date.now());
+      this.log.info("service.start", {
+        detail: `encoder machine ${state}`,
+        publishers: row.publishers,
+      });
+      this.broadcastWatchers();
+    }
+
+    const action = decide(state, row.publishers, row.idle_since, Date.now(), Engine.IDLE_GRACE_MS);
+    if (action === "wait") return;
+
+    try {
+      if (action === "start") {
+        await startInstance(cfg, this.tokens);
+        this.sql("UPDATE compute SET state = 'starting', changed_at = ? WHERE id = 1", Date.now());
+        // Said out loud, because the alternative is a minute of silence that
+        // reads exactly like the thing being broken. The console has no other
+        // way to know the difference between "warming up" and "dead".
+        const say = "Bringing the encoder up - about a minute before it can score anything.";
+        this.log.info("service.start", { detail: "encoder machine start requested" });
+        this.toWatchers({ type: "assistant", heard: "", say, ui: { banner: say, tone: "calm" } });
+      } else {
+        await stopInstance(cfg, this.tokens);
+        this.sql("UPDATE compute SET state = 'stopping', changed_at = ? WHERE id = 1", Date.now());
+        this.log.info("service.start", {
+          detail: "encoder machine stopped, nothing publishing",
+          idle_ms: Date.now() - row.idle_since,
+        });
+      }
+      this.broadcastWatchers();
+    } catch (err) {
+      this.log.error("service.error", {
+        detail: `encoder machine ${action} failed: ${String(err).slice(0, 120)}`,
+      });
+    }
+  }
+
   private state() {
     return {
       skills: this.skills(),
@@ -1591,6 +1756,9 @@ export class Engine implements DurableObject {
         ...this.sequenceView(goal),
       })),
       questions: this.openQuestions(),
+      // What the encoder's machine is doing, so a cold start can be shown as
+      // a cold start. Only present when the feature is configured at all.
+      encoder: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().state : null,
       proposals: this.rows<Record<string, unknown>>("SELECT * FROM proposals ORDER BY at DESC").map(
         (r) => ({ ...r, runners_up: JSON.parse(String(r.runners_up ?? "[]")) }),
       ),

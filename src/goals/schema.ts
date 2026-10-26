@@ -155,6 +155,23 @@ CREATE INDEX IF NOT EXISTS reminders_due ON reminders (done, at);
 -- a label IS the detector - writing one straight onto the row would change
 -- what the system believes on the strength of a vision call, and nobody
 -- would see the before and after numbers that justified it.
+-- The encoder's machine: whether it should be up, and since when nothing
+-- has needed it. One row, because there is one encoder.
+--
+-- Held here rather than in the Hub because the Hub's whole virtue is that it
+-- stores nothing - liveness *is* the set of open sockets. The moment it
+-- remembers when something stopped being live, it has state to reconcile and
+-- a clock to be wrong about. The Engine already owns both.
+CREATE TABLE IF NOT EXISTS compute (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  publishers INTEGER NOT NULL DEFAULT 0,
+  -- When the last publisher went away; 0 while one is live. Not a boolean,
+  -- because the grace period needs to know how long, not merely whether.
+  idle_since INTEGER NOT NULL DEFAULT 0,
+  state      TEXT NOT NULL DEFAULT 'unknown',
+  changed_at INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS proposals (
   skill_key    TEXT PRIMARY KEY,
   label        TEXT NOT NULL,

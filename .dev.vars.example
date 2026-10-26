@@ -7,3 +7,17 @@ REALTIME_APP_SECRET=
 # Worker needs this; perception keeps its own copy for the teacher.
 # Key: https://tokenfactory.nebius.com -> API keys
 NEBIUS_API_KEY=
+
+# The encoder's machine, started when a camera arrives and stopped ten
+# minutes after the last one leaves. Both optional: without them the feature
+# is off and the encoder is assumed to be running somewhere already, which is
+# the laptop case.
+#
+# The instance must keep its data on a NETWORK disk, not a local one - local
+# disk contents are not preserved across a stop/start via the Compute API,
+# and that is where the label history lives.
+# Instance id: https://console.nebius.com -> Compute -> the VM
+NEBIUS_INSTANCE_ID=
+# A Nebius API key, or a service account key to exchange. This one can stop a
+# virtual machine, so it is deliberately not the Token Factory key.
+NEBIUS_COMPUTE_TOKEN=

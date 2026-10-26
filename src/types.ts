@@ -51,4 +51,16 @@ export interface Env {
   /** Nebius Token Factory, for the planner. The teacher's copy lives in
    *  perception, because escalation needs frames and frames stay put. */
   NEBIUS_API_KEY?: string;
+  /**
+   * The encoder's machine, started when a camera arrives and stopped when
+   * the last one leaves.
+   *
+   * Separate from NEBIUS_API_KEY on purpose: that one buys tokens from the
+   * inference API and this one can stop a virtual machine, which is a very
+   * different thing to leak. Absent means the feature is off and the
+   * encoder is assumed to be running somewhere already - which is exactly
+   * the laptop case, so nothing breaks by not setting them.
+   */
+  NEBIUS_INSTANCE_ID?: string;
+  NEBIUS_COMPUTE_TOKEN?: string;
 }
