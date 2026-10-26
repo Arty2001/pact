@@ -19,6 +19,7 @@ import { GROUND, F, C, FPS } from "./lib/theme";
 import { loadFonts } from "./lib/fonts";
 
 import { S1Problem } from "./scenes/S1Problem";
+import { SDemo } from "./scenes/SDemo";
 import { S2Say } from "./scenes/S2Say";
 import { S3Breaks } from "./scenes/S3Breaks";
 import { S4Fifty } from "./scenes/S4Fifty";
@@ -36,6 +37,7 @@ loadFonts();
 /** Measured length of each line in public/vo, in seconds. */
 const VO_S = {
   b1: 21.14,
+  demo: 11.54,
   b2: 6.02,
   b3: 29.71,
   b4: 15.77,
@@ -62,6 +64,7 @@ export const LEAD = Math.round(0.6 * FPS);
  */
 const SCENE_F = {
   s1: 690,
+  demo: 400,
   s2: 240,
   s3: 948,
   s4: 528,
@@ -72,7 +75,7 @@ const SCENE_F = {
   s9: 426,
 } as const;
 
-const keys = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"] as const;
+const keys = ["s1", "demo", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"] as const;
 
 /** Start frames, derived so a duration change can never desync the cut. */
 export const CUT = (() => {
@@ -99,7 +102,7 @@ const Beat: React.FC<{
         frame, which is what makes the move read as a camera rather than as
         the whole picture breathing. */}
     <ScenePush dur={span[1]}>{children}</ScenePush>
-    <Chrome chapter={chapter} index={n} total={9} />
+    <Chrome chapter={chapter} index={n} total={10} />
     <Sequence from={LEAD} layout="none">
       <Audio src={staticFile(`vo/${vo}.mp3`)} />
     </Sequence>
@@ -122,28 +125,31 @@ export const Pact: React.FC = () => (
     <Beat span={CUT.s1} vo="b1" chapter="the problem" n={1}>
       <S1Problem />
     </Beat>
-    <Beat span={CUT.s2} vo="b2" chapter="you say it" n={2}>
+    <Beat span={CUT.demo} vo="demo" chapter="running" n={2}>
+      <SDemo />
+    </Beat>
+    <Beat span={CUT.s2} vo="b2" chapter="you say it" n={3}>
       <S2Say />
     </Beat>
-    <Beat span={CUT.s3} vo="b3" chapter="it breaks it down" n={3}>
+    <Beat span={CUT.s3} vo="b3" chapter="it breaks it down" n={4}>
       <S3Breaks />
     </Beat>
-    <Beat span={CUT.s4} vo="b4" chapter="fifty cost what one costs" n={4}>
+    <Beat span={CUT.s4} vo="b4" chapter="fifty cost what one costs" n={5}>
       <S4Fifty />
     </Beat>
-    <Beat span={CUT.s5} vo="b5" chapter="most of it never happens" n={5}>
+    <Beat span={CUT.s5} vo="b5" chapter="most of it never happens" n={6}>
       <S5Most />
     </Beat>
-    <Beat span={CUT.s6} vo="b6" chapter="then it counts" n={6}>
+    <Beat span={CUT.s6} vo="b6" chapter="then it counts" n={7}>
       <S6Counts />
     </Beat>
-    <Beat span={CUT.s7} vo="b7" chapter="when it can't tell" n={7}>
+    <Beat span={CUT.s7} vo="b7" chapter="when it can't tell" n={8}>
       <S7Cant />
     </Beat>
-    <Beat span={CUT.s8} vo="b8" chapter="one system, any goal" n={8}>
+    <Beat span={CUT.s8} vo="b8" chapter="one system, any goal" n={9}>
       <S8Any />
     </Beat>
-    <Beat span={CUT.s9} vo="b9" chapter="the pact" n={9}>
+    <Beat span={CUT.s9} vo="b9" chapter="the pact" n={10}>
       <S9Pact />
     </Beat>
 

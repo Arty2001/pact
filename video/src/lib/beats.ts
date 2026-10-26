@@ -33,6 +33,17 @@ export const PHRASE = {
     perCamera: 16.99,
     almostNothing: 18.06,
   },
+  demo: {
+    wholeThing: 0.0,
+    running: 1.34,
+    giveGoal: 2.08,
+    worksOut: 3.18,
+    startsWatching: 4.88,
+    everyCamera: 6.13,
+    goDoIt: 7.71,
+    fillsItself: 9.19,
+    heresHow: 10.71,
+  },
   b2: {
     youStart: 0.0,
     typeIt: 1.48,
