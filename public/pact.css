@@ -569,6 +569,18 @@ a { color: var(--proved-text); }
 .chip.pending  { background: var(--pending-wash); color: var(--pending-text); border-color: var(--pending-edge); }
 .chip.bad      { background: var(--bad-wash);     color: var(--bad-text);     border-color: var(--bad-edge); }
 
+/* A chip that does something. Quiet until pointed at: it sits in a row
+   of chips that only report, and a button shouting among them would
+   read as the row's subject rather than one of its controls. */
+.chip.act {
+  cursor: pointer;
+  border-color: var(--line);
+  background: transparent;
+  transition: background .14s ease, color .14s ease;
+}
+.chip.act:hover  { background: var(--watch-wash); color: var(--watch-text); }
+.chip.act:focus-visible { outline: 2px solid var(--watch-edge); outline-offset: 1px; }
+
 /* ---------------------------------------------------------------- skills */
 
 .skills { display: flex; flex-direction: column; }

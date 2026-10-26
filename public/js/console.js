@@ -541,7 +541,13 @@ function renderSkills() {
         <span style="display:flex; gap:6px; align-items:center">
           <span class="chip ${w}">${esc(s.weightState)}</span>
           <span class="chip">${s.sampleHz} Hz</span>
+          <button type="button" class="chip act" title="Work out what this should be looking for">rethink</button>
         </span>`;
+      // Reachable without speaking. The voice path covers the complaint as
+      // it is made, but someone scrolling a list of skills and seeing one
+      // that has never fired is having the same thought, and asking them to
+      // say it out loud to act on it is a worse product.
+      el.querySelector(".act").addEventListener("click", () => rethink(s.key));
       return el;
     }),
   );
@@ -603,6 +609,29 @@ function proposalItem(p) {
   }
   acts.append(btn("Keep current", "ghost", () => decide(p.skill_key, false)));
   return el;
+}
+
+/**
+ * Ask what a skill should have been looking for.
+ *
+ * Twenty minutes, because this is pressed about something that has already
+ * been going on - nobody opens the skill list to report the present. The
+ * answer comes back as a proposal in the waiting card, not as a change.
+ */
+async function rethink(skillKey) {
+  const res = await fetch(`/api/engine/skills/${encodeURIComponent(skillKey)}/relabel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ minutesBack: 20 }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.asked) {
+    // The usual reason is that nothing is listening, and saying "thinking"
+    // over silence is the lie that costs the most trust.
+    toast({ kind: "warn", lead: "Can't", line: "no perception worker connected" });
+    return;
+  }
+  toast({ lead: "Looking", line: `at what ${skillKey} should match`, sub: "last 20 minutes" });
 }
 
 async function decide(skillKey, accept, label) {
