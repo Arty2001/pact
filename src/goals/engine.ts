@@ -654,10 +654,14 @@ export class Engine implements DurableObject {
     // sometimes gives the right answer. The planner is told this plainly and
     // still does it, so it is checked here too. `any` means the skill was
     // written with no opinion and matches either.
+    // Through asKey, because the insert below stores the normalised form and
+    // a lookup on the raw one silently finds nothing - which here meant
+    // "no opinion" and skipped the whole check. The normalisation and this
+    // have to agree about what a key is or the guard never fires.
     const surfaceOf = (key: string): string => {
       const row = this.rows<{ surface: string }>(
         "SELECT surface FROM skills WHERE key = ?",
-        key,
+        asKey(key),
       )[0];
       return row?.surface ?? "any";
     };
@@ -687,7 +691,6 @@ export class Engine implements DurableObject {
         );
       }
     }
-
     if ((body.uses ?? []).length > 0 && doing.length === 0) {
       return Response.json(
         {
