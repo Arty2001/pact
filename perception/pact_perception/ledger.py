@@ -71,6 +71,7 @@ class Ledger:
         self._ws: Any = None
         self._skills_cb: Callable[[list[dict[str, Any]]], None] | None = None
         self._label_cb: Callable[[str, float, float, int, str], None] | None = None
+        self._relabel_cb: Callable[[str, str], None] | None = None
 
     def on_registry(self, cb: Callable[[list[dict[str, Any]]], None]) -> None:
         self._skills_cb = cb
@@ -89,6 +90,18 @@ class Ledger:
         missed entirely. A single moment arrives as a span of zero length.
         """
         self._label_cb = cb
+
+    def on_relabel(self, cb: Callable[[str, str], None]) -> None:
+        """
+        A request to work out what a skill should have been looking for.
+
+        Separate from `on_label` because the two do different things with
+        the same complaint. A label is one more row of evidence toward a
+        refit that needs about forty of them; a relabel reconsiders the
+        sentence itself, which is the whole detector, and can act on one
+        person saying so once.
+        """
+        self._relabel_cb = cb
 
     async def connect(self, encoder_id: str, dim: int) -> AsyncIterator[IncomingFrame]:
         """
@@ -138,6 +151,11 @@ class Ledger:
                                 end or at,
                                 int(msg.get("label", 0)),
                                 str(msg.get("source", "human")),
+                            )
+                        elif msg.get("type") == "relabel" and self._relabel_cb is not None:
+                            self._relabel_cb(
+                                str(msg.get("skillKey", "")),
+                                str(msg.get("room") or self.room),
                             )
                         elif msg.get("type") == "frame":
                             yield IncomingFrame(
@@ -226,6 +244,34 @@ class Ledger:
                 "holdoutBefore": holdout_before,
                 "holdoutAfter": holdout_after,
                 "accepted": accepted,
+            }
+        )
+
+    async def proposal(
+        self,
+        skill_key: str,
+        label: str,
+        ratio_after: float,
+        ratio_before: float,
+        runners_up: list[str],
+    ) -> None:
+        """
+        A better label, offered rather than applied.
+
+        Uplinked instead of written locally because the label lives in the
+        control plane, and because this is a change to what the system
+        believes a skill means. The numbers travel with it so the person
+        deciding can see how much better it actually measured, not just
+        that something claimed to be better.
+        """
+        await self._send(
+            {
+                "type": "proposal",
+                "skillKey": skill_key,
+                "label": label,
+                "ratioAfter": ratio_after,
+                "ratioBefore": ratio_before,
+                "runnersUp": runners_up,
             }
         )
 

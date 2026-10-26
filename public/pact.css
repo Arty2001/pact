@@ -639,6 +639,9 @@ a { color: var(--proved-text); }
 .q-item:last-child { border-bottom: 0; }
 .q-prompt { font-size: 13px; margin-bottom: 10px; }
 .q-acts { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+/* The measurement under a proposal. Quieter than the question but still
+   readable, because it is the whole reason to say yes. */
+.q-note { font-size: 11.5px; color: var(--dimmer); margin: -5px 0 9px; }
 
 /* --------------------------------------------------------------- buttons */
 

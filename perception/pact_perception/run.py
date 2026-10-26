@@ -184,6 +184,8 @@ class Runner:
         #: Skills that gained a label and may now be worth refitting. Queued
         #: because labels arrive on the socket task and a refit is not quick.
         self._pending_labels: list[str] = []
+        #: (skill, room) pairs waiting for a label to be chosen for them.
+        self._pending_relabel: list[tuple[str, str]] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
@@ -195,6 +197,7 @@ class Runner:
 
         self.ledger.on_registry(self._on_registry)
         self.ledger.on_label(self._on_label)
+        self.ledger.on_relabel(self._on_relabel)
 
     # ---------------------------------------------------------- the registry
 
@@ -402,6 +405,15 @@ class Runner:
             await self._registry_changed.wait()
             self._registry_changed.clear()
             await self._fill_weights()
+
+    def _on_relabel(self, skill_key: str, room_name: str) -> None:
+        """Queued, because choosing a label costs a vision call."""
+        self._pending_relabel.append((skill_key, room_name))
+
+    async def _flush_relabel(self) -> None:
+        while self._pending_relabel:
+            skill_key, room_name = self._pending_relabel.pop()
+            await self._relabel(skill_key, room_name)
 
     async def _flush_labels(self) -> None:
         while self._pending_labels:
@@ -757,6 +769,87 @@ class Runner:
             hops += 1
         return "; ".join(reversed(chain))
 
+    async def _relabel(self, skill_key: str, room_name: str) -> None:
+        """
+        Work out what this skill SHOULD have said, and propose it.
+
+        Someone saying "that is happening, why are you not counting it" is
+        the most informative thing a person ever tells this system, and
+        until now all it bought was one row in training_examples - a single
+        yes against a vector that needs about forty before a refit beats the
+        sentence it started from. The complaint is immediate; the learning
+        was not.
+
+        So the complaint is answered immediately instead. The teacher can
+        see the frames and writes candidate captions; the embeddings cannot
+        write anything but know exactly which caption separates these frames
+        from everything else this skill has scored. Generating and choosing
+        are different jobs and neither model can do the other one.
+
+        Nothing is applied here. A label is the detector, so replacing one
+        is a change to what the system believes, and that belongs to the
+        person who noticed it was wrong.
+        """
+        skill = self.skills.get(skill_key)
+        room = self.rooms.get(room_name)
+        if skill is None or room is None or self.teacher is None:
+            return
+
+        now = time.time()
+        # What the person is complaining about: the last minute. Against what
+        # this skill has scored for the ten before that, which is the best
+        # available picture of "ordinary" on this surface.
+        want = self.store.scored_frames(skill_key, now - 90, now, limit=200)
+        other = self.store.scored_frames(skill_key, now - 3600, now - 240, limit=600)
+        if want.size == 0 or other.size == 0:
+            self.log.warn(
+                "probe.refit",
+                skill=skill_key,
+                detail="not enough recorded frames either side to choose a label",
+            )
+            return
+
+        frames = [img for _, img in list(room.recent)[-FRAMES_PER_CALL:]]
+        candidates = await asyncio.to_thread(
+            self.teacher.propose, frames, skill.label, room.surface
+        )
+        if not candidates:
+            return
+
+        scored: list[tuple[float, float, str]] = []
+        for text in [*candidates, skill.label]:
+            try:
+                w = self.embedder.encode_text([text])[0]
+            except Exception as err:
+                self.log.error("service.error", detail=f"encode_text failed: {err}")
+                return
+            hit, miss = want @ w, other @ w
+            spread = float(hit.std()) or 1e-6
+            # Margin over what this skill normally sees, divided by how much
+            # it wobbles across the frames it is supposed to match. The ratio
+            # rather than the margin, because a label that separates well and
+            # swings badly holds no fixed threshold.
+            scored.append((float(hit.mean() - miss.mean()) / spread, float(hit.mean()), text))
+
+        scored.sort(reverse=True)
+        best, current = scored[0], next(s for s in scored if s[2] == skill.label)
+        self.log.info(
+            "probe.refit",
+            skill=skill_key,
+            detail="label proposed",
+            n_examples=len(candidates),
+            holdout_before=round(current[0], 4),
+            holdout_after=round(best[0], 4),
+            accepted=best[2] != skill.label,
+        )
+        await self.ledger.proposal(
+            skill_key,
+            best[2],
+            round(best[0], 4),
+            round(current[0], 4),
+            [c for _, _, c in scored[:4] if c != skill.label],
+        )
+
     async def _maybe_refit(self, skill: Skill) -> None:
         """
         Refit this skill's probe if there are enough labels to try.
@@ -1053,6 +1146,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, room_name, surface
                 )
@@ -1074,6 +1168,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 with Image.open(io.BytesIO(frame.jpeg)) as im:
                     image = im.convert("RGB")
                 await self._on_frame(
@@ -1105,6 +1200,7 @@ class Runner:
             async for frame in source.frames():
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, self.cfg.room, self.cfg.surface
                 )

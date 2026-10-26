@@ -33,7 +33,7 @@ const TRACE = 200;
  */
 const QUIET_MS = 20000;
 
-let state = { skills: [], goals: [], questions: [], perception: [], rooms: [] };
+let state = { skills: [], goals: [], questions: [], proposals: [], perception: [], rooms: [] };
 let devices = [];
 /** deviceId -> { device, pc, pane, toasts }. Several at once, on purpose. */
 const feeds = new Map();
@@ -226,7 +226,7 @@ function renderAll() {
   announceGoals();
   renderGoals();
   renderSkills();
-  renderQuestions();
+  renderWaiting();
   renderMeta();
   renderNotices();
   renderTally();
@@ -549,10 +549,20 @@ function renderSkills() {
 
 // -------------------------------------------------------------- questions --
 
-function renderQuestions() {
+/**
+ * Everything that needs a person, in one place.
+ *
+ * Questions and label proposals share this card because they are the same
+ * kind of thing from where you are sitting: the system has got as far as it
+ * can on its own and the next step is yours. Splitting them into two cards
+ * would mean the one you are not looking at goes unanswered.
+ */
+function renderWaiting() {
   const qs = state.questions ?? [];
-  $("q-card").hidden = qs.length === 0;
+  const props = state.proposals ?? [];
+  $("q-card").hidden = qs.length === 0 && props.length === 0;
   $("questions").replaceChildren(
+    ...props.map(proposalItem),
     ...qs.map((q) => {
       const el = document.createElement("div");
       el.className = "q-item";
@@ -565,6 +575,45 @@ function renderQuestions() {
       return el;
     }),
   );
+}
+
+/**
+ * A proposed label, with the measurement that argues for it.
+ *
+ * The number is shown rather than hidden behind "I think this is better",
+ * because it is the only reason to believe the proposal at all - it is
+ * separation over spread on frames already recorded, so a person can tell
+ * a real improvement from a model being agreeable. The runners-up are
+ * offered too: the ranking knows which phrase separates these frames, and
+ * you know which one describes what you actually meant.
+ */
+function proposalItem(p) {
+  const times = (p.ratio_after / Math.max(p.ratio_before, 0.01)).toFixed(1);
+  const el = document.createElement("div");
+  el.className = "q-item";
+  el.innerHTML =
+    `<div class="q-prompt">Should <b>${esc(p.skill_key)}</b> look for ` +
+    `“${esc(p.label)}” instead of “${esc(p.was)}”?</div>` +
+    `<div class="q-note">Separates ${times}x better on the frames you just showed me.</div>` +
+    `<div class="q-acts"></div>`;
+  const acts = el.querySelector(".q-acts");
+  acts.append(btn("Use it", "primary", () => decide(p.skill_key, true, p.label)));
+  for (const other of (p.runners_up ?? []).slice(0, 2)) {
+    acts.append(btn(`“${other}”`, "ghost", () => decide(p.skill_key, true, other)));
+  }
+  acts.append(btn("Keep current", "ghost", () => decide(p.skill_key, false)));
+  return el;
+}
+
+async function decide(skillKey, accept, label) {
+  const res = await fetch(`/api/engine/proposals/${encodeURIComponent(skillKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accept, label }),
+  });
+  if (!res.ok) toast({ kind: "warn", lead: "Failed", line: `couldn’t change ${skillKey}` });
+  else if (accept) toast({ lead: "Relabelled", line: skillKey, sub: label });
+  void load();
 }
 
 async function answer(id, value) {

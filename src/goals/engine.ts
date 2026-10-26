@@ -229,6 +229,26 @@ export class Engine implements DurableObject {
       return Response.json({ ok: true, removedSkills: orphans });
     }
 
+    // Ask perception what this skill SHOULD be looking for. Ordered above
+    // the bare skill patterns because those allow slashes and would swallow
+    // this path whole.
+    const relabelMatch = path.match(/^\/skills\/(.+)\/relabel$/);
+    if (relabelMatch && request.method === "POST") {
+      const key = asKey(decodeURIComponent(relabelMatch[1]));
+      return Response.json({ ok: true, asked: this.askRelabel(key) });
+    }
+
+    const proposalMatch = path.match(/^\/proposals\/(.+)$/);
+    if (proposalMatch && request.method === "POST") {
+      return this.decideProposal(asKey(decodeURIComponent(proposalMatch[1])), request);
+    }
+    if (proposalMatch && request.method === "DELETE") {
+      const key = asKey(decodeURIComponent(proposalMatch[1]));
+      this.sql("DELETE FROM proposals WHERE skill_key = ?", key);
+      this.broadcastWatchers();
+      return Response.json({ ok: true });
+    }
+
     const skillMatch = path.match(/^\/skills\/(.+)$/);
     if (skillMatch && request.method === "DELETE") {
       // A skill a goal still names cannot go: the goal would be left asking
@@ -520,6 +540,67 @@ export class Engine implements DurableObject {
         say,
         ui: { focusSkill: msg.skillKey, banner: say, tone: "calm" },
       });
+    }
+
+    if (msg.type === "proposal") {
+      const was = this.rows<{ label: string }>(
+        "SELECT label FROM skills WHERE key = ?",
+        msg.skillKey,
+      )[0]?.label;
+      if (was === undefined) return;
+
+      // Worse or barely better is not worth asking about. The ratio is
+      // separation over spread on recorded frames, so a tie means the two
+      // labels describe the same frames equally well - and a prompt to
+      // approve a change that measures the same is noise that teaches
+      // people to approve without reading.
+      if (msg.ratioAfter <= msg.ratioBefore * 1.15) {
+        this.log.info("probe.refit", {
+          skill: msg.skillKey,
+          detail: "label proposal declined, no real improvement",
+          holdout_before: msg.ratioBefore,
+          holdout_after: msg.ratioAfter,
+          accepted: false,
+        });
+        return;
+      }
+
+      this.sql(
+        `INSERT OR REPLACE INTO proposals
+           (skill_key, label, was, ratio_after, ratio_before, runners_up, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        msg.skillKey,
+        msg.label,
+        was,
+        msg.ratioAfter,
+        msg.ratioBefore,
+        JSON.stringify(msg.runnersUp ?? []),
+        Date.now(),
+      );
+      this.log.info("probe.refit", {
+        skill: msg.skillKey,
+        detail: `label proposal: "${msg.label}" over "${was}"`,
+        holdout_before: msg.ratioBefore,
+        holdout_after: msg.ratioAfter,
+        accepted: false,
+      });
+
+      // Said out loud, with the ratio in plain words. The person who
+      // complained is owed an answer in the same breath, and "I think I
+      // know what I was missing" is a far better answer than silence while
+      // forty labels accumulate.
+      const times = (msg.ratioAfter / Math.max(msg.ratioBefore, 0.01)).toFixed(1);
+      const say =
+        `I think ${msg.skillKey} should be looking for "${msg.label}" instead. ` +
+        `On the frames you just showed me that separates ${times} times better ` +
+        `than what it has now. Want me to change it?`;
+      this.toWatchers({
+        type: "assistant",
+        heard: "",
+        say,
+        ui: { focusSkill: msg.skillKey, banner: say, tone: "curious" },
+      });
+      this.broadcastWatchers();
     }
   }
 
@@ -1281,6 +1362,19 @@ export class Engine implements DurableObject {
             ? `corrected ${a.happened === true ? 1 : 0} over ${minutes}m by voice`
             : `labelled ${a.happened === true ? 1 : 0} by voice`,
         });
+
+        // "That IS happening and you missed it" is the one complaint worth
+        // acting on twice. The label is evidence toward a refit, which
+        // needs around forty of them before it beats the sentence it
+        // started from - weeks of complaints for a detector that is wrong
+        // today. So the same breath also asks what the label SHOULD have
+        // said, which is answerable from this one window alone.
+        //
+        // Only for a miss. Someone saying a skill fired when it should not
+        // have is not describing what to look for, and re-reading the label
+        // off frames that are explicitly the wrong thing would propose a
+        // detector for them.
+        if (a.happened === true) this.askRelabel(skillKey);
         done.push(`label_frame ${skillKey}`);
       } else if (call.name === "answer_question") {
         const id = String(a.id ?? "");
@@ -1335,6 +1429,96 @@ export class Engine implements DurableObject {
   // --------------------------------------------------------------- reading
 
   /** Everything the UI needs, in one request. */
+  /**
+   * Ask perception to reconsider a skill's label.
+   *
+   * Returns how many workers were asked, because the honest answer to
+   * "why has nothing come back" is usually that nothing was listening.
+   * The room is left to perception: it knows which surface the skill
+   * scores and which of its rooms has frames.
+   */
+  private askRelabel(skillKey: string): number {
+    const room = [...this.lastFrameAt.keys()][0] ?? "";
+    let asked = 0;
+    for (const ws of this.perceptionSockets(room)) {
+      this.send(ws, { type: "relabel", room, skillKey });
+      asked += 1;
+    }
+    if (asked === 0) {
+      this.log.warn("skill.rejected", {
+        skill: skillKey,
+        detail: "relabel asked with no perception worker listening",
+      });
+    }
+    return asked;
+  }
+
+  /**
+   * Apply or discard a proposed label.
+   *
+   * Applying one throws the fitted vector away. That looks wasteful and is
+   * the only correct thing to do: a probe is a logistic regression anchored
+   * to the zero-shot vector of the label it was fitted against, so keeping
+   * a fit across a label change leaves a detector anchored to a sentence
+   * nobody can read any more. Better to start again from a sentence that
+   * measured better than to carry forward a fit for the wrong question.
+   */
+  private async decideProposal(skillKey: string, request: Request): Promise<Response> {
+    const row = this.rows<{ label: string; was: string; ratio_after: number }>(
+      "SELECT label, was, ratio_after FROM proposals WHERE skill_key = ?",
+      skillKey,
+    )[0];
+    if (row === undefined) return Response.json({ error: "no proposal" }, { status: 404 });
+
+    const body = (await request.json().catch(() => ({}))) as { accept?: boolean; label?: string };
+    const accept = body.accept !== false;
+    this.sql("DELETE FROM proposals WHERE skill_key = ?", skillKey);
+
+    if (!accept) {
+      // Logged as loudly as an acceptance. A rejected proposal is evidence
+      // about what this person actually means, and the only place it can be
+      // read later is here.
+      this.log.info("probe.refit", {
+        skill: skillKey,
+        detail: `label proposal rejected, kept "${row.was}"`,
+        accepted: false,
+      });
+      this.broadcastWatchers();
+      return Response.json({ ok: true, label: row.was });
+    }
+
+    // A runner-up may be chosen instead of the winner, because the person
+    // reading the candidates knows things no cosine does.
+    const label = (body.label ?? row.label).trim() || row.label;
+    this.sql(
+      `UPDATE skills SET label = ?, w = NULL, encoder_id = NULL,
+       weight_state = 'pending', n_labels = 0, bias = 0.0, temperature = 1.0
+       WHERE key = ?`,
+      label,
+      skillKey,
+    );
+    this.log.info("probe.refit", {
+      skill: skillKey,
+      detail: `label replaced: "${row.was}" -> "${label}"`,
+      holdout_after: row.ratio_after,
+      accepted: true,
+    });
+    // Perception embeds a skill with no vector on the next registry push,
+    // and recalibrates it from background frames because the calibration
+    // went with the vector.
+    this.pushRegistry();
+    this.broadcastWatchers();
+
+    const say = `Changed ${skillKey} to look for "${label}". It needs a minute of ordinary frames to recalibrate.`;
+    this.toWatchers({
+      type: "assistant",
+      heard: "",
+      say,
+      ui: { focusSkill: skillKey, banner: say, tone: "calm" },
+    });
+    return Response.json({ ok: true, label });
+  }
+
   private state() {
     return {
       skills: this.skills(),
@@ -1345,6 +1529,9 @@ export class Engine implements DurableObject {
         ...this.sequenceView(goal),
       })),
       questions: this.openQuestions(),
+      proposals: this.rows<Record<string, unknown>>("SELECT * FROM proposals ORDER BY at DESC").map(
+        (r) => ({ ...r, runners_up: JSON.parse(String(r.runners_up ?? "[]")) }),
+      ),
       rooms: [...this.lastFrameAt].map(([room, at]) => ({ room, secondsAgo: (Date.now() - at) / 1000 })),
       // Which rooms something is actually scoring, as opposed to which are
       // merely publishing. The difference is the whole of "why is nothing
