@@ -1026,16 +1026,16 @@ async function addFeed(device) {
   if (feeds.has(device.id)) return;
 
   const pane = document.createElement("div");
-  pane.className = "pane";
+  pane.className = "feed";
   const video = document.createElement("video");
   video.autoplay = true;
   video.muted = true;
   video.playsInline = true;
   const name = document.createElement("span");
-  name.className = "pane-name";
+  name.className = "feed-name";
   name.textContent = device.name;
   const toasts = document.createElement("div");
-  toasts.className = "pane-toasts";
+  toasts.className = "feed-toasts";
   pane.append(video, name, toasts);
   pane.addEventListener("click", () => setLead(device.id));
 
