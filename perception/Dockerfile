@@ -18,6 +18,15 @@
 ARG BASE=python:3.12-slim
 FROM ${BASE}
 
+# Which torch to install. The CPU wheel by default, because that is the
+# instance this is meant to run on. `skip` is for a base image that already
+# ships torch built against its own CUDA - a PyTorch CUDA image, say - where
+# installing the CPU wheel over the top silently replaces a working GPU build
+# with one that cannot see the GPU. That failure is invisible: everything
+# loads, nothing errors, and the encoder is simply slower than the machine
+# you paid for.
+ARG TORCH=cpu
+
 # libGL and libglib are OpenCV's runtime deps. Not needed for the relay or
 # folder sources, but a build that works for a local camera and then fails on
 # a webcam is a worse trade than 40 MB.
@@ -35,8 +44,10 @@ WORKDIR /app
 # Dependencies before source, so editing a .py does not re-resolve the wheels.
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir "." \
-    && pip install --no-cache-dir \
-       torch --index-url https://download.pytorch.org/whl/cpu \
+    && if [ "$TORCH" = "cpu" ]; then \
+         pip install --no-cache-dir torch \
+           --index-url https://download.pytorch.org/whl/cpu; \
+       fi \
     && pip install --no-cache-dir \
        "transformers>=4.49,<5" timm einops sentencepiece protobuf
 
