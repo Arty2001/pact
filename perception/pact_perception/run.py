@@ -640,8 +640,23 @@ class Runner:
         # above was still worth taking, because that is what calibration is
         # built from and a sample only taken while the gate is open is a
         # sample of the answer rather than of the background.
+        #
+        # Returning here outright was wrong, and wrong in the worst direction:
+        # a session already open when its gate shut never got another sample,
+        # so it never closed. Twenty minutes of watching, the browser closed,
+        # and the session stays open forever - no `exited`, no duration, no
+        # credit for any of it. Worse, `busy` stays true for that room, so the
+        # motion gate stops gating and every frame goes through the encoder
+        # for the rest of the run.
+        #
+        # A closed gate is not an absence of information. It is the strongest
+        # possible evidence the thing is NOT happening, so it scores zero and
+        # the machine closes the session the ordinary way, through exit_s.
         if not self._chain_open(skill, room):
-            return
+            open_state = room.states.get(skill.key)
+            if open_state is None or open_state.phase == "idle":
+                return
+            value = 0.0
 
         state = room.states.get(skill.key, initial(now))
         nxt, event = step(state, value, now, skill.params)
