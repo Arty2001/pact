@@ -63,4 +63,12 @@ export interface Env {
    */
   NEBIUS_INSTANCE_ID?: string;
   NEBIUS_COMPUTE_TOKEN?: string;
+  /**
+   * Tavily, for finding a target the sentence did not state.
+   *
+   * Optional. Without it the planner picks a number as it always did and
+   * the goal carries no source, which is the honest fallback rather than a
+   * broken one.
+   */
+  TAVILY_API_KEY?: string;
 }

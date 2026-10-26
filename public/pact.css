@@ -1124,3 +1124,8 @@ body.join {
   text-wrap: pretty;
 }
 .said.muted { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+
+/* The citation on a goal whose target came from a search. Quiet: it matters
+   that it is there and checkable, not that it is noticed first. */
+.goal-meta .src { color: var(--watch-text); text-decoration: underline dotted; }
+.goal-meta .src:hover { text-decoration-style: solid; }

@@ -36,6 +36,10 @@ export const ADDITIONS: readonly string[] = [
   "ALTER TABLE transitions ADD COLUMN needed_conf REAL",
   "ALTER TABLE goals ADD COLUMN sequence_window_s REAL NOT NULL DEFAULT 600",
   "ALTER TABLE instances ADD COLUMN nudged_at INTEGER",
+  // Where a target came from, when the sentence did not name one. NULL
+  // for every goal whose number the person stated themselves, which is
+  // most of them.
+  "ALTER TABLE goals ADD COLUMN source_url TEXT",
 ];
 
 export const SCHEMA = `

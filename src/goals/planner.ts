@@ -118,6 +118,8 @@ Order, via sequence_index on a use. Most goals do not need it: "twenty squats" i
 
 Do NOT use sequence_index for the two halves of one repetition. Going down and coming back up is a single counter skill, not two ordered steps; the counter already reads a rise and a fall as one entry.
 
+When GUIDANCE is present the sentence named no number, so one has to be chosen. Use the guidance to choose it and put the URL you used in source_url. Do not cite a source you did not use, and do not invent a number the guidance does not support - a goal this system will hold someone to for weeks is worth getting from somewhere. When GUIDANCE says none, pick a conservative number a beginner would finish, and leave source_url out.
+
 Numbers. If the sentence contains one, it belongs in done_min, and on a counter it belongs in min_count too. "Ten squats" with no min_count settles on the first rep, which is the single commonest way a goal ends up wrong.
 
 Reuse is the point. Call create_skill ONLY when no existing skill fits. Prefer an existing one even if its label is not a perfect match for your phrasing. Never reuse a skill whose surface is wrong for this goal.
@@ -195,6 +197,13 @@ const TOOLS: Tool[] = [
             description: "limit inverts the rule: firing at all is a violation.",
           },
           cadence: { type: "string", enum: ["daily", "weekly:1", "weekly:3", "weekly:5"] },
+          source_url: {
+            type: "string",
+            description:
+              "The URL from GUIDANCE that the number came from. Only when you " +
+              "actually used it. A goal nobody can trace the target of is a " +
+              "number this system invented and then held someone to.",
+          },
           done_min: {
             type: "number",
             description:
@@ -247,6 +256,8 @@ export interface PlanDraft {
   type: string;
   cadence: string;
   doneMin: number | null;
+  /** Where the target came from, when the sentence did not say. */
+  sourceUrl?: string | null;
   windowStart: string | null;
   windowEnd: string | null;
   uses: Array<{
@@ -294,6 +305,32 @@ export interface PlanContext {
   goals: Array<{ key: string; description: string; type: string; uses: string[] }>;
   /** Surfaces publishing right now, as the console sees them. */
   live: string[];
+  /**
+   * Looked-up guidance, when the sentence named no number.
+   *
+   * Absent whenever the person stated a quantity themselves, which is most
+   * of the time. Present it as something the model may use, never as
+   * something it must: guidance about squats in general is weaker evidence
+   * than a sentence about this person in particular.
+   */
+  guidance?: { summary: string; sources: Array<{ title: string; url: string }> };
+}
+
+/**
+ * A cited source, but only one that was actually offered.
+ *
+ * A model asked for a citation will occasionally return a URL that looks
+ * right and was never in the search results - the shape of a reference
+ * rather than a reference. Checking it against what was handed in is cheap
+ * and is the difference between a source and a decoration.
+ */
+export function sourceOf(
+  claimed: unknown,
+  guidance: { sources: Array<{ url: string }> } | undefined,
+): string | null {
+  if (typeof claimed !== "string" || !claimed.startsWith("http")) return null;
+  const offered = new Set((guidance?.sources ?? []).map((s) => s.url));
+  return offered.has(claimed) ? claimed : null;
 }
 
 export async function plan(
@@ -354,6 +391,14 @@ export async function plan(
         `PUBLISHING RIGHT NOW: ${ctx.live.length > 0 ? ctx.live.join(", ") : "nothing"}.`,
         "A goal for a surface nobody is sharing is still worth writing - it",
         "simply will not fire until one is.",
+        "",
+        "GUIDANCE (from a search, because their sentence named no number):",
+        ctx.guidance
+          ? [
+              ctx.guidance.summary,
+              ...ctx.guidance.sources.map((s) => `  source: ${s.title} - ${s.url}`),
+            ].join("\n")
+          : "none - either they gave a number, or nothing useful came back.",
         "",
         `It is ${clock} where they are (${tz}). Turn "evening" or "morning"`,
         "into a real window from that rather than guessing one.",
@@ -483,6 +528,10 @@ export async function plan(
     type: String(goal.type ?? "target"),
     cadence,
     doneMin: goal.done_min === undefined ? null : Number(goal.done_min),
+    // Kept only when it is a real URL. A model asked for a citation will
+    // sometimes produce a plausible-looking one it never read, and an
+    // unverifiable source on screen is worse than an honest blank.
+    sourceUrl: sourceOf(goal.source_url, ctx.guidance),
     windowStart: goal.window_start === undefined ? null : String(goal.window_start),
     windowEnd: goal.window_end === undefined ? null : String(goal.window_end),
     uses,

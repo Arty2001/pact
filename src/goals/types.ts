@@ -135,6 +135,8 @@ export interface Skill {
 }
 
 export interface Goal {
+  /** Where the target came from, when the sentence did not name one. */
+  sourceUrl?: string | null;
   key: string;
   description: string;
   type: GoalType;

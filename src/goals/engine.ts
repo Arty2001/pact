@@ -4,6 +4,7 @@ import type { UiIntent } from "./assistant.ts";
 import type { ToolCall } from "./nebius.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
 import { sequence, stepsOf } from "./sequence.ts";
+import { ground, needsGrounding } from "./ground.ts";
 import { plan } from "./planner.ts";
 import {
   type ComputeState,
@@ -148,6 +149,7 @@ export class Engine implements DurableObject {
       NEBIUS_API_KEY?: string;
       NEBIUS_INSTANCE_ID?: string;
       NEBIUS_COMPUTE_TOKEN?: string;
+      TAVILY_API_KEY?: string;
     },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
@@ -424,6 +426,21 @@ export class Engine implements DurableObject {
       ).map((r) => [r.skill_key, Number(r.n)]),
     );
 
+    // Only when the sentence named no number. Searching to second-guess
+    // somebody's own stated quantity would be useless and rude, and it runs
+    // on every goal anyone writes, so restraint here is a latency decision
+    // as much as a correctness one.
+    const key = this.env.TAVILY_API_KEY;
+    const guidance =
+      key && needsGrounding(sentence) ? ((await ground(key, sentence)) ?? undefined) : undefined;
+    if (guidance) {
+      this.log.info("planner.call", {
+        sentence,
+        detail: `target grounded in ${guidance.sources.length} source(s)`,
+        sources: guidance.sources.map((s) => s.url).join(" "),
+      });
+    }
+
     const started = Date.now();
     try {
       const draft = await plan(this.env.NEBIUS_API_KEY, sentence, {
@@ -441,6 +458,7 @@ export class Engine implements DurableObject {
         // device list - the Hub does - so this comes from the page that is
         // already looking at it rather than through another round trip.
         live: Array.isArray(surfaces) ? surfaces : [],
+        guidance,
       });
       this.log.info("planner.call", {
         sentence,
@@ -851,8 +869,8 @@ export class Engine implements DurableObject {
     this.sql(
       `INSERT OR REPLACE INTO goals
         (key, description, type, cadence, done_min, done_max, window_start, window_end,
-         tz, sequence_window_s, step_value, step_period, step_on, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         tz, sequence_window_s, step_value, step_period, step_on, source_url, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       asKey(body.key),
       body.description,
       body.type ?? "target",
@@ -866,6 +884,7 @@ export class Engine implements DurableObject {
       body.stepValue ?? null,
       body.stepPeriod ?? null,
       body.stepOn ?? null,
+      body.sourceUrl ?? null,
       Date.now(),
     );
 
@@ -2091,6 +2110,9 @@ function toGoal(r: Record<string, unknown>): Goal {
     stepValue: r.step_value === null ? null : Number(r.step_value),
     stepPeriod: r.step_period === null ? null : (r.step_period as Goal["stepPeriod"]),
     stepOn: r.step_on === null ? null : (r.step_on as Goal["stepOn"]),
+    // Nullish rather than null-checked: the column is an ALTER, so a row
+    // written before it existed reads as undefined rather than null.
+    sourceUrl: r.source_url == null ? null : String(r.source_url),
     createdAt: Number(r.created_at),
   };
 }

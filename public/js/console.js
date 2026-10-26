@@ -346,7 +346,15 @@ function renderGoals() {
           <span class="chip ${chipFor(g, today)}">${esc(stateLabel(g, today))}</span>
           <button class="kill" type="button" title="Delete this goal">×</button>
         </div>
-        <div class="goal-meta">${esc(g.cadence)} · ${esc(win)} · <span class="mono">${esc(obs)}</span></div>
+        <div class="goal-meta">${esc(g.cadence)} · ${esc(win)} · <span class="mono">${esc(obs)}</span>${
+          // Only when the sentence named no number and a search found one.
+          // Shown because a target you cannot trace is a number this system
+          // invented and then held you to - and the whole promise here is
+          // that nothing gets asserted without evidence.
+          g.sourceUrl
+            ? ` · <a class="src" href="${esc(g.sourceUrl)}" target="_blank" rel="noopener noreferrer">target from source</a>`
+            : ""
+        }</div>
         <div class="prog"><i style="width:${pct}%"></i></div>
         <div class="uses"></div>
         <div class="streak"></div>`;

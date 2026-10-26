@@ -21,3 +21,9 @@ NEBIUS_INSTANCE_ID=
 # A Nebius API key, or a service account key to exchange. This one can stop a
 # virtual machine, so it is deliberately not the Token Factory key.
 NEBIUS_COMPUTE_TOKEN=
+
+# Tavily, for finding a target the sentence did not state. Optional: without
+# it the planner picks a number as it always did and the goal carries no
+# source. Only called when the sentence has no number in it.
+# Key: https://app.tavily.com -> API keys
+TAVILY_API_KEY=
