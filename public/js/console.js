@@ -1304,7 +1304,14 @@ $("g-plan").addEventListener("click", async () => {
   const res = await fetch("/api/engine/plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sentence, tz: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    body: JSON.stringify({
+      sentence,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      // What is publishing. The planner cannot see the wall, and a goal
+      // drafted for a surface nobody is sharing never fires - it should at
+      // least know that is what it is doing.
+      surfaces: [...new Set(devices.map((d) => (d.kind === "screen" ? "screen" : "camera")))],
+    }),
   });
 
   if (!res.ok) {

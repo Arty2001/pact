@@ -352,12 +352,40 @@ export class Engine implements DurableObject {
         { status: 503 },
       );
     }
-    const { sentence, tz } = (await request.json()) as { sentence?: string; tz?: string };
+    const { sentence, tz, surfaces } = (await request.json()) as {
+      sentence?: string;
+      tz?: string;
+      surfaces?: string[];
+    };
     if (!sentence) return Response.json({ error: "sentence is required" }, { status: 400 });
+
+    // A skill that exists is not the same as a skill that works. One that
+    // has never produced a transition is one whose label matched nothing,
+    // and reusing it inherits that silently - so the count travels with it.
+    const fired = new Map<string, number>(
+      this.rows<{ skill_key: string; n: number }>(
+        "SELECT skill_key, COUNT(*) AS n FROM transitions WHERE kind = 'entered' GROUP BY skill_key",
+      ).map((r) => [r.skill_key, Number(r.n)]),
+    );
 
     const started = Date.now();
     try {
-      const draft = await plan(this.env.NEBIUS_API_KEY, sentence, this.skills(), tz ?? "UTC");
+      const draft = await plan(this.env.NEBIUS_API_KEY, sentence, {
+        tz: tz ?? "UTC",
+        now: Date.now(),
+        catalogue: this.skills(),
+        fired,
+        goals: this.goals().map((g) => ({
+          key: g.key,
+          description: g.description,
+          type: g.type,
+          uses: this.links(g.key).map((l) => `${l.role}:${l.skillKey}`),
+        })),
+        // What the console can see publishing. The Engine does not hold the
+        // device list - the Hub does - so this comes from the page that is
+        // already looking at it rather than through another round trip.
+        live: Array.isArray(surfaces) ? surfaces : [],
+      });
       this.log.info("planner.call", {
         sentence,
         created: draft.created,

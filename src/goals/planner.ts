@@ -32,6 +32,9 @@ const PLANNER_MODEL = "nvidia/nemotron-3-super-120b-a12b";
  */
 const MAX_TURNS = 6;
 
+/** A newline, named, because an inline one keeps getting mangled. */
+const SEP = String.fromCharCode(10);
+
 const SYSTEM = `You turn a plain sentence about a habit or goal into skills and a goal rule for a tracker that watches either a ROOM CAMERA or a SHARED SCREEN.
 
 A skill is a single visual question about one frame. Its label becomes the detector directly, with no training, so the label must describe what would LITERALLY BE SEEN. Never an intention, a feeling, or anything requiring memory of earlier frames.
@@ -272,34 +275,91 @@ export interface PlanDraft {
   usage: { prompt: number; completion: number; reasoning: number };
 }
 
+/**
+ * What the planner can see besides the sentence.
+ *
+ * It used to see a list of skills and nothing else, which left it guessing
+ * at three things it had no way to know: whether a goal like this already
+ * exists, whether a skill it is about to reuse has ever actually fired, and
+ * whether the surface it is writing for is even connected. All three produce
+ * a draft that looks right and cannot work.
+ */
+export interface PlanContext {
+  tz: string;
+  /** Epoch ms, for working out what "this evening" means where the user is. */
+  now: number;
+  catalogue: Skill[];
+  /** skillKey -> how many transitions it has ever produced. */
+  fired: Map<string, number>;
+  goals: Array<{ key: string; description: string; type: string; uses: string[] }>;
+  /** Surfaces publishing right now, as the console sees them. */
+  live: string[];
+}
+
 export async function plan(
   apiKey: string,
   sentence: string,
-  catalogue: Skill[],
-  tz: string,
+  ctx: PlanContext,
 ): Promise<PlanDraft> {
+  const { catalogue, tz } = ctx;
   const listing =
     catalogue.length === 0
       ? "(empty - this is the first goal, so new skills are expected)"
-      // key, kind, SURFACE, label. The surface is in here because without it
-      // the model reuses a camera gate on a screen goal and has no way to
-      // know it has done anything wrong.
+      // key, kind, SURFACE, health, parent, label. The surface is in here
+      // because without it the model reuses a camera gate on a screen goal
+      // and has no way to know it has done anything wrong.
       : catalogue
-          .map(
-            (s) =>
-              `  ${s.key}  ${s.kind}  ${s.surface}  "${s.label}"${s.room ? `  [${s.room}]` : ""}`,
-          )
+          .map((s) => {
+            // Fired count and parent, because "exists" is not the same as
+            // "works". A skill that has never fired is one whose label did
+            // not match anything, and reusing it inherits that silently -
+            // whereas a well-used one brings a calibration with it.
+            const fired = ctx.fired.get(s.key) ?? 0;
+            const health = fired === 0 ? "NEVER FIRED" : `fired ${fired}x`;
+            const under = s.dependsOn ? `  under ${s.dependsOn}` : "";
+            return `  ${s.key}  ${s.kind}  ${s.surface}  ${health}${under}  "${s.label}"`;
+          })
           .join("\n");
+
+  // What is already being tracked, so a near-duplicate is recognised rather
+  // than drafted again under a different key - and so a goal sharing a gate
+  // with an existing one can reuse the whole subtree beneath it.
+  const tracked =
+    ctx.goals.length === 0
+      ? "(none yet)"
+      : ctx.goals
+          .map((g) => `  ${g.key}  ${g.type}  "${g.description}"  [${g.uses.join(" ")}]`)
+          .join(SEP);
+
+  const clock = new Date(ctx.now).toLocaleString("en-GB", {
+    timeZone: tz,
+    weekday: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
   const nebius = new Nebius(apiKey);
   const messages: Array<Record<string, unknown>> = [
     { role: "system", content: SYSTEM },
     {
       role: "user",
-      content:
-        `EXISTING SKILLS - reuse whenever one fits:\n${listing}\n\n` +
-        `The person's timezone is ${tz}.\n\n` +
+      content: [
+        "EXISTING SKILLS - reuse whenever one fits, but never one marked",
+        "NEVER FIRED unless nothing else is close:",
+        listing,
+        "",
+        "GOALS ALREADY TRACKED:",
+        tracked,
+        "",
+        `PUBLISHING RIGHT NOW: ${ctx.live.length > 0 ? ctx.live.join(", ") : "nothing"}.`,
+        "A goal for a surface nobody is sharing is still worth writing - it",
+        "simply will not fire until one is.",
+        "",
+        `It is ${clock} where they are (${tz}). Turn "evening" or "morning"`,
+        "into a real window from that rather than guessing one.",
+        "",
         `Their goal: "${sentence}"`,
+      ].join("\n"),
     },
   ];
 
