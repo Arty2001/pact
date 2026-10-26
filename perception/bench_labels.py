@@ -110,11 +110,15 @@ def main() -> None:
         )
         print(f"  {key:<14}{row}   {verdict}")
 
-    print(
-        "\n  The diagonal is the test. A label that scores highest on a scene\n"
-        "  it does not name is a detector for that other scene, and no\n"
-        "  threshold fixes it."
-    )
+    print()
+    print("  Read it one surface at a time. A skill only ever scores frames")
+    print("  from its own surface, so a camera label losing to a screen scene")
+    print("  costs nothing: it will never see one. The margin that matters is")
+    print("  over the nearest scene on the SAME surface.")
+    print()
+    print("  Scene names are what was in front of the camera, not which skill")
+    print("  was running. Grouping by the running skill calls a room a bathroom")
+    print("  because a bathroom skill happened to be loaded.")
 
 
 if __name__ == "__main__":
