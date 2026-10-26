@@ -56,6 +56,15 @@ export interface Brief {
   /** Newest last, already windowed by the caller. */
   recent: Transition[];
   questions: Array<{ id: string; skillKey: string; prompt: string }>;
+  /**
+   * Label changes measured and waiting on a yes.
+   *
+   * In here because the question was asked out loud and the answer comes
+   * back out loud. Without it, "yes, do that" arrives with nothing to
+   * attach to and the model either invents a label or talks about having
+   * changed something it did not touch.
+   */
+  proposals: Array<{ skillKey: string; label: string; was: string; times: number }>;
   room: string | null;
 }
 
@@ -72,6 +81,8 @@ Use label_frame the moment the user says whether something did or did not happen
 The most valuable thing anyone ever tells you is that you MISSED something: "I was reading that for half an hour and you never counted it". Treat that as a correction over a STRETCH of time, and pass minutes_back covering it. Take the user's own words for the length - "just now" is about 5, "for a while" about 15, "all morning" about 120 - and if they give no clue at all, ask how long before labelling. Guessing the stretch wrong teaches the skill pictures of something else entirely.
 
 That correction is worth far more than a single yes. One frame teaches almost nothing; twenty minutes is hundreds of examples, which is the quantity a skill actually needs before it stops being generic. So when someone says you missed something, take the correction, then tell them what it changed.
+
+When someone says you missed something, two things happen: the stretch becomes labels, and the system re-reads what that skill SHOULD be looking for off the frames themselves. If that produces a better wording it appears under LABEL CHANGES WAITING ON A YES, and you will have offered it out loud. If the user then agrees - "yes", "do it", "sounds right" - call apply_label. If they decline, call apply_label with accept false; do not leave it hanging. Never claim to have changed a label without calling it.
 
 answer_question is ONLY for an id listed under OPEN QUESTIONS. If that list says none, there is no question to answer and you must not invent an id - use label_frame instead, or just reply.
 
@@ -112,6 +123,24 @@ const TOOLS: Tool[] = [
           },
         },
         required: ["skill_key", "happened", "at"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "apply_label",
+      description:
+        "Accept or decline a label change listed under LABEL CHANGES " +
+        "WAITING ON A YES. Only for one listed there - a label is the whole " +
+        "detector, so there is nothing to apply unless it has been measured.",
+      parameters: {
+        type: "object",
+        properties: {
+          skill_key: { type: "string" },
+          accept: { type: "boolean", description: "false keeps the current label" },
+        },
+        required: ["skill_key", "accept"],
       },
     },
   },
@@ -230,6 +259,15 @@ export function brief(b: Brief): string {
     ? b.questions.map((q) => `- ${q.id} ${q.skillKey}: ${q.prompt}`).join("\n")
     : "- none";
 
+  const pending = b.proposals.length
+    ? b.proposals
+        .map(
+          (p) =>
+            `- ${p.skillKey}: "${p.was}" -> "${p.label}" (separates ${p.times.toFixed(1)}x better)`,
+        )
+        .join("\n")
+    : "- none";
+
   return [
     `Local time ${clock}. Camera: ${b.room ?? "none publishing"}.`,
     "",
@@ -243,6 +281,9 @@ export function brief(b: Brief): string {
     "",
     "OPEN QUESTIONS",
     asks,
+    "",
+    "LABEL CHANGES WAITING ON A YES",
+    pending,
   ].join("\n");
 }
 

@@ -1039,6 +1039,7 @@ export class Engine implements DurableObject {
             skillKey: q.skillKey,
             prompt: q.prompt,
           })),
+          proposals: this.pendingProposals(),
           room: [...this.lastFrameAt.keys()][0] ?? null,
         });
         log.info("question.asked", { detail: "unprompted", prompt: turn.say });
@@ -1273,6 +1274,7 @@ export class Engine implements DurableObject {
           skillKey: q.skillKey,
           prompt: q.prompt,
         })),
+        proposals: this.pendingProposals(),
         room: [...this.lastFrameAt.keys()][0] ?? null,
       });
     } catch (err) {
@@ -1388,6 +1390,20 @@ export class Engine implements DurableObject {
         // being in front of the camera the moment someone turns to speak.
         if (a.happened === true) this.askRelabel(skillKey, from, to);
         done.push(`label_frame ${skillKey}`);
+      } else if (call.name === "apply_label") {
+        // The same method the button calls, so a spoken yes and a clicked
+        // one cannot diverge. A model that invents a skill key changes
+        // nothing, which is the right outcome: there is nothing to apply
+        // unless something measured it.
+        const key = asKey(String(a.skill_key ?? ""));
+        if (this.decide(key, a.accept !== false) === null) {
+          log.warn("skill.rejected", {
+            skill: key,
+            detail: "apply_label with no proposal waiting",
+          });
+          continue;
+        }
+        done.push(`apply_label ${key}`);
       } else if (call.name === "answer_question") {
         const id = String(a.id ?? "");
         const value = String(a.value ?? "");
@@ -1476,14 +1492,26 @@ export class Engine implements DurableObject {
    * measured better than to carry forward a fit for the wrong question.
    */
   private async decideProposal(skillKey: string, request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => ({}))) as { accept?: boolean; label?: string };
+    const label = this.decide(skillKey, body.accept !== false, body.label);
+    if (label === null) return Response.json({ error: "no proposal" }, { status: 404 });
+    return Response.json({ ok: true, label });
+  }
+
+  /**
+   * The decision itself, reachable from a click or from a spoken yes.
+   *
+   * One method rather than two because the two must not diverge: a label
+   * applied by voice and a label applied by button have to leave the same
+   * row, the same log line and the same recalibration behind. Returns the
+   * label now in force, or null if there was nothing to decide.
+   */
+  private decide(skillKey: string, accept: boolean, chosen?: string): string | null {
     const row = this.rows<{ label: string; was: string; ratio_after: number }>(
       "SELECT label, was, ratio_after FROM proposals WHERE skill_key = ?",
       skillKey,
     )[0];
-    if (row === undefined) return Response.json({ error: "no proposal" }, { status: 404 });
-
-    const body = (await request.json().catch(() => ({}))) as { accept?: boolean; label?: string };
-    const accept = body.accept !== false;
+    if (row === undefined) return null;
     this.sql("DELETE FROM proposals WHERE skill_key = ?", skillKey);
 
     if (!accept) {
@@ -1496,12 +1524,12 @@ export class Engine implements DurableObject {
         accepted: false,
       });
       this.broadcastWatchers();
-      return Response.json({ ok: true, label: row.was });
+      return row.was;
     }
 
     // A runner-up may be chosen instead of the winner, because the person
     // reading the candidates knows things no cosine does.
-    const label = (body.label ?? row.label).trim() || row.label;
+    const label = (chosen ?? row.label).trim() || row.label;
     this.sql(
       `UPDATE skills SET label = ?, w = NULL, encoder_id = NULL,
        weight_state = 'pending', n_labels = 0, bias = 0.0, temperature = 1.0
@@ -1528,7 +1556,29 @@ export class Engine implements DurableObject {
       say,
       ui: { focusSkill: skillKey, banner: say, tone: "calm" },
     });
-    return Response.json({ ok: true, label });
+    return label;
+  }
+
+  /**
+   * Label changes measured and waiting on a yes, for the assistant.
+   *
+   * The times figure is computed here rather than carried, because the
+   * ratio is only meaningful against the label it would replace and the
+   * model should never be handed two numbers to divide out loud.
+   */
+  private pendingProposals() {
+    return this.rows<{
+      skill_key: string;
+      label: string;
+      was: string;
+      ratio_after: number;
+      ratio_before: number;
+    }>("SELECT * FROM proposals ORDER BY at DESC").map((r) => ({
+      skillKey: r.skill_key,
+      label: r.label,
+      was: r.was,
+      times: r.ratio_after / Math.max(r.ratio_before, 0.01),
+    }));
   }
 
   private state() {
