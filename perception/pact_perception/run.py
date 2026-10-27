@@ -4,10 +4,18 @@ The loop. Frames in, state transitions out.
 Everything else in this package is a piece that can be tested on its own;
 this is the only file that knows the order they go in:
 
-    source -> motion gate -> embed -> score every eligible skill
+    source -> motion gate -> embed per view -> score every eligible skill
            -> state machine per skill -> transition up to the Engine
 
-Three things here are less obvious than the pipeline.
+Four things here are less obvious than the pipeline.
+
+The encode is once per distinct view, not once per frame and not once per
+skill. A skill declares which picture of a frame it is asking about - the
+frame as it arrived, or the frame with its content averaged away - and skills
+sharing a view share an encode. In the ordinary case every eligible skill
+wants the same one and this is exactly the single encode it always was; the
+second is paid only when some skill on this surface genuinely asks a
+different question of the same pixels.
 
 The sample rate is the maximum over whatever is currently eligible, not a
 constant. A gate asking "is anyone in this room" is fine twice a minute; a
@@ -48,7 +56,7 @@ from PIL import Image
 
 from . import sources
 from .config import Config, load
-from .embed import Embedder, LocalEmbedder, RemoteEmbedder, StubEmbedder
+from .embed import Embedder, LocalEmbedder, RemoteEmbedder, StubEmbedder, as_view
 from .gate import MotionGate
 from .ledger import Ledger, decode_weights
 from .log import Logger
@@ -119,6 +127,27 @@ def rebanded_keys(
             was.params.enter_conf != now.params.enter_conf
             or was.params.exit_conf != now.params.exit_conf
         )
+    }
+
+
+def reviewed_keys(before: Mapping[str, Skill], after: Mapping[str, Skill]) -> set[str]:
+    """
+    Keys that changed which picture of a frame they are asking about.
+
+    The same consequence as a moved band, reached a different way, and worth
+    naming separately because the remedy is larger. A moved band leaves the
+    cosines in hand still valid - they were measured on the right picture, and
+    only the threshold solved from them is wrong. A changed view does not:
+    those cosines came from a different image, so the history has to go too,
+    not merely the fit solved from it.
+
+    The weight vector survives either way. It is an embedded sentence, and a
+    sentence does not know which view will be dotted against it.
+    """
+    return {
+        key
+        for key, now in after.items()
+        if (was := before.get(key)) is not None and was.view != now.view
     }
 
 
@@ -237,6 +266,7 @@ class Runner:
                 kind=kind,
                 label=str(row.get("label", "")),
                 surface=str(row.get("surface") or "any"),
+                view=str(row.get("view") or "full"),
                 w=decode_weights(encoded, dim) if encoded else None,
                 bias=float(row.get("bias", 0.0)),
                 temperature=float(row.get("temperature", 1.0)),
@@ -249,19 +279,32 @@ class Runner:
             )
 
         rebanded = rebanded_keys(self.skills, fresh)
+        reviewed = reviewed_keys(self.skills, fresh)
         self.skills = fresh
         for room in self.rooms.values():
             for key in list(room.states):
                 if key not in fresh:
                     del room.states[key]
-            for key in rebanded:
+            for key in rebanded | reviewed:
                 room.calibrated.discard(key)
                 room.refits.pop(key, None)
+            for key in reviewed:
+                # Unlike a moved band, the samples themselves are no longer
+                # evidence: they are cosines against a picture this skill has
+                # stopped asking about, and refitting from them would aim the
+                # new thresholds at the old view's background.
+                room.history.pop(key, None)
         if rebanded:
             self.log.info(
                 "probe.refit",
                 detail="band moved, recalibrating",
                 skills=len(rebanded),
+            )
+        if reviewed:
+            self.log.info(
+                "probe.refit",
+                detail="view changed, recalibrating from scratch",
+                skills=len(reviewed),
             )
 
         # Anything with no vector, or one fitted elsewhere, needs its label
@@ -307,7 +350,7 @@ class Runner:
             return
 
         if end - start < 1.0:
-            frame_ts = self.store.nearest_frame_ts(start, tolerance=30.0)
+            frame_ts = self.store.nearest_frame_ts(start, tolerance=30.0, view=skill.view)
             if frame_ts is None:
                 self.log.warn(
                     "question.answered",
@@ -322,10 +365,10 @@ class Runner:
             self._pending_labels.append(skill_key)
             return
 
-        self._label_span(skill_key, start, end, label, source)
+        self._label_span(skill_key, start, end, label, source, skill.view)
 
     def _label_span(
-        self, skill_key: str, start: float, end: float, label: int, source: str
+        self, skill_key: str, start: float, end: float, label: int, source: str, view: str = "full"
     ) -> None:
         """
         Label every frame in a stretch, and find counter-examples to match.
@@ -343,7 +386,13 @@ class Runner:
         quietly corrupted skill.
         """
         already = self.store.labelled_ts(skill_key)
-        inside = [ts for ts in self.store.frames_between(start, end) if ts not in already]
+        # In this skill's view only. A moment encoded in both views is one
+        # moment, and labelling it twice would put the same answer in front of
+        # the fit twice over while the second copy points at a vector this
+        # skill has never been scored against.
+        inside = [
+            ts for ts in self.store.frames_between(start, end, view=view) if ts not in already
+        ]
         if not inside:
             self.log.warn(
                 "question.answered",
@@ -367,7 +416,9 @@ class Runner:
         # the labels every other path collected.
         opposite = [
             ts
-            for ts in self.store.quiet_frames(skill_key, start, end, limit=len(inside) * 2)
+            for ts in self.store.quiet_frames(
+                skill_key, start, end, limit=len(inside) * 2, view=view
+            )
             if ts not in already
         ][: len(inside)]
         for ts in opposite:
@@ -555,18 +606,41 @@ class Runner:
             )
             return self.cfg.idle_hz
 
-        embedding = self.embedder.encode_image(image)
-        self.log.debug("embed.done", ms=round(embedding.ms, 1), dim=embedding.dim)
+        eligible = self._eligible(room, surface)
+        # One encode per DISTINCT view, not per skill. Almost always that is
+        # one: every camera skill asks about the frame as it arrived, and so
+        # does every screen skill whose question is about the content. A
+        # second encode is paid only when some skill on this surface genuinely
+        # asks a different question of the same pixels, and then it is not
+        # optional - a layout skill scored against a sharp frame is scored
+        # against the noise it exists to throw away.
+        #
+        # An empty registry still encodes once. The vector is what a label is
+        # later fitted against, and a frame nobody scored today may be the
+        # counter-example a correction needs tomorrow.
+        views = {skill.view for skill in eligible} or {"full"}
+        embeddings: dict[str, np.ndarray] = {}
+        for view in sorted(views):
+            embedding = self.embedder.encode_image(as_view(image, view))
+            embeddings[view] = embedding.vector
+            self.log.debug(
+                "embed.done", ms=round(embedding.ms, 1), dim=embedding.dim, view=view
+            )
+            # The embedding is what a label is eventually fitted against, and
+            # it is stored under the view that produced it: two vectors at one
+            # instant are two different measurements, and a store that could
+            # not tell them apart would hand a layout skill a sharp frame's
+            # vector and call it the same moment.
+            self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id, view)
 
-        # Both of these exist for the labelling loop rather than for
-        # debugging. The image is what a teacher call sends; the embedding is
-        # what a label is eventually fitted against. Discarding either would
-        # mean an answer taught the system nothing.
+        # The frame as it arrived, not as any skill chose to see it. This is
+        # what a teacher call sends, and the teacher's whole advantage is that
+        # it CAN read a screen - handing it the averaged version would destroy
+        # the only thing it is better at than the encoder.
         room.recent.append((now, image))
-        self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id)
 
-        for skill in self._eligible(room, surface):
-            await self._score_one(skill, embedding.vector, now, room, room_name)
+        for skill in eligible:
+            await self._score_one(skill, embeddings[skill.view], now, room, room_name)
 
         # One snapshot per frame, capped: a console redraws at human speed,
         # and 8 Hz of socket traffic per camera buys nothing a person can see.
@@ -634,6 +708,7 @@ class Runner:
             value,
             float(np.dot(np.atleast_2d(skill.w)[0], e)) if skill.w is not None else 0.0,
             state_now.phase if state_now else "idle",
+            skill.view,
         )
 
         # An uncalibrated skill must not drive its state machine. With bias at
@@ -725,7 +800,7 @@ class Runner:
         if label is not None:
             # Attach the label to the frame it describes, not to the moment
             # the answer came back - the two are seconds apart.
-            frame_ts = self.store.nearest_frame_ts(now, tolerance=30.0)
+            frame_ts = self.store.nearest_frame_ts(now, tolerance=30.0, view=skill.view)
             if frame_ts is not None:
                 self.store.label(skill.key, frame_ts, label, "vlm")
                 await self._maybe_refit(skill)
@@ -876,7 +951,7 @@ class Runner:
         """
         if skill.w is None:
             return
-        examples = self.store.examples(skill.key, self.embedder.encoder_id)
+        examples = self.store.examples(skill.key, self.embedder.encoder_id, skill.view)
         if len(examples) < MIN_EXAMPLES:
             return
 

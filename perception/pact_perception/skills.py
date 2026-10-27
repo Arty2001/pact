@@ -61,6 +61,21 @@ SCORED_KINDS = frozenset({"gate", "object", "action", "counter", "discriminator"
 #: distinction is carried rather than inferred.
 SURFACES = frozenset({"camera", "screen", "any"})
 
+#: Which picture of a frame a skill is asking about. "full" is the frame as
+#: it arrived. "layout" is the frame with its content averaged away, leaving
+#: only large-scale structure - see `embed.layout_only`, which is where the
+#: transform and the measurements behind it live.
+#:
+#: This exists because on a screen the two questions genuinely differ. "Is
+#: this a short-form video player" is answered by the chrome, and the clip
+#: inside it is noise that changes every few seconds and dominates the
+#: embedding - two Shorts frames with different clips in them measured 21.7
+#: apart raw and 0.73 apart under `layout`. A score that swings that far is a
+#: score no fixed threshold can sit under. "Full" stays the default because
+#: it is right for every camera skill and for any screen skill whose question
+#: is about what is on the screen rather than what the screen is.
+VIEWS = frozenset({"full", "layout"})
+
 
 def applies_to(skill: Skill, surface: str) -> bool:
     """
@@ -109,6 +124,11 @@ class Skill:
     label: str
     #: "camera", "screen", or "any". See `applies_to`.
     surface: str = "any"
+    #: "full" or "layout". See `VIEWS`. A weight vector is view-independent -
+    #: it is an embedded sentence - but `bias` and `temperature` are not: they
+    #: are fitted from the cosines a particular view produced, so changing
+    #: this invalidates the calibration exactly as moving the band does.
+    view: str = "full"
     w: np.ndarray | None = None
     bias: float = 0.0
     temperature: float = 1.0

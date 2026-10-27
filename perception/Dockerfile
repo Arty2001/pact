@@ -51,7 +51,7 @@ WORKDIR /app
 # of the encoder rather than at build time, so the image builds green and
 # dies on the first frame.
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir "." \
+RUN pip install --no-cache-dir ".[sfu]" \
     && if [ "$TORCH" = "cpu" ]; then \
          pip install --no-cache-dir torch torchvision \
            --index-url https://download.pytorch.org/whl/cpu; \

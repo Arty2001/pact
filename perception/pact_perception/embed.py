@@ -165,6 +165,28 @@ def layout_only(image: Image.Image, grid: int = 16) -> Image.Image:
     return small.resize((w, h), Image.Resampling.BILINEAR)
 
 
+def as_view(image: Image.Image, view: str) -> Image.Image:
+    """
+    The frame as a named view of itself, ready for the encoder.
+
+    One line of dispatch, kept here rather than at the call site because the
+    set of views and the transforms behind them belong together: adding a
+    third is then one function and one union rather than a branch spread
+    across the loop.
+
+    "full" is deliberately the identity and deliberately returns the SAME
+    object. The loop holds onto the raw frame for the teacher - which has to
+    be able to read a screen - and copying it per frame to no purpose is a
+    cost paid at the frame rate.
+
+    An unknown view is the identity too. The registry is data from elsewhere
+    and is allowed to be wrong; a view nobody implemented should degrade to
+    the ordinary path rather than take the loop down, and the mismatch is
+    already visible in the skill's fitted calibration going nowhere.
+    """
+    return layout_only(image) if view == "layout" else image
+
+
 def _l2(x: np.ndarray) -> np.ndarray:
     """Row-wise unit norm, so every dot product downstream is a cosine."""
     n = np.linalg.norm(x, axis=-1, keepdims=True)
