@@ -20,7 +20,7 @@
  */
 
 import React from "react";
-import { AbsoluteFill, useCurrentFrame } from "remotion";
+import { AbsoluteFill, useCurrentFrame, staticFile } from "remotion";
 import { C, F, R } from "../lib/theme";
 import { Rise, Mono, inOut, Eyebrow, Chip, Phase, TypeOn, CountUp, DrawArrow } from "../lib/prims";
 import { FootageSlot } from "../lib/footage";
@@ -327,17 +327,19 @@ export const S7Cant: React.FC = () => {
                       width: 118,
                       height: 70,
                       borderRadius: 6,
-                      background: "#0D1B26",
+                      background: `#0D1B26 url(${staticFile(`footage/nf${i}.jpg`)}) center / cover no-repeat`,
                       border: `1px solid ${C.watchEdge}`,
                       opacity: p,
                       transform: `translateY(${(1 - p) * 10}px)`,
-                      display: "grid",
-                      placeItems: "center",
+                      position: "relative",
+                      overflow: "hidden",
                     }}
                   >
-                    <Mono size={15} color={C.onDarkDim}>
-                      t−{3 - i}
-                    </Mono>
+                    <div style={{ position: "absolute", left: 5, bottom: 4, padding: "1px 6px", borderRadius: 4, background: "rgba(13,27,38,.72)" }}>
+                      <Mono size={13} color={C.onDark}>
+                        t−{3 - i}
+                      </Mono>
+                    </div>
                   </div>
                 );
               })}
@@ -361,6 +363,7 @@ export const S7Cant: React.FC = () => {
               at={t("unsure")}
               w={620}
               h={400}
+              src="bench.mp4"
             />
 
             <div style={{ flex: 1 }}>
@@ -368,7 +371,7 @@ export const S7Cant: React.FC = () => {
                 {[
                   { at: t("unsure"), k: "the probe", v: "0.52 · can't tell" },
                   { at: t("unsure") + 20, k: "Nemotron 3.5 VL", v: "unsure" },
-                  { at: t("noCamera"), k: "any camera", v: "cannot read a plate edge-on" },
+                  { at: t("noCamera"), k: "any camera", v: "cannot read the plates from here" },
                 ].map((r) => {
                   const p = inOut(f, r.at, 15);
                   return (

@@ -29,7 +29,7 @@ import { timing } from "../lib/beats";
 
 const t = timing("b5");
 
-const LEN = 480;
+const LEN = 435;
 const WAKE = t("walkIn");
 const IDLE_HZ = 0.5;
 const LIVE_HZ = 2;
@@ -244,6 +244,7 @@ export const S5Most: React.FC = () => {
               at={t("hierarchy")}
               w={640}
               h={400}
+              src="room_walkin.mp4"
             />
             {f >= WAKE && <WatchFrame at={WAKE} inset={0} />}
             <div

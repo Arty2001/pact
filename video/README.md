@@ -16,6 +16,27 @@ npm run preview     # half scale, for a fast look
 
 ---
 
+## The presenter cut
+
+The film now carries Sai's recorded read instead of the scratch voiceover.
+
+- `public/me.mp4` is the on-camera take (compressed to fit under GitHub's 100 MB
+  limit) and `public/voice.flac` is its audio, denoised and levelled to -20 LUFS.
+  `src/lib/presenter.tsx` plays them as one continuous take: full frame for the
+  opening line, a corner bubble through the graphics, full frame again for the close.
+- `src/lib/beats.ts` holds the phrase times measured from that read, so every
+  scene is cued to Sai's words. Scene lengths in `Video.tsx` come from the same read.
+- Footage in `public/footage/` is pre-cut so frame 0 of each file is frame 0 of
+  its scene: the walk-in lands on "when you walk in", the pushups stop on the frame
+  the encoder is shown, and the lat pulldown log counts the clip's 12 real reps.
+  Shot 3 (the sink) is a still photo, `public/footage/sink.jpg`, pushed in slowly.
+- `src/lib/sfx.tsx` places a handful of quiet sound effects from `public/sfx/`.
+- `npx remotion still Thumb out/thumbnail.png` renders the thumbnail.
+
+The `public/vo/*.mp3` scratch track is no longer used by the cut.
+
+---
+
 ## Dropping your footage in
 
 Every shot in the video is a `FootageSlot`. Until a clip exists it draws a

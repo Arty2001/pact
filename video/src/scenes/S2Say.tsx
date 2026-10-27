@@ -25,7 +25,7 @@ import { timing } from "../lib/beats";
 const t = timing("b2");
 
 /** Scene length, so the handoff to beat 3 starts from the end. */
-const LEN = 240;
+const LEN = 185;
 
 /** One of the two ways in, lighting as the narration offers it. */
 const Route: React.FC<{
