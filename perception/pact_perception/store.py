@@ -103,9 +103,9 @@ class Store:
     def __init__(self, path: str | Path = "traces/perception.db", retain_days: float = 7.0) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
+        self.path = p
         self.db = sqlite3.connect(p, check_same_thread=False)
-        self.db.executescript(SCHEMA)
-        self._add_views()
+        self._prepare()
         # WAL so a long-running writer does not block a reader poking at the
         # same file to see what the system has been doing.
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -114,6 +114,35 @@ class Store:
         self._uncommitted = 0
 
     # ----------------------------------------------------------- migration
+
+    def _prepare(self) -> None:
+        """
+        Apply the schema, then bring an older store up to it.
+
+        Both halves are under one handler because both can fail the same way
+        and for the same reason, and the remedy is the same either way. A
+        store takes one writer - two of them lose each other's observations -
+        and `_add_views` is the only thing a Store does at startup that
+        writes, so it is where a second process now notices. Which of the two
+        statements trips depends on how strong a lock the live writer happens
+        to be holding at that instant, which is not a distinction worth
+        putting in front of someone.
+        """
+        try:
+            self.db.executescript(SCHEMA)
+            self._add_views()
+        except sqlite3.OperationalError as err:
+            if "locked" not in str(err) and "busy" not in str(err):
+                raise
+            self.db.rollback()
+            raise RuntimeError(
+                f"{self.path} is held by another process. A store takes one "
+                "writer, and this run needs to write: a store recorded before "
+                "views existed takes a one-time migration to record which view "
+                "produced each embedding. Stop the perception process already "
+                "using this file, or point this run at a different one with "
+                "--store."
+            ) from err
 
     def _add_views(self) -> None:
         """
@@ -135,7 +164,18 @@ class Store:
 
         Everything already stored was encoded from the frame as it arrived,
         which is exactly what "full" means, so the backfill is not a guess.
+
+        This is also the only thing a Store does at startup that WRITES, and
+        so the only thing that can be refused by a store a live process is
+        already recording into. `_prepare` turns that refusal into something
+        actionable.
+
+        Both checks are made before either write, so a store that has already
+        been migrated - every store, after the first boot - does nothing at
+        all here and takes no lock.
         """
+        if "view" in self._columns("observations") and "view" in self._columns("frames"):
+            return
         if "view" not in self._columns("observations"):
             self.db.execute("ALTER TABLE observations ADD COLUMN view TEXT NOT NULL DEFAULT 'full'")
         if "view" not in self._columns("frames"):

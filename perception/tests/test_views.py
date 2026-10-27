@@ -397,6 +397,51 @@ def test_a_store_written_before_views_still_opens(tmp_path) -> None:
     assert store.frames_between(0, 200, view="layout") == [100.0]
 
 
+def test_a_held_store_says_what_to_do_about_it(tmp_path) -> None:
+    """
+    The migration is the only thing a Store does at startup that writes, so
+    it is the first thing that fails when a live perception process is
+    already recording into the same file. A store takes one writer and always
+    did; what is new is that the collision is visible here, and a bare
+    "database is locked" from a line about a column sends someone debugging
+    their schema instead of their process list.
+    """
+    import sqlite3
+
+    path = tmp_path / "held.db"
+    old = sqlite3.connect(path)
+    old.executescript(
+        """
+        CREATE TABLE observations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, skill_key TEXT NOT NULL, ts REAL NOT NULL,
+          score REAL NOT NULL, cos REAL NOT NULL, phase TEXT NOT NULL);
+        CREATE TABLE frames (
+          ts REAL PRIMARY KEY, encoder_id TEXT NOT NULL, dim INTEGER NOT NULL,
+          embedding BLOB NOT NULL);
+        CREATE TABLE training_examples (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, skill_key TEXT NOT NULL, class_key TEXT,
+          label INTEGER NOT NULL, source TEXT NOT NULL, frame_ts REAL NOT NULL,
+          created_at REAL NOT NULL);
+        """
+    )
+    old.commit()
+    # A writer mid-transaction, which is what a running loop looks like
+    # between commits.
+    old.execute("BEGIN EXCLUSIVE")
+    old.execute(
+        "INSERT INTO observations (skill_key, ts, score, cos, phase) VALUES ('s',1,0,0,'idle')"
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        Store(path)
+
+    said = str(caught.value)
+    assert "--store" in said, "the error has to name a way out, not just a cause"
+    assert "one writer" in said
+    old.rollback()
+    old.close()
+
+
 def test_the_migration_runs_once_and_is_safe_to_repeat(tmp_path) -> None:
     path = tmp_path / "twice.db"
     first = Store(path)
