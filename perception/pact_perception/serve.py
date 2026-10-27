@@ -77,6 +77,9 @@ class Handler(BaseHTTPRequestHandler):
                 "encoderId": self.embedder.encoder_id,
                 "dim": self.embedder.dim,
                 "device": getattr(self.embedder, "device", "unknown"),
+                # Reported because getting this wrong is invisible: the
+                # encoder simply runs slower than the machine it is on.
+                "threads": getattr(self.embedder, "threads", 0),
             },
         )
 

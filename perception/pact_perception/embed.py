@@ -37,6 +37,7 @@ import contextlib
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -65,6 +66,50 @@ class Embedder(Protocol):
     def encode_image(self, image: Image.Image) -> Embedding: ...
 
     def encode_text(self, texts: list[str]) -> np.ndarray: ...
+
+
+def usable_cpus() -> int:
+    """
+    How many cores this process may actually use, not how many exist.
+
+    `os.cpu_count()` reports the machine. Inside a container allocated
+    sixteen cores on a host that has a hundred and ninety-two, it returns a
+    hundred and ninety-two, torch starts that many threads, and they spend
+    their time contending for sixteen cores rather than working. Measured
+    against a four-thread laptop the container came out SLOWER - 208 ms a
+    frame against 195 - which is the shape this bug always has: more
+    hardware, less throughput, and nothing in the logs to say why.
+
+    The cgroup is asked first because that is what actually limits the
+    process, and a CPU quota is invisible to both `cpu_count` and the
+    affinity mask. Then the affinity mask, which catches cpuset pinning.
+    Then the machine, for a bare-metal run where all three agree anyway.
+    """
+    # cgroup v2: "<quota> <period>", or "max <period>" when unlimited.
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, round(int(quota) / int(period)))
+    except Exception:
+        pass
+
+    # cgroup v1: the same pair, in two files. A quota of -1 means unlimited.
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            return max(1, round(quota / period))
+    except Exception:
+        pass
+
+    # Affinity, where the kernel has it: respects cpuset pinning, which a
+    # quota check cannot see.
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        pass
+
+    return max(1, os.cpu_count() or 1)
 
 
 def _pick_device(torch: Any, requested: str) -> str:
@@ -166,7 +211,10 @@ class LocalEmbedder:
             # torch defaults to physical cores and leaves hyperthreads idle.
             # On an 8-thread laptop that is half the machine, and this is the
             # cheapest speedup available before reaching for a GPU.
-            torch.set_num_threads(max(1, os.cpu_count() or 1))
+            self.threads = usable_cpus()
+            torch.set_num_threads(self.threads)
+        else:
+            self.threads = 0
 
         self.encoder_id = f"{version}/{adaptor}@{resolution}"
 
