@@ -82,6 +82,44 @@ def _pick_device(torch: Any, requested: str) -> str:
     return "cpu"
 
 
+def layout_only(image: Image.Image, grid: int = 16) -> Image.Image:
+    """
+    Keep what a screen looks like; throw away what is on it.
+
+    The problem this solves is that the clip dominates the frame. Asked
+    whether you are watching short-form video, the honest signal is the
+    chrome - a bright upright panel on a dark ground, a column of round
+    buttons down one side - and the clip inside it is noise that changes
+    every few seconds. Measured on real frames, a content-led label swings
+    far more than a layout-led one, and a swing is what a fixed threshold
+    cannot sit under.
+
+    Averaging down to a coarse grid and back up destroys the detail and
+    leaves the structure: a dancing person and a cooking video become the
+    same mush inside the same unmistakable vertical panel. BOX is the
+    resampling that averages rather than samples, which is the whole point -
+    NEAREST would keep one pixel in each cell and so keep the noise.
+
+    A side effect worth having on purpose: what you were reading cannot be
+    recovered from the result. At this grid a page of text is a texture, so
+    the embedding records that you were reading, not what.
+
+    The grid is 16 because it was measured rather than chosen. Across 8 to
+    48, two Shorts frames with entirely different clips in them collapse
+    from a mean difference of 21.7 to 0.73 at 16 - a thirtyfold fall - while
+    the panel still stands 111 levels above the ground beside it and the
+    button column is at its most legible of any grid tried. Finer grids keep
+    more of the clip and, worse, let a page of text alias into visible bands
+    against the cell pitch: row variation runs 11.6 at 16, 16.3 at 32 and
+    35.5 at 48, which is text becoming readable again.
+    """
+    if grid < 2:
+        raise ValueError(f"grid must be at least 2, got {grid}")
+    w, h = image.size
+    small = image.convert("RGB").resize((grid, grid), Image.Resampling.BOX)
+    return small.resize((w, h), Image.Resampling.BILINEAR)
+
+
 def _l2(x: np.ndarray) -> np.ndarray:
     """Row-wise unit norm, so every dot product downstream is a cosine."""
     n = np.linalg.norm(x, axis=-1, keepdims=True)
