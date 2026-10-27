@@ -278,6 +278,66 @@ function renderFinding() {
   el.innerHTML = live > 0 ? line : `${line} Nothing is watching, so nothing can be proved yet.`;
 }
 
+/**
+ * Getting ready, as four facts rather than a bar that fills on a timer.
+ *
+ * Every step below is something the control plane actually observes, so the
+ * progress cannot lie: the machine is running or it is not, perception has
+ * said hello or it has not, this camera has been scored or it has not. A
+ * percentage invented from an elapsed clock would be smoother and would
+ * mean nothing, and the one thing someone staring at a cold start needs is
+ * to know which part is slow.
+ *
+ * Hidden entirely once the last step is done, because a progress bar that
+ * stays on screen after it finishes is just furniture.
+ */
+function renderStartup() {
+  const host = $("startup");
+  if (host === null) return;
+
+  const rooms = state.rooms ?? [];
+  const room = activeRoom ?? rooms[0]?.room ?? null;
+  const machine = state.encoder ?? null;
+  const connected = (state.perception ?? []).length > 0;
+  const scored = (state.watching ?? []).some((w) => w.room === room);
+
+  // Nothing to report before a camera exists: the empty stage already says
+  // what to do, and two messages about the same absence is one too many.
+  if (rooms.length === 0 || scored) {
+    host.hidden = true;
+    return;
+  }
+
+  const steps = [
+    { label: "Camera publishing", done: true },
+    // Only when the sleep/wake feature is configured. Without it the
+    // encoder is assumed to be running somewhere already, and a step for a
+    // machine nobody is starting would be a step that never completes.
+    ...(machine === null
+      ? []
+      : [{ label: "Encoder machine", done: machine === "running", note: machine }]),
+    { label: "Encoder loaded", done: connected, note: connected ? "" : "about a minute" },
+    { label: "Scoring this camera", done: false },
+  ];
+
+  const at = steps.findIndex((s) => !s.done);
+  const pct = Math.round((steps.filter((s) => s.done).length / steps.length) * 100);
+  const since = state.encoderSince ?? 0;
+  const waited = since > 0 ? Math.round((Date.now() - since) / 1000) : 0;
+
+  host.hidden = false;
+  host.innerHTML =
+    `<div class="startup-top">` +
+    `<b>${esc(steps[at]?.label ?? "Ready")}</b>` +
+    (steps[at]?.note ? `<span>${esc(steps[at].note)}</span>` : "") +
+    (waited > 3 ? `<span class="mono">${waited}s</span>` : "") +
+    `</div>` +
+    `<div class="startup-bar"><i style="width:${pct}%"></i></div>` +
+    `<div class="startup-steps">${steps
+      .map((s) => `<span class="${s.done ? "done" : ""}">${esc(s.label)}</span>`)
+      .join("")}</div>`;
+}
+
 function renderAll() {
   pruneTraces();
   announceGoals();
@@ -285,6 +345,7 @@ function renderAll() {
   renderSkills();
   renderWaiting();
   renderFinding();
+  renderStartup();
   renderMeta();
   renderNotices();
   renderTally();

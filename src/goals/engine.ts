@@ -1905,6 +1905,9 @@ export class Engine implements DurableObject {
       // What the encoder's machine is doing, so a cold start can be shown as
       // a cold start. Only present when the feature is configured at all.
       encoder: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().state : null,
+      // When it last changed, so a wait can be shown as a wait of a known
+      // length rather than a spinner that might mean anything.
+      encoderSince: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().changed_at : null,
       proposals: this.rows<Record<string, unknown>>("SELECT * FROM proposals ORDER BY at DESC").map(
         (r) => ({ ...r, runners_up: JSON.parse(String(r.runners_up ?? "[]")) }),
       ),

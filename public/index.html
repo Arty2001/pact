@@ -89,6 +89,12 @@
              is a choice of what to watch rather than of what is running. -->
         <div class="cams" id="cams"></div>
 
+        <!-- A cold start is about a minute: the encoder is four gigabytes and
+             the Engine socket cannot even open until it has loaded, because
+             the hello message carries the encoder id. Unexplained, that minute
+             reads as a broken page - so each step is shown as it completes. -->
+        <div class="startup" id="startup" hidden></div>
+
         <div class="stage" id="stage">
           <!-- One pane per camera you have turned on. The chips above are a
                multi-select, not a switch: watching two rooms at once is the
