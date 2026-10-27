@@ -4,6 +4,7 @@ import type { UiIntent } from "./assistant.ts";
 import type { ToolCall } from "./nebius.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
 import { sequence, stepsOf } from "./sequence.ts";
+import { orphanedSkills } from "./sweep.ts";
 import { ground, needsGrounding } from "./ground.ts";
 import { plan } from "./planner.ts";
 import {
@@ -235,15 +236,10 @@ export class Engine implements DurableObject {
       // draws it a series - so an abandoned detector goes on costing a dot
       // product per frame forever and crowding the chart it appears on.
       // Delete a goal and whatever was only ever its goes with it; anything
-      // another goal still shares is kept by the same query.
-      // Joined against goals, not just goal_skills. A join row whose goal no
-      // longer exists still names a skill, and a reference from a goal that
-      // is gone kept every skill in the registry looking used - so nothing
-      // was ever swept again after the first deletion that left one behind.
-      // Counting only live references makes this self-healing whatever the
-      // table has accumulated.
-      const orphans = this.unreferencedSkills();
-      for (const orphan of orphans) this.sql("DELETE FROM skills WHERE key = ?", orphan);
+      // another goal still shares is kept, and so is a gate a surviving
+      // child still needs. See `sweepOrphanedSkills`, which owns both the
+      // decision and the order it has to be applied in.
+      const orphans = this.sweepOrphanedSkills();
 
       this.log.info("goal.settle", {
         goal: key,
@@ -378,9 +374,8 @@ export class Engine implements DurableObject {
     // the skills they stranded. Done on the tick because with no goals left
     // there is no deletion to hang it off, and a registry full of detectors
     // nothing asks for is scored on every frame forever.
-    const stranded = this.unreferencedSkills();
+    const stranded = this.sweepOrphanedSkills();
     if (stranded.length > 0) {
-      for (const key of stranded) this.sql("DELETE FROM skills WHERE key = ?", key);
       this.log.info("goal.settle", {
         detail: "swept skills no goal names",
         orphaned_skills: stranded.join(","),
@@ -1368,19 +1363,63 @@ export class Engine implements DurableObject {
    * looking used, so nothing was swept again after the first deletion that
    * left one behind.
    */
-  private unreferencedSkills(): string[] {
+  /**
+   * Sweep the skills no live goal names any more, and say which went.
+   *
+   * It both decides and deletes, which the name no longer admitted to but
+   * the caller always relied on. Deciding alone is not safely separable:
+   * `skills.depends_on` is a foreign key into this same table, so the set
+   * and the order it is applied in are one problem, and handing a caller a
+   * list it had to delete in the right order is how this broke.
+   *
+   * What broke: the list came straight out of the table, which returns
+   * creation order, and gates are created before the skills beneath them. So
+   * a gate was deleted while its child still pointed at it, SQLite refused,
+   * and the route threw — after the goal row had already gone. Deleting a
+   * goal appeared to half-work, left its skills behind, and answered 500, so
+   * the console never refreshed either.
+   *
+   * `depends_on` is cleared across the doomed set before any of it is
+   * deleted. That is what makes the order irrelevant rather than merely
+   * correct, and it holds for a cycle too — which is reachable, because
+   * creating a skill is an upsert and nothing stops a parent being
+   * re-created pointing at its own descendant.
+   */
+  private sweepOrphanedSkills(): string[] {
+    // A join row whose goal is gone still names a skill, and a reference
+    // from a goal that no longer exists kept every skill looking used — so
+    // nothing was ever swept again after the first deletion that left one
+    // behind. Clearing these first makes the sweep self-healing whatever the
+    // table has accumulated.
     this.sql(
       `DELETE FROM goal_skills
        WHERE NOT EXISTS (SELECT 1 FROM goals g WHERE g.key = goal_skills.goal_key)`,
     );
-    return this.rows<{ key: string }>(
-      `SELECT key FROM skills s
-       WHERE NOT EXISTS (
-         SELECT 1 FROM goal_skills gs
-         JOIN goals g ON g.key = gs.goal_key
-         WHERE gs.skill_key = s.key
-       )`,
-    ).map((r) => r.key);
+
+    const referenced = new Set(
+      this.rows<{ skill_key: string }>(
+        `SELECT DISTINCT gs.skill_key FROM goal_skills gs
+         JOIN goals g ON g.key = gs.goal_key`,
+      ).map((r) => r.skill_key),
+    );
+    const links = this.rows<{ key: string; depends_on: string | null }>(
+      "SELECT key, depends_on FROM skills",
+    ).map((r) => ({ key: String(r.key), dependsOn: r.depends_on === null ? null : String(r.depends_on) }));
+
+    const doomed = orphanedSkills(links, referenced);
+    if (doomed.length === 0) return [];
+
+    const holes = doomed.map(() => "?").join(",");
+    // Both statements take the whole set, so there is no window in which a
+    // half-swept tree is visible to a reader and no order to get wrong.
+    this.sql(`UPDATE skills SET depends_on = NULL WHERE key IN (${holes})`, ...doomed);
+    // A question about a detector that no longer exists can never be
+    // answered, and `questions.skill_key` is a foreign key too — so it would
+    // refuse the delete exactly as the gate tree did.
+    this.sql(`DELETE FROM questions WHERE skill_key IN (${holes})`, ...doomed);
+    this.sql(`DELETE FROM proposals WHERE skill_key IN (${holes})`, ...doomed);
+    this.sql(`DELETE FROM skills WHERE key IN (${holes})`, ...doomed);
+    return doomed;
   }
 
   /** What the model asked for, done by the only thing allowed to do it. */
