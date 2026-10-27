@@ -66,6 +66,14 @@ jobs:
       # that cannot see the GPU, and the failure is invisible: everything
       # loads, nothing errors, the encoder is simply slower than the machine
       # you paid for.
+      # GHCR repository names must be lowercase, and this owner is not.
+      # Left as-is the push fails with "repository name must be lowercase"
+      # after the ten-gigabyte build has already happened, which is the
+      # most expensive possible moment to find out.
+      - name: Lowercase the owner
+        id: owner
+        run: echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Choose the base
         id: flavour
         run: |
@@ -93,8 +101,8 @@ jobs:
             TORCH=${{ steps.flavour.outputs.torch }}
             PRELOAD=1
           tags: |
-            ghcr.io/${{ github.repository_owner }}/pact-encoder:${{ steps.flavour.outputs.tag }}
-            ghcr.io/${{ github.repository_owner }}/pact-encoder:${{ github.sha }}
+            ghcr.io/${{ steps.owner.outputs.lc }}/pact-encoder:${{ steps.flavour.outputs.tag }}
+            ghcr.io/${{ steps.owner.outputs.lc }}/pact-encoder:${{ github.sha }}
           # No registry cache: the layers here are gigabytes of weights that
           # change only when the model does, and pushing a cache of them
           # costs more than the rebuild it saves.
@@ -104,7 +112,7 @@ jobs:
         run: |
           echo "### Encoder image" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "ghcr.io/${{ github.repository_owner }}/pact-encoder:${{ steps.flavour.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/${{ steps.owner.outputs.lc }}/pact-encoder:${{ steps.flavour.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
           echo "digest ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
