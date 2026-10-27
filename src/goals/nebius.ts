@@ -64,7 +64,17 @@ export interface Completion {
 }
 
 export class Nebius {
-  constructor(private apiKey: string) {}
+  // Written out rather than as a constructor parameter property, which is the
+  // one piece of TypeScript that is not erasable: `node --test` strips types
+  // rather than compiling, and a parameter property has to EMIT an
+  // assignment, so it raises ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX. That made
+  // every module reachable from this one untestable - planner.ts included,
+  // which is why it had no tests.
+  private readonly apiKey: string;
+
+  constructor(apiKey: string) {
+    this.apiKey = apiKey;
+  }
 
   async chat(opts: {
     model: string;
