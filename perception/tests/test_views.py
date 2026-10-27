@@ -42,21 +42,28 @@ class ViewSpy:
 
     encoder_id = ENCODER
     dim = DIM
+    #: Side of the grid the frame is reduced to before projecting. Coarse
+    #: enough to be quick, fine enough that a panel of changing content still
+    #: reads as changing.
+    GRID = 8
 
     def __init__(self) -> None:
         self.seen: list[tuple[int, ...]] = []
+        # One fixed basis, as `StubEmbedder` uses. A projection rather than a
+        # hash of the pixels on purpose: a hash makes two nearly-identical
+        # frames as far apart as two unrelated ones, which would let a test
+        # claiming "this view moves less" pass for the wrong reason.
+        rng = np.random.default_rng(20261027)
+        self._basis = rng.normal(size=(self.GRID * self.GRID * 3, DIM)).astype(np.float32)
 
     def encode_image(self, image: Image.Image) -> object:
-        small = image.convert("RGB").resize((4, 4), Image.Resampling.BOX)
-        pixels = tuple(np.asarray(small).ravel().tolist())
-        self.seen.append(pixels)
-        # A direction that depends on the pixels, so a sharp frame and an
-        # averaged one land somewhere different.
-        rng = np.random.default_rng(abs(hash(pixels)) % (2**32))
-        vec = rng.normal(size=DIM).astype(np.float32)
+        small = image.convert("RGB").resize((self.GRID, self.GRID), Image.Resampling.BOX)
+        pixels = np.asarray(small, dtype=np.float32) / 255.0
+        self.seen.append(tuple(np.asarray(small).ravel().tolist()))
+        vec = pixels.ravel() @ self._basis
 
         class Out:
-            vector = vec / np.linalg.norm(vec)
+            vector = vec / max(float(np.linalg.norm(vec)), 1e-12)
             ms = 0.1
             dim = DIM
 
@@ -160,8 +167,12 @@ def test_one_encode_when_every_skill_wants_layout(tmp_path) -> None:
     drive(r, [frame])
 
     assert spy.calls == 1
-    averaged = np.asarray(layout_only(frame).convert("RGB").resize((4, 4), Image.Resampling.BOX))
-    assert spy.seen[0] == tuple(averaged.ravel().tolist()), "the encoder saw the sharp frame"
+    averaged = layout_only(frame).convert("RGB").resize(
+        (ViewSpy.GRID, ViewSpy.GRID), Image.Resampling.BOX
+    )
+    assert spy.seen[0] == tuple(np.asarray(averaged).ravel().tolist()), (
+        "the encoder was handed the sharp frame"
+    )
 
 
 def test_two_views_cost_two_encodes_and_no_more(tmp_path) -> None:
@@ -219,12 +230,15 @@ def test_each_skill_is_scored_against_its_own_view(tmp_path) -> None:
 
 def test_a_layout_skill_is_steadier_across_changing_content(tmp_path) -> None:
     """
-    Why anyone would want this, measured through the real wiring rather than
-    on pixels: the same panel with a different clip inside it moves a layout
-    skill's cosine far less than a full-view skill's.
+    Why anyone would want this, reaching the cosine rather than stopping at
+    the pixels: the same panel with a different clip inside it moves a layout
+    skill's cosine less than a full-view skill's.
 
-    This is the swing a fixed threshold cannot sit under, which is what
-    `layout` exists to remove.
+    The magnitude here is the stub's, not the encoder's - about 2x through a
+    random projection, against the thirtyfold collapse measured on real
+    frames in `test_layout_only`. What this adds to that measurement is that
+    the benefit survives the wiring: it is the layout skill, scored through
+    the loop and read back out of the store, whose number holds still.
     """
     r = runner_with(tmp_path, None)
     r.embedder = ViewSpy()
