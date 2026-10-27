@@ -8,7 +8,13 @@
 # no inbound port, no TLS and no DNS. That is the property that makes "runs on
 # a laptop" and "runs on a cloud VM" the same deployment.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Arty2001/pact/main/perception/deploy.sh | bash -s -- \
+#   ./deploy.sh --hub https://pact.lanvar.ai --key $NEBIUS_API_KEY
+#
+# With the encoder on a Nebius Serverless Endpoint instead of in-process:
+#
+#   ./deploy.sh --embed-url https://<endpoint>.nebius.cloud --key $NEBIUS_API_KEY
+#
+# ORIGINAL: curl -fsSL .../deploy.sh | bash -s -- \
 #     --hub https://pact.lanvar.ai --key "$NEBIUS_API_KEY"
 #
 # The instance can then be stopped and started by the control plane, which is
@@ -35,6 +41,13 @@ IMAGE="pact-perception"
 BASE="python:3.12-slim"
 TORCH="cpu"
 RUNTIME_FLAGS=()
+# Where the encoder runs. `local` keeps it inside this process; `remote`
+# points at a Nebius Serverless Endpoint running this same image as
+# pact_perception.serve. That split is the point: the stateful half - the
+# WebRTC subscription, the calibration, the state machines - stays beside
+# the cameras, and the one stateless step runs where there is a GPU.
+EMBED="local"
+EMBED_URL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,6 +55,7 @@ while [ $# -gt 0 ]; do
     --key)        KEY="$2"; shift 2 ;;
     --room)       ROOM="$2"; shift 2 ;;
     --resolution) RESOLUTION="$2"; shift 2 ;;
+    --embed-url)  EMBED="remote"; EMBED_URL="$2"; shift 2 ;;
     --gpu)
       # A PyTorch CUDA image, not a bare nvidia/cuda one. The bare CUDA
       # runtime images ship no Python at all, so every pip line in the
@@ -103,7 +117,8 @@ sudo docker run -d \
   -e "PACT_HUB=$HUB" \
   -e "PACT_STORE=/data/perception.db" \
   "$IMAGE" \
-  --room "$ROOM" --source sfu --embed local \
+  pact_perception.run \
+  --room "$ROOM" --source sfu --embed "$EMBED" ${EMBED_URL:+--embed-url "$EMBED_URL"} \
   --resolution "$RESOLUTION" --idle-hz 8 --hub "$HUB" --level info
 
 cat <<DONE

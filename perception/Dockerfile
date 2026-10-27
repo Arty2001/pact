@@ -84,4 +84,11 @@ ENV PACT_ROOM=default \
 
 VOLUME ["/data"]
 
-ENTRYPOINT ["python", "-m", "pact_perception.run"]
+# One image, two roles. The module is the command rather than part of the
+# entrypoint, because a serverless endpoint usually lets you set the args and
+# not the entrypoint - and the encoder has to be able to run as a server:
+#
+#   docker run <image>                      # the watcher, as before
+#   docker run <image> pact_perception.serve  # the encoder behind HTTP
+ENTRYPOINT ["python", "-m"]
+CMD ["pact_perception.run"]
