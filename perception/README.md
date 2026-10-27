@@ -2,9 +2,10 @@
 
 Frames in, state transitions out. The high-frequency half of pact.
 
-This process samples frames, embeds them once, scores every eligible skill
-against that one embedding, runs a state machine per skill, and posts **only
-transitions** to the Engine. It computes several scores a second; the control
+This process samples frames, embeds each one once per *view* any eligible
+skill asks for — almost always exactly one — scores every eligible skill
+against its own view's embedding, runs a state machine per skill, and posts
+**only transitions** to the Engine. It computes several scores a second; the control
 plane never sees one. That boundary is the whole "7,200 scores an hour becomes
 one event" property, expressed as a process split rather than a convention.
 
@@ -91,6 +92,41 @@ with it would silently mis-scope every skill.
 python -m pact_perception.run --source folder --folder traces/desk \
   --surface screen --embed local --hub http://localhost:8787
 ```
+
+### Views, and the one thing the stub cannot show
+
+Each skill also declares a **view**: `full` for the frame as it arrived, or
+`layout` for the frame averaged down to a coarse grid and back, which keeps
+the structure of a screen and destroys what is on it. It is not a flag — it
+comes down with the registry, because it belongs to the skill rather than to
+the run. The planner sets `layout` on a screen gate, since what makes a *kind*
+of screen recognisable is its shape and the content inside it is noise that
+changes every few seconds. See the root README for the measurements.
+
+A frame is encoded once per **distinct** view wanted on it. When every
+eligible skill agrees — the normal case, and always the case on a camera —
+that is the single encode it has always been. Two encodes are paid only when
+two skills on one surface genuinely ask different questions of the same
+pixels, and `embed.done` names the view so you can see which happened:
+
+```bash
+python make_demo_frames.py --scene screen --out traces/screen
+python -m pact_perception.run --room desk --surface screen \
+  --source folder --folder traces/screen --embed stub \
+  --store traces/viewtest.db --hub http://localhost:8787 --level debug
+```
+
+**`--embed stub` cannot demonstrate the benefit, only the wiring.** The stub
+builds its vector from an 8×8 grid of the frame, which is coarser than the
+16×16 `layout_only` averages to, so it has already discarded the content
+before the transform could — it is in effect a layout-only encoder, and a
+`full` skill and a `layout` skill score within 0.0005 of each other under it.
+Use it to confirm two views are encoded, stored and calibrated separately.
+For the thirtyfold collapse itself, `--embed local`.
+
+One store takes one writer. A run against a store a live process is already
+recording into is refused at startup, which is also where the one-time
+migration that adds the view column happens — hence `--store` above.
 
 ### About `--embed stub`
 
