@@ -175,7 +175,7 @@ makes it simple, so they stay apart.
 A publisher can share a screen instead of a camera, and a goal can be about
 what is on it: *"study Python for an hour"* rather than *"brush my teeth"*.
 The plumbing is identical — same tap, same relay, same state machines — but
-four of the assumptions underneath it are about rooms, and each one fails
+five of the assumptions underneath it are about rooms, and each one fails
 quietly rather than loudly on a screen.
 
 **Every skill declares a surface.** `camera`, `screen`, or `any`, and a skill
@@ -206,6 +206,34 @@ read, settles it. Its verdict becomes a label like any other, so the question
 gets cheaper the more often it is asked. The planner is told this explicitly,
 because a screen gate written as *"VS Code with main.py open"* is a detector
 that can never fire.
+
+**On a screen the content is the noise, so a skill chooses which picture it
+sees.** Every skill also declares a `view`: `full` for the frame as it
+arrived, `layout` for the frame averaged down to a coarse grid and back,
+which destroys the detail and leaves the structure. The reason is that for a
+gate the chrome is the entire signal. *"Is this a short-form video player"* is
+answered by a bright upright panel on a dark ground with a column of round
+buttons down one side; the clip inside it changes every few seconds, and
+because the encoder averages the whole frame, that clip is what the score
+actually follows. Measured: two such frames with different clips in them sit
+21.7 apart raw and 0.73 apart under `layout` — a thirtyfold collapse — while
+the panel still stands 111 levels above the ground beside it. A score that
+swings that far is one no fixed threshold can sit under, which is the failure
+`layout` removes, and the privacy of it is free: at that grid a page of text
+is a texture, so the embedding records that you were reading and not what.
+
+So the planner marks a screen gate `layout` and what sits beneath it `full` —
+the gate names the *kind* of screen, which is a shape, and the child names the
+state that counts, which is usually in the content. A camera skill is always
+`full`: averaging a room away removes the person the question was about. The
+cost is bounded by grouping rather than by restraint: perception encodes a
+frame once per *distinct* view wanted on it, so the usual case where every
+eligible skill agrees is the single encode it always was, and a second is paid
+only when two skills on one surface genuinely ask different questions of the
+same pixels. Both vectors are then stored under the view that produced them,
+because a cosine measured on a blurred frame is not comparable to one measured
+on a sharp frame, and a store that mixed them would corrupt every `bias` and
+`temperature` fitted from it.
 
 **Escalation needs legible frames.** 640px in the browser and 512px at the
 teacher are right for a camera and quietly wrong for a screen: at that size a

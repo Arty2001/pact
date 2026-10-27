@@ -24,6 +24,7 @@ import type {
   Skill,
   Surface,
   Transition,
+  View,
 } from "./types.ts";
 
 /**
@@ -720,34 +721,61 @@ export class Engine implements DurableObject {
     )[0];
     const keep = prior && String(prior.label) === body.label ? prior : undefined;
 
+    // Hoisted because the timing defaults depend on it: a screen action wants
+    // a long exit and no cooldown, a camera action the opposite.
+    const surface = asSurface(body.surface ?? null, "any");
+
+    // A view is only ever a view of a screen. Averaging a room away destroys
+    // the person the question was about, so `layout` on a camera is not a
+    // tuning choice that happens to be poor — it is a detector with its
+    // subject removed, and it would calibrate quite happily against the
+    // mush. Clamped here rather than refused: the planner already knows the
+    // rule, and the console has no widget for it at all.
+    //
+    // A body that says nothing inherits what the row already had, which the
+    // other columns do not do — and has to, because this route is an INSERT
+    // OR REPLACE and is how a skill is edited as well as created. Every
+    // client that writes a threshold would otherwise reset a screen gate to
+    // `full` on the way past, losing the one setting nothing in the console
+    // displays. `prior` rather than `keep`: a view outlives a relabelling,
+    // since it says which picture to look at and not what to look for.
+    const view =
+      surface === "screen" ? asView(body.view ?? null, asView(prior?.view)) : "full";
+
     // The vector and the fit are carried separately because they depend on
     // different things. A vector is the embedded label and nothing else. A
     // fit is solved for one enter/exit pair, so a moved band leaves it
     // describing a threshold that is no longer there — perception refits
     // from fresh background instead.
+    //
+    // A changed view ends the fit the same way, for a different reason: bias
+    // and temperature are quantiles of the cosines one view produced, and a
+    // blurred frame's cosines are not a sharp frame's. Perception notices
+    // this itself by comparing registry snapshots, but only while it has a
+    // previous snapshot to compare — restart it after a view change and it
+    // would adopt whatever this row still claimed. The row is where the
+    // staleness has to be cleared.
     const enterConf = body.enterConf ?? 0.75;
     const exitConf = body.exitConf ?? 0.45;
-    const sameBand =
+    const sameFit =
       keep !== undefined &&
       Number(keep.enter_conf) === enterConf &&
-      Number(keep.exit_conf) === exitConf;
-    const fit = sameBand ? keep : undefined;
-
-    // Hoisted because the timing defaults depend on it: a screen action wants
-    // a long exit and no cooldown, a camera action the opposite.
-    const surface = asSurface(body.surface ?? null, "any");
+      Number(keep.exit_conf) === exitConf &&
+      asView(keep.view) === view;
+    const fit = sameFit ? keep : undefined;
 
     this.sql(
       `INSERT OR REPLACE INTO skills
-        (key, kind, label, room, surface, depends_on, enter_conf, exit_conf, dwell_s, exit_s,
-         cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
+        (key, kind, label, room, surface, view, depends_on, enter_conf, exit_conf, dwell_s,
+         exit_s, cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
          w, encoder_id, dim, bias, temperature, weight_state, n_labels, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       asKey(body.key),
       body.kind ?? "object",
       body.label,
       body.room ?? null,
       surface,
+      view,
       body.dependsOn ?? null,
       enterConf,
       exitConf,
@@ -1850,6 +1878,7 @@ export class Engine implements DurableObject {
             kind: u.kind,
             label: u.label,
             surface: u.surface,
+            view: u.view,
             dependsOn: u.dependsOn && named.has(u.dependsOn) ? u.dependsOn : null,
           }),
         }),
@@ -2197,6 +2226,18 @@ function asSurface(value: unknown, fallback: Surface): Surface {
   return value === "camera" || value === "screen" || value === "any" ? value : fallback;
 }
 
+/**
+ * Narrow anything to a view, defaulting to the frame as it arrived.
+ *
+ * One fallback rather than a per-caller one, unlike `asSurface`: there is no
+ * caller for which an absent view means anything but "the ordinary path".
+ * Every skill written before views existed asks about the whole frame, and a
+ * row that says nothing is one of those.
+ */
+function asView(value: unknown, fallback: View = "full"): View {
+  return value === "full" || value === "layout" ? value : fallback;
+}
+
 function toSkill(r: Record<string, unknown>): Skill {
   return {
     key: String(r.key),
@@ -2204,6 +2245,7 @@ function toSkill(r: Record<string, unknown>): Skill {
     label: String(r.label),
     room: r.room === null ? null : String(r.room),
     surface: asSurface(r.surface, "any"),
+    view: asView(r.view),
     dependsOn: r.depends_on === null ? null : String(r.depends_on),
     enterConf: Number(r.enter_conf),
     exitConf: Number(r.exit_conf),

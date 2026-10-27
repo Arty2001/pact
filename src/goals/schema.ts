@@ -40,6 +40,10 @@ export const ADDITIONS: readonly string[] = [
   // for every goal whose number the person stated themselves, which is
   // most of them.
   "ALTER TABLE goals ADD COLUMN source_url TEXT",
+  // Which picture of a frame this skill asks about. 'full' for everything
+  // written before the distinction existed, which keeps every one of them
+  // behaving exactly as it did.
+  `ALTER TABLE skills ADD COLUMN view TEXT NOT NULL DEFAULT 'full'`,
 ];
 
 export const SCHEMA = `
@@ -57,6 +61,16 @@ CREATE TABLE IF NOT EXISTS skills (
   -- frame against screenshots of a code editor. The scores stay low, so
   -- nothing looks broken while the thresholds drift.
   surface          TEXT NOT NULL DEFAULT 'any',
+
+  -- Which picture of a frame this question is about: 'full' for the frame as
+  -- it arrived, 'layout' for the frame with its content averaged away. A
+  -- screen gate asking "is this a short-form video player" is answered by
+  -- the chrome, and the clip inside it is noise that changes every few
+  -- seconds and dominates the embedding - two such frames measured 21.7
+  -- apart raw and 0.73 apart under 'layout'. Perception encodes a frame once
+  -- per distinct view wanted on it, so this costs nothing until two skills
+  -- on one surface disagree.
+  view             TEXT NOT NULL DEFAULT 'full',
 
   enter_conf       REAL NOT NULL DEFAULT 0.75,
   exit_conf        REAL NOT NULL DEFAULT 0.45,

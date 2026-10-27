@@ -38,6 +38,37 @@ export type SkillKind = "gate" | "object" | "action" | "counter" | "discriminato
  */
 export type Surface = "camera" | "screen" | "any";
 
+/**
+ * Which picture of a frame a skill is asking about.
+ *
+ * `full` is the frame as it arrived. `layout` is the frame with its content
+ * averaged away to a coarse grid and back, leaving only large-scale
+ * structure - the transform and the measurements behind it live in
+ * perception's `embed.layout_only`.
+ *
+ * It exists because on a screen the two questions genuinely differ. "Is this
+ * a short-form video player" is answered by the chrome: a bright upright
+ * panel on a dark ground with a column of round buttons down one side. The
+ * clip playing inside it is noise that changes every few seconds, and it
+ * dominates the embedding - two such frames with different clips measured
+ * 21.7 apart raw and 0.73 apart under `layout`, a thirtyfold collapse, while
+ * the panel still stood 111 levels above the ground beside it. A score that
+ * swings that far is a score no fixed threshold can sit under, which is the
+ * failure this removes.
+ *
+ * `full` is the default, and right for every camera skill: averaging a room
+ * away destroys the person it was asking about. On a screen it stays right
+ * for any skill whose question is about what is on the screen rather than
+ * what the screen is.
+ *
+ * Two skills on one frame may want different views, and then that frame is
+ * encoded twice. A vector from an averaged frame is not comparable to one
+ * from a sharp frame, so the view travels with every embedding and every
+ * observation perception stores - mixing them would silently corrupt each
+ * bias and temperature fitted from them.
+ */
+export type View = "full" | "layout";
+
 /** Kinds perception scores. A metric never reaches the encoder. */
 export const SCORED_KINDS: readonly SkillKind[] = [
   "gate",
@@ -81,6 +112,15 @@ export interface Skill {
   room: string | null;
   /** Camera frames, screen frames, or both. See `Surface`. */
   surface: Surface;
+  /**
+   * The frame as it arrived, or with its content averaged away. See `View`.
+   *
+   * It does not affect `w`, which is an embedded sentence and knows nothing
+   * about which picture will be dotted against it. It does invalidate `bias`
+   * and `temperature`, which are fitted from the cosines one view produced -
+   * so changing this costs a recalibration, exactly as moving the band does.
+   */
+  view: View;
   /** Self-referencing: the gate tree, written by the planner. */
   dependsOn: string | null;
 

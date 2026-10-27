@@ -1501,8 +1501,15 @@ function addRow(preset = {}) {
   // both and a person almost never retypes either, but dropping them on the
   // floor here flattens every drafted parent/child pair into two unrelated
   // skills, and lets thirty seconds settle a goal that asked for an hour.
+  //
+  // `view` is the same case and the quietest of the three. The planner marks
+  // a screen gate "layout" so it reads the shape of the screen rather than
+  // whatever clip is playing inside it; dropped here the gate still scores,
+  // still calibrates and still fires, and simply follows the content it was
+  // meant to ignore.
   el.dataset.dependsOn = preset.dependsOn ?? "";
   el.dataset.accumulate = preset.accumulate ? "1" : "";
+  el.dataset.view = preset.view ?? "";
 
   el.append(
     select(["gate", "object", "action", "counter", "discriminator", "metric"], preset.kind ?? "action"),
@@ -1568,6 +1575,7 @@ $("goal-form").addEventListener("submit", async (e) => {
       key: key.value.trim(),
       label: label.value.trim(),
       role: role.value,
+      view: el.dataset.view || null,
       dependsOn: el.dataset.dependsOn || null,
       accumulate: el.dataset.accumulate === "1",
       sequenceIndex: el.dataset.step === undefined ? null : Number(el.dataset.step),
@@ -1595,6 +1603,10 @@ $("goal-form").addEventListener("submit", async (e) => {
         kind: r.kind,
         label: r.label,
         surface: r.surface,
+        // Absent rather than null when the draft said nothing, so the Engine
+        // can tell "no opinion" - keep whatever the row already had - from a
+        // deliberate choice of the ordinary view.
+        ...(r.view ? { view: r.view } : {}),
         // Only when the parent is actually among the skills being written.
         // A dangling key leaves the child permanently ineligible, which
         // looks exactly like a detector that does not work.

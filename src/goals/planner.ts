@@ -1,5 +1,5 @@
 import { Nebius, type Tool } from "./nebius.ts";
-import type { Skill } from "./types.ts";
+import type { Skill, View } from "./types.ts";
 
 /**
  * Sentence in, goal draft out.
@@ -90,6 +90,16 @@ So:
     the screen is asked to settle it:
       good: "Python source code being edited, with def and import statements visible"
 
+EVERY SCREEN SKILL ALSO HAS A VIEW, and it is "layout" for a gate and "full" for what sits beneath it.
+
+A screen gate names the KIND of screen, and what makes a kind of screen recognisable is its shape - a tall bright panel on a dark ground, a file tree beside a column of code, a grid of cells. The content inside that shape changes every few seconds and the detector averages the whole frame, so the content is what the score follows: two frames of the same video player with different clips in them measured 21.7 apart, which is a score no fixed threshold can sit under. The "layout" view averages the content away before the frame is encoded and leaves the shape, and the same pair then measured 0.73 apart - thirty times steadier, with the panel still standing out from the ground beside it.
+
+So: a "screen" gate gets view "layout". Its children get view "full", because a child names the state that counts - and the state that counts is usually in the content, which "layout" is there to destroy. A "camera" skill is ALWAYS "full": averaging a room away removes the person the question was about.
+
+  gate:  "a short-form vertical video player"          screen, layout
+  child: "a video playing with the comments panel open" screen, full
+  camera: "a person at a bathroom sink"                 camera, full
+
 SHORT AND CONCRETE BEATS LONG AND DESCRIPTIVE. Measured, not assumed: eight candidate labels scored against 952 frames of a real screen share. "a short-form vertical video player" - five words - separated those frames from others better than a twenty-word description of bars and buttons, and swung a third less from frame to frame. Compositional labels did worst of all: "a mostly black widescreen display with a single narrow upright panel of bright image centred in it" scored 0.0018, which is nothing.
 
 The encoder was trained on pictures and their captions, so it knows WHAT A THING IS. It does not reason about layout. Name the kind of thing in the plainest words someone would caption it with, add the one or two features that separate it from its neighbours, and stop. Every further clause about bars, edges, corners and positions dilutes the sentence with terms that match nothing.
@@ -166,6 +176,16 @@ const TOOLS: Tool[] = [
               "A skill is only ever scored against frames from its own surface. Required: " +
               "a skill with no surface is scored against BOTH, which is how a person " +
               "detector ends up grading a screen recording.",
+          },
+          view: {
+            type: "string",
+            enum: ["full", "layout"],
+            description:
+              "Which picture of the frame to ask about. 'layout' averages the " +
+              "content away and leaves only the shape of the screen, which is " +
+              "what makes a KIND of screen recognisable - use it for a screen " +
+              "gate. 'full' is the frame as it arrived: use it for everything " +
+              "beneath a gate, and for every camera skill.",
           },
           depends_on: {
             type: "string",
@@ -267,6 +287,12 @@ export interface PlanDraft {
     /** "camera" | "screen" | "any". Decides which frames ever score it. */
     surface: string;
     /**
+     * "full" | "layout". Decides which picture of those frames it sees. Only
+     * ever `layout` on a screen skill, and by default only on a screen gate;
+     * see `viewFor`.
+     */
+    view: View;
+    /**
      * The gate above this skill. Carried out of the draft rather than
      * discarded: without it there is no gate tree, every skill is scored
      * against every frame, and the two-tier "cheap question, then expensive
@@ -314,6 +340,30 @@ export interface PlanContext {
    * than a sentence about this person in particular.
    */
   guidance?: { summary: string; sources: Array<{ title: string; url: string }> };
+}
+
+/**
+ * The view a drafted skill should carry, given what the model said.
+ *
+ * A backstop rather than a translation, and in the same family as the ones
+ * around it: the prompt asks for `min_count` on a counter and for a weekday
+ * cadence, and a model drops both often enough that both are settled in
+ * code. This one matters more than either, because getting it wrong is
+ * invisible. A screen gate left on `full` still scores, still calibrates and
+ * still fires - it simply follows whatever clip is playing, and the symptom
+ * is a threshold that will not hold for no discoverable reason.
+ *
+ * Two rules, in order. A camera skill is always `full`: averaging a room
+ * away removes the person the question was about, so `layout` there is not a
+ * poor choice of tuning but a detector with its subject deleted. Otherwise a
+ * stated view is honoured - the prompt explains the trade and the model may
+ * have a reason - and a screen gate that stated nothing becomes `layout`,
+ * because naming a KIND of screen is exactly the question layout answers.
+ */
+export function viewFor(stated: unknown, surface: string, kind: string): View {
+  if (surface !== "screen") return "full";
+  if (stated === "full" || stated === "layout") return stated;
+  return kind === "gate" ? "layout" : "full";
 }
 
 /**
@@ -411,7 +461,7 @@ export async function plan(
   const known = new Map(catalogue.map((s) => [s.key, s]));
   const drafted = new Map<
     string,
-    { kind: string; label: string; surface: string; dependsOn: string | null }
+    { kind: string; label: string; surface: string; view: View; dependsOn: string | null }
   >();
   let goal: Record<string, unknown> | null = null;
   const usage = { prompt: 0, completion: 0, reasoning: 0 };
@@ -452,10 +502,13 @@ export async function plan(
       if (call.name === "create_skill") {
         const key = String(call.args.key ?? "");
         if (key) {
+          const kind = String(call.args.kind ?? "object");
+          const surface = call.args.surface === "screen" ? "screen" : "camera";
           drafted.set(key, {
-            kind: String(call.args.kind ?? "object"),
+            kind,
             label: String(call.args.label ?? ""),
-            surface: call.args.surface === "screen" ? "screen" : "camera",
+            surface,
+            view: viewFor(call.args.view, surface, kind),
             dependsOn: call.args.depends_on ? String(call.args.depends_on) : null,
           });
         }
@@ -506,6 +559,10 @@ export async function plan(
       label: existing?.label ?? fresh?.label ?? "",
       kind,
       surface: existing?.surface ?? fresh?.surface ?? "any",
+      // An existing skill keeps the view it was calibrated under. Nothing in
+      // this draft is evidence that it should change, and changing it would
+      // throw away that calibration for every goal already using it.
+      view: existing?.view ?? fresh?.view ?? "full",
       dependsOn: existing?.dependsOn ?? fresh?.dependsOn ?? null,
       role,
       classKey: u.class_key === undefined ? null : String(u.class_key),
