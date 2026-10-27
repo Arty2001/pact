@@ -207,6 +207,20 @@ class LocalEmbedder:
         # instead, which is both correct here and what the tensor cores want.
         self._amp = self.device.startswith("cuda")
 
+        # bfloat16 on the CPU as well, where the CPU can do it. Zen 4 and
+        # Sapphire Rapids carry AVX-512 bf16, and on those this is most of a
+        # halving for a matmul-bound forward pass. It is off by default and
+        # named, not inferred: it changes the numbers in the last couple of
+        # decimal places, and every skill's bias and temperature were fitted
+        # against float32 vectors. The shift is far smaller than any
+        # calibration band, but "far smaller than" is a claim worth letting
+        # someone turn off.
+        self._cpu_bf16 = (
+            self.device == "cpu"
+            and os.environ.get("PACT_CPU_BF16", "0") == "1"
+            and hasattr(torch, "bfloat16")
+        )
+
         if self.device == "cpu":
             # torch defaults to physical cores and leaves hyperthreads idle.
             # On an 8-thread laptop that is half the machine, and this is the
@@ -247,13 +261,28 @@ class LocalEmbedder:
         )
         arr = np.asarray(im, dtype=np.float32) / 255.0
         x = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+        # channels_last is the layout oneDNN wants for convolution on a CPU.
+        # Handed NCHW it reorders internally on every call, which is work
+        # paid for per frame rather than once here.
+        if self.device == "cpu":
+            x = x.contiguous(memory_format=torch.channels_last)
         return x.to(self.device)
 
     def encode_image(self, image: Image.Image) -> Embedding:
         torch = self._torch
         started = time.perf_counter()
-        with torch.no_grad(), torch.autocast("cuda", enabled=self._amp, dtype=torch.float16):
-            out = self._model(self._tensor(image))
+        # inference_mode rather than no_grad: it also skips version counting
+        # and view tracking, which no_grad still pays for. Strictly the same
+        # numbers, strictly less bookkeeping.
+        if self._cpu_bf16:
+            with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16):
+                out = self._model(self._tensor(image))
+        else:
+            with (
+                torch.inference_mode(),
+                torch.autocast("cuda", enabled=self._amp, dtype=torch.float16),
+            ):
+                out = self._model(self._tensor(image))
         summary = out[self.adaptor_name].summary
         # .cpu() below forces a sync, so the number this returns is real work
         # rather than kernel-launch time. Worth stating: CUDA is asynchronous,

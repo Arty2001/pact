@@ -33,7 +33,7 @@ from typing import Any
 
 from PIL import Image
 
-from .embed import Embedder, LocalEmbedder
+from .embed import Embedder, LocalEmbedder, usable_cpus
 from .log import Logger
 
 #: Refuse a body larger than this. A 384px JPEG is tens of kilobytes, so
@@ -203,6 +203,15 @@ def main() -> None:
     ap.add_argument("--device", default=os.environ.get("PACT_DEVICE", "auto"))
     ap.add_argument("--level", default=os.environ.get("PACT_LEVEL", "info"))
     a = ap.parse_args()
+
+    # OpenMP and MKL keep their own pools and read these at import time, so
+    # they are set before the encoder is built. torch.set_num_threads alone
+    # leaves them at the host's core count, which is the same contention the
+    # cgroup fix exists to stop - just one layer down where it is harder to
+    # see.
+    cpus = str(usable_cpus())
+    os.environ.setdefault("OMP_NUM_THREADS", cpus)
+    os.environ.setdefault("MKL_NUM_THREADS", cpus)
 
     log = Logger(room="encoder", level=a.level)
     # Loaded before the socket opens, deliberately. A serverless endpoint
