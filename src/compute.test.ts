@@ -71,6 +71,27 @@ describe("normalise", () => {
     assert.equal(normalise("STOPPING"), "stopping");
   });
 
+  it("counts provisioning and image pulling as starting", () => {
+    // Pulling a multi-gigabyte image is a real and slow part of coming up.
+    // Read as anything but `starting`, the control plane would issue a
+    // second start while the first was still downloading.
+    assert.equal(normalise("PROVISIONING"), "starting");
+    assert.equal(normalise("IMAGE_PULLING"), "starting");
+  });
+
+  it("does not treat ERROR as something to restart", () => {
+    // A container that failed to start will fail again. Retrying it every
+    // minute turns one broken image into a bill, so it needs a person.
+    assert.equal(normalise("ERROR"), "unknown");
+    assert.equal(normalise("STATE_UNSPECIFIED"), "unknown");
+  });
+
+  it("brings a preempted endpoint back when a camera needs it", () => {
+    // Nebius stops a preempted endpoint and leaves it stopped - it does not
+    // restart itself. This is the whole reason preemptible is usable here.
+    assert.equal(decide("stopped", 1, 0, NOW, GRACE), "start");
+  });
+
   it("reads an unknown or missing state as do-not-touch", () => {
     // Not as "safe to start". A state nobody here recognises is a state
     // whose billing nobody here understands.

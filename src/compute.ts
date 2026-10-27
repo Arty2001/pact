@@ -17,8 +17,21 @@
  * defined in the first place.
  */
 
-/** Where Nebius accepts instance verbs. */
-const API = "https://api.nebius.cloud/compute/v1/instances";
+/**
+ * Where the verbs live, which depends on what is being driven.
+ *
+ * A Serverless Endpoint and a Compute instance take the same three verbs
+ * with the same shape - a bearer token and an id in the body - but under
+ * different services. Endpoints are the default because they are what the
+ * hackathon's own definition of running on Nebius AI Cloud names, and
+ * because an id that is not recognisably an instance is far more likely to
+ * be one.
+ */
+function base(id: string): string {
+  return id.startsWith("computeinstance")
+    ? "https://api.nebius.cloud/compute/v1/instances"
+    : "https://api.nebius.cloud/ai/v1/endpoints";
+}
 
 /** Where a service account key is exchanged for a bearer token. */
 const TOKEN_URL = "https://auth.nebius.com/oauth2/token";
@@ -108,7 +121,7 @@ export class Tokens {
  */
 export async function statusOf(cfg: ComputeConfig, tokens: Tokens): Promise<ComputeState> {
   if (!cfg.instanceId) return "unknown";
-  const res = await fetch(`${API}/${encodeURIComponent(cfg.instanceId)}`, {
+  const res = await fetch(`${base(cfg.instanceId)}/${encodeURIComponent(cfg.instanceId)}`, {
     headers: { Authorization: `Bearer ${await tokens.bearer()}` },
   });
   if (!res.ok) throw new Error(`instance get ${res.status}`);
@@ -116,11 +129,22 @@ export async function statusOf(cfg: ComputeConfig, tokens: Tokens): Promise<Comp
   return normalise(body.status?.state);
 }
 
-/** Nebius state strings, mapped onto the five this cares about. */
+/**
+ * Nebius state strings, mapped onto the five this cares about.
+ *
+ * The endpoint vocabulary is the documented one: PROVISIONING, STARTING,
+ * IMAGE_PULLING, RUNNING, STOPPING, STOPPED, DELETING, ERROR and
+ * STATE_UNSPECIFIED. Pulling a multi-gigabyte image is a real and slow part
+ * of coming up, so IMAGE_PULLING is `starting` rather than something to act
+ * on - treating it as anything else would have the control plane issue a
+ * second start while the first is still downloading.
+ */
 export function normalise(state: string | undefined): ComputeState {
   switch ((state ?? "").toUpperCase()) {
     case "RUNNING":
       return "running";
+    case "PROVISIONING":
+    case "IMAGE_PULLING":
     case "STARTING":
     case "CREATING":
     case "UPDATING":
@@ -131,6 +155,10 @@ export function normalise(state: string | undefined): ComputeState {
     case "STOPPING":
     case "DELETING":
       return "stopping";
+    // ERROR is deliberately not `stopped`. A container that failed to start
+    // will fail again, and a control plane that retries it every minute
+    // turns one broken image into a bill. It needs a person, so it reads as
+    // do-not-touch and the caller logs it.
     default:
       return "unknown";
   }
@@ -148,7 +176,7 @@ export async function stop(cfg: ComputeConfig, tokens: Tokens): Promise<void> {
 
 async function verb(which: "start" | "stop", cfg: ComputeConfig, tokens: Tokens): Promise<void> {
   if (!cfg.instanceId) throw new Error("no instance configured");
-  const res = await fetch(`${API}/${which}`, {
+  const res = await fetch(`${base(cfg.instanceId)}/${which}`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${await tokens.bearer()}`,
@@ -179,6 +207,9 @@ export function decide(
   graceMs: number,
 ): "start" | "stop" | "wait" {
   if (publishers > 0) {
+    // This is also what makes preemptible safe to use. A preempted endpoint
+    // goes to STOPPED and Nebius does not bring it back - it stays down
+    // until something starts it. Something does: the next camera to publish.
     // Only from a settled stop. Asking a stopping instance to start races the
     // stop, and Nebius answers the second verb from whichever state it has
     // reached - so the result is genuinely unpredictable rather than merely
