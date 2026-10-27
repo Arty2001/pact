@@ -675,6 +675,16 @@ function renderSkills() {
       // label yet, and conflating the two sends people debugging a wait.
       const w =
         s.weightState === "fitted" ? "proved" : s.weightState === "zeroshot" ? "" : "pending";
+      // Shown only when it is `layout`, because `full` is what almost every
+      // skill is and a chip on every row would be noise. Shown at all
+      // because this is the one setting with no widget anywhere: the planner
+      // chooses it, it changes which picture the detector sees, and without
+      // this there is no way to tell from the outside which of the two a
+      // gate is actually asking about.
+      const view =
+        s.view === "layout"
+          ? `<span class="chip" title="Scores the shape of the screen with its content averaged away, so the score follows the player rather than the clip playing in it">layout</span>`
+          : "";
       el.innerHTML = `
         <span class="kind">${esc(s.kind)}</span>
         <span style="min-width:0">
@@ -683,6 +693,7 @@ function renderSkills() {
         </span>
         <span style="display:flex; gap:6px; align-items:center">
           <span class="chip ${w}">${esc(s.weightState)}</span>
+          ${view}
           <span class="chip">${s.sampleHz} Hz</span>
           <button type="button" class="chip act" title="Work out what this should be looking for">rethink</button>
         </span>`;
