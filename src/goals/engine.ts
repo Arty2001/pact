@@ -8,6 +8,7 @@ import { orphanedSkills } from "./sweep.ts";
 import { ground, needsGrounding } from "./ground.ts";
 import { plan } from "./planner.ts";
 import {
+  askRunnerToStart,
   type ComputeState,
   decide,
   start as startInstance,
@@ -152,6 +153,8 @@ export class Engine implements DurableObject {
       NEBIUS_INSTANCE_ID?: string;
       NEBIUS_COMPUTE_TOKEN?: string;
       TAVILY_API_KEY?: string;
+      GITHUB_DISPATCH_TOKEN?: string;
+      GITHUB_REPO?: string;
     },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
@@ -187,6 +190,29 @@ export class Engine implements DurableObject {
     if (path === "/compute/publishers" && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as { publishers?: number };
       return this.onPublishers(Math.max(0, Math.trunc(Number(body.publishers ?? 0))));
+    }
+
+    // Temporary: can a Worker reach Nebius at all? The auth host answers
+    // 522 from here and 200 from a shell, and whether the API host does the
+    // same decides whether waking the machine can ever live in the control
+    // plane. Removed once answered.
+    if (path === "/compute/probe") {
+      const out: Record<string, string> = {};
+      for (const [name, url] of [
+        ["auth", "https://auth.eu.nebius.com/oauth2/token/exchange"],
+        ["api", "https://api.nebius.cloud/compute/v1/instances/x"],
+      ] as const) {
+        try {
+          const r = await fetch(url, {
+            method: name === "auth" ? "POST" : "GET",
+            headers: { "User-Agent": "pact-control-plane/1.0" },
+          });
+          out[name] = `HTTP ${r.status}`;
+        } catch (err) {
+          out[name] = `threw: ${String(err).slice(0, 80)}`;
+        }
+      }
+      return Response.json(out);
     }
 
     if (path === "/plan" && request.method === "POST") return this.plan(request);
@@ -1780,11 +1806,38 @@ export class Engine implements DurableObject {
    */
   private async tickCompute(): Promise<void> {
     const cfg = this.computeConfig();
-    if (!cfg.instanceId || !cfg.token) return;
-    this.tokens ??= new Tokens(cfg.token);
+    // Either route is enough to be useful: a runner can start it, and a
+    // direct token can read and stop it.
+    if (!cfg.instanceId) return;
+    if (!cfg.token && !this.env.GITHUB_DISPATCH_TOKEN) return;
+    if (cfg.token) this.tokens ??= new Tokens(cfg.token);
 
     const row = this.computeRow();
+
+    // Asked for before the status read, when a camera is waiting and a
+    // runner is available. The read goes to Nebius and fails from here, so
+    // gating the start on it would mean never starting at all - and the
+    // workflow checks the real state before acting anyway, which is the
+    // check that matters.
+    const gh = this.env.GITHUB_DISPATCH_TOKEN;
+    if (gh && row.publishers > 0 && Date.now() - row.changed_at > 120_000) {
+      this.sql("UPDATE compute SET state = 'starting', changed_at = ? WHERE id = 1", Date.now());
+      try {
+        await askRunnerToStart(gh, this.env.GITHUB_REPO ?? "Arty2001/pact");
+        const say = "Bringing the encoder up - about two minutes before it can score anything.";
+        this.log.info("service.start", { detail: "asked a runner to start the machine" });
+        this.toWatchers({ type: "assistant", heard: "", say, ui: { banner: say, tone: "calm" } });
+        this.broadcastWatchers();
+      } catch (err) {
+        this.log.error("service.error", {
+          detail: `could not ask for a start: ${String(err).slice(0, 120)}`,
+        });
+      }
+      return;
+    }
+
     let state: ComputeState;
+    if (this.tokens === null) return;
     try {
       state = await statusOf(cfg, this.tokens);
     } catch (err) {
@@ -1812,7 +1865,14 @@ export class Engine implements DurableObject {
 
     try {
       if (action === "start") {
-        await startInstance(cfg, this.tokens);
+        // Through a runner, because this Worker cannot reach Nebius. The
+        // direct call is kept for any caller that can.
+        const gh = this.env.GITHUB_DISPATCH_TOKEN;
+        if (gh) {
+          await askRunnerToStart(gh, this.env.GITHUB_REPO ?? "Arty2001/pact");
+        } else {
+          await startInstance(cfg, this.tokens);
+        }
         this.sql("UPDATE compute SET state = 'starting', changed_at = ? WHERE id = 1", Date.now());
         // Said out loud, because the alternative is a minute of silence that
         // reads exactly like the thing being broken. The console has no other

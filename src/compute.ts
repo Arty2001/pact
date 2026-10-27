@@ -33,8 +33,15 @@ function base(id: string): string {
     : "https://api.nebius.cloud/ai/v1/endpoints";
 }
 
-/** Where a service account key is exchanged for a bearer token. */
-const TOKEN_URL = "https://auth.nebius.com/oauth2/token";
+/**
+ * Where a signed assertion is exchanged for a bearer token.
+ *
+ * Not auth.nebius.com/oauth2/token, which is the console's own login and
+ * answers "Missing required parameter: client_id" to anything a service
+ * account sends it. This one is documented for the REST API and is the
+ * only one that takes a key-pair assertion.
+ */
+const TOKEN_URL = "https://auth.eu.nebius.com/oauth2/token/exchange";
 
 /**
  * What the control plane believes about the encoder's machine.
@@ -68,15 +75,105 @@ export interface ComputeConfig {
  * caching without an expiry would fail an hour later in a way that reads as
  * "the cloud is broken" rather than "the token aged out".
  */
+/** Base64url, which JWT uses and btoa does not produce. */
+function b64url(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * A PEM private key, as bytes WebCrypto will accept.
+ *
+ * PKCS#8 only - the header says which, and getting it wrong fails inside
+ * importKey with a message about the key being unsupported rather than
+ * about the format, which is a long way from the actual mistake.
+ */
+export function pkcs8(pem: string): Uint8Array {
+  const body = pem
+    .replace(/-----BEGIN [A-Z ]+-----/, "")
+    .replace(/-----END [A-Z ]+-----/, "")
+    .replace(/\s+/g, "");
+  if (!/^-----BEGIN PRIVATE KEY-----/.test(pem.trim())) {
+    throw new Error("expected a PKCS#8 private key (-----BEGIN PRIVATE KEY-----)");
+  }
+  const raw = atob(body);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
+  return out;
+}
+
+/**
+ * The claims Nebius wants in a service account's assertion.
+ *
+ * Pure, so the shape can be checked without a key or a network. `sub` and
+ * `iss` are both the service account: it is asserting about itself. `aud`
+ * is the token endpoint, which is what stops an assertion minted for one
+ * service being replayed against another.
+ */
+export function claims(
+  serviceAccountId: string,
+  now: number,
+  ttlSeconds = 300,
+): Record<string, unknown> {
+  const iat = Math.floor(now / 1000);
+  // No `aud`. Nebius documents iss, sub and exp only, and the exchange
+  // rejects the assertion when an audience it did not ask for is present.
+  // Five minutes because the assertion exists to be spent immediately: the
+  // access token it buys lasts twelve hours, so a long-lived assertion is
+  // all risk and no convenience.
+  return { iss: serviceAccountId, sub: serviceAccountId, iat, exp: iat + ttlSeconds };
+}
+
+/**
+ * Keep a bearer token, minting and exchanging only when there isn't one.
+ *
+ * Nebius service accounts do not hand out a bearer token. They give you a
+ * key pair, you register the public half, and you prove who you are by
+ * signing a short-lived assertion with the private half and trading it for
+ * an IAM token. So this signs, exchanges, and caches.
+ *
+ * An earlier version passed the key straight through as the assertion,
+ * which is only correct if the key already is a JWT. Against a PEM it
+ * would have 401'd on the first camera - and the first anyone would know
+ * is a machine that never wakes.
+ */
 export class Tokens {
   #value: string | null = null;
   #until = 0;
+  #imported: CryptoKey | null = null;
   // Written out rather than a constructor parameter property: the test
   // runner is Node's own strip-only mode, which cannot transform those.
   readonly #key: string;
+  readonly #sa: string;
+  readonly #kid: string;
 
-  constructor(key: string) {
-    this.#key = key;
+  /**
+   * The secret, in whichever of the three shapes it arrives.
+   *
+   * A service account key is three facts that only work together - the
+   * private key, whose public half is registered, and the id of the account
+   * it belongs to. Three separate environment variables can disagree with
+   * each other, and the failure is a 401 that says nothing about which one
+   * is wrong. So they travel as one JSON secret, which is also the shape
+   * Nebius hands you when it generates a key itself.
+   *
+   * A plain string is still accepted: a long-lived API key, or an assertion
+   * minted elsewhere.
+   */
+  constructor(secret: string) {
+    const s = secret.trim();
+    if (s.startsWith("{")) {
+      const j = JSON.parse(s) as Record<string, string>;
+      this.#key = j["private-key"] ?? j.privateKey ?? "";
+      this.#sa = j["subject-id"] ?? j.subjectId ?? j.serviceAccountId ?? "";
+      this.#kid = j["public-key-id"] ?? j.publicKeyId ?? j.keyId ?? "";
+      if (!this.#key) throw new Error("service account key has no private-key");
+    } else {
+      this.#key = s;
+      this.#sa = "";
+      this.#kid = "";
+    }
   }
 
   async bearer(now: number = Date.now()): Promise<string> {
@@ -84,23 +181,36 @@ export class Tokens {
     // request it authorises is the same outage as no token at all.
     if (this.#value !== null && now < this.#until - 60_000) return this.#value;
 
-    // A key that is already a bearer token is used as one. Nebius API keys
-    // and service account keys are both strings from here, and the only
-    // honest way to tell them apart is to try the exchange and see.
-    if (!this.#key.includes(".")) {
-      this.#value = this.#key;
+    const assertion = this.#key.includes("-----BEGIN")
+      ? await this.#sign(now)
+      : this.#key; // already a JWT, or a plain long-lived API key
+
+    // A key with no dots and no PEM header cannot be an assertion, so it is
+    // used as the bearer directly rather than offered to an exchange that
+    // would only reject it.
+    if (!assertion.includes(".")) {
+      this.#value = assertion;
       this.#until = now + 3_600_000;
       return this.#value;
     }
 
     const res = await fetch(TOKEN_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        // Named explicitly. The auth host sits behind Cloudflare and so does
+        // this Worker, and the request arrived at the origin as something it
+        // would not answer: 522 from the edge, while the identical exchange
+        // from a shell returned 200 three times out of three. A plain client
+        // string is the difference between a bot rule firing and not.
+        "User-Agent": "pact-control-plane/1.0",
+        Accept: "application/json",
+      },
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
         requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
         subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
-        subject_token: this.#key,
+        subject_token: assertion,
       }),
     });
     if (!res.ok) throw new Error(`token exchange ${res.status}`);
@@ -109,6 +219,32 @@ export class Tokens {
     this.#value = body.access_token;
     this.#until = now + (body.expires_in ?? 3600) * 1000;
     return this.#value;
+  }
+
+  /** RS256 over the claims, with the registered key's id in the header. */
+  async #sign(now: number): Promise<string> {
+    if (!this.#sa || !this.#kid) {
+      throw new Error("a PEM key needs the service account id and the public key id");
+    }
+    // Imported once. The import is the expensive half and the key does not
+    // change for the life of the object.
+    this.#imported ??= await crypto.subtle.importKey(
+      "pkcs8",
+      pkcs8(this.#key),
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const enc = new TextEncoder();
+    const head = b64url(enc.encode(JSON.stringify({ alg: "RS256", kid: this.#kid })));
+    const body = b64url(enc.encode(JSON.stringify(claims(this.#sa, now))));
+    const signed = `${head}.${body}`;
+    const sig = await crypto.subtle.sign(
+      "RSASSA-PKCS1-v1_5",
+      this.#imported,
+      enc.encode(signed),
+    );
+    return `${signed}.${b64url(new Uint8Array(sig))}`;
   }
 }
 
@@ -186,6 +322,52 @@ async function verb(which: "start" | "stop", cfg: ComputeConfig, tokens: Tokens)
   });
   // 409 is "already in that state", which is the goal rather than a failure.
   if (!res.ok && res.status !== 409) throw new Error(`${which} ${res.status}`);
+}
+
+/**
+ * Ask a GitHub runner to start the machine.
+ *
+ * The control plane knows the moment a camera arrives and cannot act on it.
+ * Measured from inside this Worker: auth.eu.nebius.com 522,
+ * api.nebius.cloud 522, api.github.com 200. Every Nebius host is behind
+ * Cloudflare and so is this, and the edge times out on their origin - which
+ * is not a configuration anybody here can change, it is where the code
+ * lives.
+ *
+ * So the request goes to a runner, which is outside Cloudflare and can make
+ * the call. It costs a runner spinning up, twenty or forty seconds, against
+ * the ninety the machine then spends loading four gigabytes - so the whole
+ * detour hides inside a wait that already existed.
+ *
+ * Fire and forget by the caller's choice. A camera arriving must not wait
+ * on GitHub, and a dispatch that failed is reported rather than retried:
+ * the next publisher, or the next alarm, asks again.
+ */
+export async function askRunnerToStart(
+  token: string,
+  repo: string,
+  ref = "main",
+): Promise<void> {
+  const res = await fetch(
+    `https://api.github.com/repos/${repo}/actions/workflows/vm.yml/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        // GitHub rejects a request with no User-Agent outright, with a
+        // message about the agent rather than about the token.
+        "User-Agent": "pact-control-plane",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ref, inputs: { action: "start" } }),
+    },
+  );
+  // 204 is the documented success. Anything else is worth the caller seeing.
+  if (res.status !== 204) {
+    throw new Error(`dispatch ${res.status} ${(await res.text()).slice(0, 120)}`);
+  }
 }
 
 /**

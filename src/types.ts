@@ -71,4 +71,15 @@ export interface Env {
    * broken one.
    */
   TAVILY_API_KEY?: string;
+  /**
+   * A fine-grained token with Actions write on this repository only.
+   *
+   * It exists because a Cloudflare Worker cannot reach Nebius, so starting
+   * the encoder's machine has to be asked of a GitHub runner instead.
+   * Stopping needs none of this: perception stops its own machine, from a
+   * place that can make the call.
+   */
+  GITHUB_DISPATCH_TOKEN?: string;
+  /** owner/repo holding the vm workflow. Defaults to Arty2001/pact. */
+  GITHUB_REPO?: string;
 }
