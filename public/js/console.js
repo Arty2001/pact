@@ -37,6 +37,32 @@ let state = { skills: [], goals: [], questions: [], proposals: [], perception: [
 let devices = [];
 /** deviceId -> { device, pc, pane, toasts }. Several at once, on purpose. */
 const feeds = new Map();
+/**
+ * Cameras turned off by hand.
+ *
+ * The wall's default is every camera, because the wall IS the product - a
+ * goal is proved by whichever camera happened to see it, and which one that
+ * was is the first thing anyone wants to know. A camera nobody turned on is
+ * a camera nobody sees, so nothing waits to be turned on.
+ *
+ * That makes "off" a decision, and a decision has to be remembered:
+ * otherwise the next `up` from the Hub puts back the pane somebody just
+ * closed, and the page argues with the person using it.
+ *
+ * A camera that leaves is forgotten here, so unplugging one and bringing it
+ * back reads as a new camera rather than a dismissed one.
+ */
+const dismissed = new Set();
+/**
+ * Cameras mid-subscribe.
+ *
+ * `addFeed` awaits an SFU negotiation before it can record itself in
+ * `feeds`, so two Hub messages arriving inside that window would both find
+ * the device missing and both subscribe: two panes for one camera, and an
+ * orphaned PeerConnection nobody closes. Latent while the wall filled one
+ * camera at a time; reachable now it fills itself.
+ */
+const joining = new Set();
 /** The pane the chart and the hero count follow. One of them, not all. */
 let leadId = null;
 /** Kept for the places that only ever cared about the followed camera. */
@@ -303,7 +329,15 @@ function renderStartup() {
 
   // Nothing to report before a camera exists: the empty stage already says
   // what to do, and two messages about the same absence is one too many.
-  if (rooms.length === 0 || scored) {
+  //
+  // And nothing to report with no skills, which is the case this used to get
+  // most wrong. "Scoring this camera" can never complete against an empty
+  // registry — perception sends a score snapshot only once a skill has
+  // scored — so the panel sat at three-quarters with a spinner against a
+  // system that was entirely healthy and simply had no goals. A progress bar
+  // that cannot finish is worse than no progress bar: it reports a fault
+  // that is not there. The Goals card already says what to do about it.
+  if (rooms.length === 0 || scored || (loaded && (state.skills ?? []).length === 0)) {
     host.hidden = true;
     return;
   }
@@ -1061,6 +1095,15 @@ function requestPlot() {
 function quietBecause() {
   if ((state.perception ?? []).length === 0) return "no watcher is connected";
   if (devices.length === 0) return "no camera is publishing";
+  // Before anything about the feed, because with no skills there is no feed
+  // to diagnose. Perception sends a score snapshot only once a skill has
+  // scored, so an empty registry means it reports nothing at all — and every
+  // check below reads that silence as a subscription that is not delivering.
+  // It sent someone hunting a dead encoder for an hour when the encoder was
+  // fine, the screen was arriving, and there was simply nothing to look for.
+  if (loaded && (state.skills ?? []).length === 0) {
+    return "no skills yet — a goal is what gives the watcher something to look for";
+  }
   if (lastScoreAt === 0) {
     return devices.length > 0
       ? "connected, waiting for the first scored frame"
@@ -1252,9 +1295,11 @@ function syncLegend(scores) {
  *
  * Every camera runs the whole skill set against its own frames, with its own
  * motion gate and its own calibration fitted from its own background - so
- * this chooses what to LOOK at, not what is running. Turning two on shows
- * two, because the question a wall answers is which room something happened
- * in, and one pane at a time cannot answer it.
+ * this chooses what to LOOK at, not what is running.
+ *
+ * All of them are on to begin with, which makes these pills the way to turn
+ * one OFF. The question a wall answers is which room something happened in,
+ * and a wall that opens with one pane on it cannot answer that.
  */
 function renderCams() {
   const host = $("cams");
@@ -1274,7 +1319,7 @@ function renderCams() {
       // The last one on stays on. Turning every camera off leaves a stage
       // saying nothing is publishing while something is, which reads as a
       // fault rather than as a choice.
-      if (on && feeds.size > 1) dropFeed(d.id);
+      if (on && feeds.size > 1) dropFeed(d.id, true);
       else if (!on) void addFeed(d);
       else setLead(d.id);
     });
@@ -1308,7 +1353,9 @@ function setLead(id) {
 }
 
 async function addFeed(device) {
-  if (feeds.has(device.id)) return;
+  if (feeds.has(device.id) || joining.has(device.id)) return;
+  joining.add(device.id);
+  dismissed.delete(device.id);
 
   const pane = document.createElement("div");
   pane.className = "feed";
@@ -1339,12 +1386,30 @@ async function addFeed(device) {
     pane.remove();
     if (feeds.size === 0) $("stage-empty").hidden = false;
     renderCams();
+  } finally {
+    joining.delete(device.id);
   }
 }
 
-function dropFeed(id) {
+/**
+ * Put every camera on the wall, except the ones turned off by hand.
+ *
+ * Idempotent, because it runs on every Hub message: `addFeed` returns early
+ * for anything already up or already subscribing.
+ */
+function syncWall() {
+  for (const d of devices) {
+    if (!dismissed.has(d.id)) void addFeed(d);
+  }
+  renderCams();
+}
+
+function dropFeed(id, byHand = false) {
   const feed = feeds.get(id);
   if (feed === undefined) return;
+  // Only a person closing a pane is a decision worth keeping. A camera that
+  // went down, or a teardown, must not come back dismissed.
+  if (byHand) dismissed.add(id);
   try {
     feed.pc?.close();
   } catch {
@@ -1439,20 +1504,21 @@ function hubSocket() {
     else return;
 
     renderMeta();
-    // Anything that has gone off the wall takes its pane with it; anything
-    // new waits to be turned on, except when nothing is on at all.
+    // Anything that has gone off the wall takes its pane with it, and stops
+    // counting as dismissed - the next camera to hold that id is a new one.
     for (const id of [...feeds.keys()]) {
       if (!devices.some((d) => d.id === id)) dropFeed(id);
+    }
+    for (const id of [...dismissed]) {
+      if (!devices.some((d) => d.id === id)) dismissed.delete(id);
     }
     if (devices.length === 0) {
       teardown();
       $("stage-empty").hidden = false;
       $("hud").hidden = true;
       renderCams();
-    } else if (feeds.size === 0) {
-      void addFeed(devices[0]);
     } else {
-      renderCams();
+      syncWall();
     }
   };
   ws.onclose = () => setTimeout(hubSocket, 2500);
