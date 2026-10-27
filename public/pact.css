@@ -333,7 +333,29 @@ a { color: var(--proved-text); }
 .wall {
   display: grid;
   gap: 5px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  /* The tile floor, stepped down as the wall fills.
+
+     Every camera goes on the wall by default now, so the thing that has to
+     give as one grows is tile size, not the page's height: a 300px floor is
+     right for four cameras and is a scroll for twenty. Stepped with :has()
+     rather than a class written from JS, so the layout keeps one owner and
+     a wall that fills itself cannot get the count wrong. */
+  --tile: 300px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--tile)), 1fr));
+  /* Rows hug the top. A short wall in a tall stage should leave its gap at
+     the bottom rather than spread the cameras out to hide it. */
+  align-content: start;
+}
+.wall:has(.feed:nth-child(n+5))  { --tile: 240px; }
+.wall:has(.feed:nth-child(n+9))  { --tile: 190px; }
+.wall:has(.feed:nth-child(n+13)) { --tile: 156px; }
+.wall:has(.feed:nth-child(n+21)) { --tile: 124px; }
+
+/* A phone. One column is right for two cameras and absurd for a dozen:
+   stacked 16/9 panes put the goals two screens down. */
+@media (max-width: 560px) {
+  .wall:has(.feed:nth-child(n+3)) { --tile: 132px; }
+  .wall:has(.feed:nth-child(n+9)) { --tile: 104px; }
 }
 .wall:empty { display: none; }
 
@@ -348,6 +370,12 @@ a { color: var(--proved-text); }
 /* One pane fills the stage as before; the ratio only matters once there
    are several and they have to agree on a shape. */
 .wall:has(.feed:only-child) { gap: 0; }
+
+/* And on its own it does not label itself: the HUD's name sits in the same
+   corner, bigger, with the track count under it, so the two were printed on
+   top of each other. The mono pill is a wall label - it earns its place
+   once there is another pane to tell this one apart from. */
+.wall:has(.feed:only-child) .feed-name { display: none; }
 
 /* Which pane the chart and the count are following. A ring rather than a
    hue: it is a selection, not a verdict about what the camera saw. */
@@ -434,6 +462,44 @@ a { color: var(--proved-text); }
 }
 .tally .sub { font-family: var(--mono); font-size: 11px; color: var(--on-dark-dim); }
 .tally .what { font-size: 13px; color: var(--on-dark); margin-top: 3px; font-weight: 500; }
+
+/* The HUD, once the stage is a wall.
+
+   With one feed the name and the count sit at the bottom of the stage, over
+   the room they describe. With several, the bottom of the stage is the last
+   ROW of cameras - so the strip moves to the top and reads as the wall's
+   header, still following whichever pane carries the ring.
+
+   Legibility stays on the text-shadow these already carry. A scrim would
+   mean dimming a camera in order to caption it, and the camera is the point.
+
+   The count steps down too: at twelve panes a 78px numeral covers one. */
+/* Past one camera the HUD stops being an overlay and becomes a header.
+
+   Overlaid, it had nowhere to go that was not somebody's room: the name
+   landed on the lead pane's own label, and the count lay across whichever
+   camera held the top-right tile - worse the denser the wall got, because
+   the tile shrank and the numeral did not. So the stage opens a band above
+   the wall and the strip lives in it, on the stage's own dark ground.
+
+   Nothing is covered, nothing needs a scrim, and the band costs 38px once
+   rather than a collision per camera. */
+.stage:has(.feed:nth-child(n+2)) { padding-top: 38px; }
+.stage:has(.feed:nth-child(n+2)) .hud {
+  justify-content: flex-start;
+  padding: 9px clamp(10px, 1.2vw, 14px);
+}
+.stage:has(.feed:nth-child(n+2)) .hud-top { order: -1; align-items: baseline; }
+
+/* Both halves go on one line, because the band is a line. */
+.stage:has(.feed:nth-child(n+2)) .where { display: flex; align-items: baseline; gap: 8px; }
+.stage:has(.feed:nth-child(n+2)) .where b { display: inline; font-size: 12.5px; }
+.stage:has(.feed:nth-child(n+2)) .tally {
+  display: flex; align-items: baseline; gap: 7px;
+  text-shadow: none;
+}
+.stage:has(.feed:nth-child(n+2)) .tally .n { display: inline; font-size: 23px; letter-spacing: -.03em; }
+.stage:has(.feed:nth-child(n+2)) .tally .what { margin-top: 0; font-size: 12px; }
 
 /* --------------------------------------------------------------- signal */
 
@@ -793,6 +859,65 @@ form[data-drafted] #g-hint { display: none; }
   justify-self: center;
 }
 .qr img, .qr canvas { display: block; }
+
+/* --------------------------------------------------------------- the rig */
+
+/* Wider than the join card, because this one lists feeds rather than asking
+   for one thing. Same card otherwise - it is the same job, done six times. */
+.join-card.rig-card { max-width: 720px; }
+
+.rig-rows { display: grid; gap: 6px; }
+.rig-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 100px minmax(0, 1.1fr);
+  gap: 6px;
+  align-items: center;
+}
+.rig-row input, .rig-row select { font-size: 12px; padding: 7px 9px; }
+.rig-file {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--dimmer);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+@media (max-width: 560px) {
+  .rig-row { grid-template-columns: minmax(0, 1fr) 92px; }
+  .rig-file { grid-column: 1 / -1; }
+}
+
+/* The rig's own monitor. Not the wall - the wall is the console's job - just
+   enough per clip to see that frames are moving before anything is filmed. */
+.rig-grid {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+}
+.rig-cell {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #04070A;
+  border-radius: calc(var(--r2) - 4px);
+  overflow: hidden;
+}
+.rig-cell video { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* A clip that never started keeps its box, so the grid still reads as the
+   wall you asked for with one hole in it rather than as a shorter wall. */
+.rig-cell.dead { outline: 1px solid var(--bad-edge); outline-offset: -1px; }
+
+.rig-stat {
+  position: absolute;
+  left: 6px; right: 6px; bottom: 6px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.3;
+  color: var(--on-dark-dim);
+  background: rgba(7, 11, 16, .72);
+  padding: 3px 6px;
+  border-radius: 5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rig-stat.ok { color: var(--proved-on-dark); }
+.rig-stat.err { color: #FFB4B4; }
 
 /* ============================================================ join page
 
@@ -1305,6 +1430,24 @@ body.join {
 .btn.start { justify-self: start; }
 .dialog-note { margin: 0; color: var(--dim); font-size: 13px; }
 
+/* Who else is watching.
+
+   Violet, because in this palette violet means watching and that is the one
+   thing this paragraph is about - it is not a fifth hue, and it is not the
+   amber that means pending. Not a `small` either: on a wall anyone can open,
+   this is the most important sentence in the dialog. */
+.shared-note {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--watch-edge);
+  background: var(--watch-wash);
+  border-radius: calc(var(--r2) - 4px);
+  color: var(--watch-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.shared-note b { font-weight: 600; }
+
 
 /* =================================================== what the render showed */
 
@@ -1384,6 +1527,9 @@ body { font-size: 13px; }
    product is, so the feed is the hero and the tally is the strip above it. */
 .stage-card { border-radius: var(--r3); }
 .stage-card .stage { min-height: clamp(320px, 46vh, 560px); }
+/* Past a handful of panes the wall is shorter than the hero height, and the
+   difference showed as a dark band under the cameras. Then it hugs its wall. */
+.stage-card .stage:has(.feed:nth-child(n+2)) { min-height: 0; }
 .stage-card > .cams,
 .stage-card > .stage,
 .stage-card > .signal { margin-inline: clamp(12px, 1.4vw, 16px); }
@@ -1466,9 +1612,17 @@ body { font-size: 13px; }
 
 /* ============================================ getting ready, step by step */
 
-/* A cold start is about a minute and the encoder socket cannot open until
-   the model has loaded, so for that minute the page would otherwise sit
-   there looking broken. Each step is an observed fact, not a timer. */
+/* Why the system is or is not scoring.
+
+   This replaced a progress bar, and the bar was the problem: a percentage
+   implies motion, so a machine stuck `starting` for half an hour rendered
+   exactly like a cold start thirty seconds in. The colour now carries the
+   verdict and nothing implies progress that is not happening.
+
+   Three tones, and the middle one matters most. `warn` is waiting - a real
+   state, briefly - and `bad` is a state that has outlasted its own
+   explanation. A system that only had "fine" and "broken" called both of
+   those fine. */
 .startup {
   margin: 0 clamp(12px, 1.4vw, 16px) 10px;
   padding: 11px 14px;
@@ -1478,20 +1632,76 @@ body { font-size: 13px; }
   display: grid;
   gap: 8px;
 }
-.startup-top { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-size: 13px; }
-.startup-top b { color: var(--fg); font-weight: 600; }
-.startup-top span { font-size: 12px; color: var(--dim); }
+.startup[data-tone="good"] { border-color: var(--proved-edge); background: var(--proved-wash); }
+.startup[data-tone="warn"] { border-color: var(--pending-edge); background: var(--pending-wash); }
+.startup[data-tone="bad"]  { border-color: var(--bad-edge);    background: var(--bad-wash); }
 
-.startup-bar { height: 4px; background: var(--sunk); border-radius: 3px; overflow: hidden; }
-.startup-bar i {
-  display: block; height: 100%;
-  background: var(--watch, var(--proved));
-  border-radius: 3px;
-  transition: width .4s ease-out;
+.stat-top { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-size: 13px; }
+.stat-top b { color: var(--fg); font-weight: 600; }
+.stat-top span { font-size: 12px; color: var(--dim); }
+
+/* The chain, each link stating its own truth rather than a tick inherited
+   from the link before it. That is what makes a contradiction legible:
+   "Machine starting" beside "Watcher connected" is a stale machine state,
+   and from the old panel there was no way to see it at all. */
+.stat-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 7px;
+  font-size: 11px;
 }
+.stat-links span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--hair);
+  border-radius: 999px;
+  background: var(--glass-hi);
+  color: var(--dimmer);
+  /* The label is the quiet half and the value is the half being read, so the
+     value carries the weight even when the link is fine. */
+  white-space: nowrap;
+}
+.stat-links b { color: var(--fg); font-weight: 600; }
+.stat-links i { font-style: normal; color: var(--dim); font-size: 10.5px; }
+.stat-links .ok { border-color: var(--proved-edge); color: var(--proved-text); }
+.stat-links .ok b { color: var(--proved-text); }
+.stat-links .bad { border-color: var(--bad-edge); color: var(--bad-text); }
+.stat-links .bad b { color: var(--bad-text); }
 
-.startup-steps { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--dimmer); }
-/* A completed step reads as completed without a tick glyph on every row:
-   the colour change is the signal and it costs no width. */
-.startup-steps .done { color: var(--proved-text); }
-.startup-steps .done::before { content: "✓ "; }
+/* The sentence a score is a comparison against.
+
+   A label is the whole detector here - the text is embedded and the vector
+   IS the skill - so this is the one thing needed to judge a number, and it
+   was a `title` attribute on a legend chip. Invisible exactly when it is
+   wanted: while watching a curve move.
+
+   The band sits beside it because 0.91 means nothing alone. Whether that is
+   firing depends on where this skill's own enter and exit thresholds are,
+   and they differ per skill. */
+.detector {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--hair);
+  border-radius: var(--r);
+  background: var(--glass-hi);
+  font-size: 11.5px;
+  color: var(--dim);
+}
+.detector .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; align-self: center; }
+.detector .dk { font-family: var(--mono); font-size: 11px; color: var(--fg); font-weight: 500; }
+/* Quoted, because it is someone's sentence rather than a field value, and
+   the quotes are what stop it reading as a label for the chips after it. */
+.detector q { color: var(--fg); font-size: 12.5px; }
+.detector .dm {
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dimmer);
+  font-size: 10.5px;
+  white-space: nowrap;
+}

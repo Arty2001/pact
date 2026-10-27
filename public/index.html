@@ -84,9 +84,11 @@
       <span class="note">every skill scoring these frames, several times a second</span>
     </header>
 
-        <!-- Every camera on the wall. Each runs the whole skill set on its own
-             frames, with its own motion gate and its own calibration, so this
-             is a choice of what to watch rather than of what is running. -->
+        <!-- Every camera on the wall, and all of them on to begin with. Each
+             runs the whole skill set on its own frames, with its own motion
+             gate and its own calibration, so these pills are a choice of what
+             to watch rather than of what is running - and now a choice of
+             what to stop watching, since nothing waits to be switched on. -->
         <div class="cams" id="cams"></div>
 
         <!-- A cold start is about a minute: the encoder is four gigabytes and
@@ -96,9 +98,10 @@
         <div class="startup" id="startup" hidden></div>
 
         <div class="stage" id="stage">
-          <!-- One pane per camera you have turned on. The chips above are a
-               multi-select, not a switch: watching two rooms at once is the
-               point of a wall. -->
+          <!-- One pane per camera that is publishing, whoever added it. The
+               chips above are a multi-select for turning one OFF: watching
+               every room at once is the point of a wall, so the default is
+               all of them rather than the first one to connect. -->
           <div class="wall" id="wall"></div>
 
           <!-- An empty section keeps its frame and says one thing. This used
@@ -139,6 +142,14 @@
             <div><b class="lit" id="r-count">0</b>counted today</div>
             <div><b id="r-rate">—</b>sampling</div>
           </div>
+
+          <!-- The sentence the number above is a comparison against. A label
+               IS the detector here - there is no training, the text becomes
+               the weight vector - so a score of 0.91 with the label out of
+               sight is a number nobody can act on. It was a tooltip on a
+               legend chip, which is to say invisible exactly when it is
+               needed: while watching a curve move. -->
+          <div class="detector" id="r-detector" hidden></div>
       <div class="legend" id="legend"></div>
       <svg id="plot" viewBox="0 0 600 150" width="100%" height="150" preserveAspectRatio="none"
            role="img" aria-label="Detection scores over time against the enter and exit thresholds"></svg>
@@ -201,6 +212,13 @@
       Scan this on the device you want to watch with, or open the link there.
       The code works once and lasts ten minutes.
     </p>
+    <p class="shared-note">
+      <b>This wall is public.</b> Everyone who opens this site sees every
+      camera on it, live, and shares one set of goals. Frames are analysed and
+      discarded, but point the camera at something you are happy for strangers
+      to watch. For a wall only you can see, run your own — the repo is
+      Apache-2.0.
+    </p>
     <div class="qr" id="claim-qr"></div>
     <div class="field">
       <label>Link</label>
@@ -220,7 +238,7 @@
 
     <div class="field">
       <label for="g-sentence">What do you want to track?</label>
-      <input id="g-sentence" type="text" autocomplete="off" placeholder="I want to do 20 pushups every morning">
+      <input id="g-sentence" type="text" autocomplete="off" placeholder="I want to apply moisturizer every night">
       <small>Nemotron turns this into skills and reuses any that already exist. Check what it drafts before creating — a skill's label <em>is</em> its detector.</small>
     </div>
     <div class="actions start">
@@ -239,7 +257,7 @@
     <div class="two">
       <div class="field">
         <label for="g-key">Key</label>
-        <input id="g-key" type="text" placeholder="fitness/pushups" required>
+        <input id="g-key" type="text" placeholder="care/moisturizer" required>
       </div>
       <div class="field">
         <label for="g-type">Type</label>
@@ -252,7 +270,7 @@
 
     <div class="field">
       <label for="g-desc">Description</label>
-      <input id="g-desc" type="text" placeholder="Do 20 pushups every morning" required>
+      <input id="g-desc" type="text" placeholder="Apply moisturizer every night" required>
     </div>
 
     <div class="two">

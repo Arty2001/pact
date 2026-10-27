@@ -305,17 +305,58 @@ function renderFinding() {
 }
 
 /**
- * Getting ready, as four facts rather than a bar that fills on a timer.
+ * How long a state has lasted, at a glance.
  *
- * Every step below is something the control plane actually observes, so the
- * progress cannot lie: the machine is running or it is not, perception has
- * said hello or it has not, this camera has been scored or it has not. A
- * percentage invented from an elapsed clock would be smoother and would
- * mean nothing, and the one thing someone staring at a cold start needs is
- * to know which part is slow.
+ * Seconds up to a minute, then minutes, then hours. A spinner that might
+ * mean ten seconds or six hours is the thing this exists to replace.
+ */
+function lasted(sinceMs) {
+  if (!sinceMs) return "";
+  const s = Math.max(0, Math.round((Date.now() - sinceMs) / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
+}
+
+/** How long ago something last arrived, for a feed that should be constant. */
+function arrived(secondsAgo) {
+  if (secondsAgo == null) return "—";
+  if (secondsAgo < 1.5) return "now";
+  if (secondsAgo < 60) return `${Math.round(secondsAgo)}s ago`;
+  return `${Math.round(secondsAgo / 60)}m ago`;
+}
+
+//: Longer than this in a transient state means stuck, not slow.
+//
+// A cold start is about ninety seconds: the machine boots, then four
+// gigabytes of weights load before the Engine socket can open. Three minutes
+// is comfortably past that, and the distinction matters more than any other
+// thing on this panel - "starting" for 40 seconds is the system working, and
+// "starting" for 36 minutes is a machine that will never arrive. Both looked
+// identical here, and the second one cost an afternoon.
+const STUCK_MS = 180000;
+
+/**
+ * Why the system is or is not scoring, in one place.
  *
- * Hidden entirely once the last step is done, because a progress bar that
- * stays on screen after it finishes is just furniture.
+ * This replaced a progress bar, and the progress bar was the problem. It
+ * showed four steps with a percentage, which implied forward motion, and
+ * every state that was not moving looked like a state that was. A machine
+ * stuck `starting` for half an hour, a registry with no skills in it, and a
+ * cold start thirty seconds in all rendered as the same three-quarters-full
+ * bar with a spinner.
+ *
+ * So: no bar, and no implied motion. Each link in the chain states what it
+ * is and how long it has been that way, and the headline is whichever link
+ * is actually blocking. Healthy collapses to one line, because a system that
+ * is working should not explain itself at length.
+ *
+ * The chain, in the order a frame travels it:
+ *
+ *   machine -> watcher -> camera -> skills -> scoring
+ *
+ * `machine` is absent unless the sleep/wake feature is configured, because a
+ * step for a machine nobody is starting is a step that never completes.
  */
 function renderStartup() {
   const host = $("startup");
@@ -324,57 +365,116 @@ function renderStartup() {
   const rooms = state.rooms ?? [];
   const room = activeRoom ?? rooms[0]?.room ?? null;
   const machine = state.encoder ?? null;
+  const since = state.encoderSince ?? 0;
   const connected = (state.perception ?? []).length > 0;
-  const scored = (state.watching ?? []).some((w) => w.room === room);
+  const skills = (state.skills ?? []).length;
+  const feed = rooms.find((r) => r.room === room) ?? null;
+  const seen = (state.watching ?? []).find((w) => w.room === room) ?? null;
+  const scoring = seen !== null && seen.secondsAgo < 30;
+  const stuck =
+    (machine === "starting" || machine === "stopping") && since > 0 && Date.now() - since > STUCK_MS;
 
-  // Nothing to report before a camera exists: the empty stage already says
-  // what to do, and two messages about the same absence is one too many.
-  //
-  // And nothing to report with no skills, which is the case this used to get
-  // most wrong. "Scoring this camera" can never complete against an empty
-  // registry — perception sends a score snapshot only once a skill has
-  // scored — so the panel sat at three-quarters with a spinner against a
-  // system that was entirely healthy and simply had no goals. A progress bar
-  // that cannot finish is worse than no progress bar: it reports a fault
-  // that is not there. The Goals card already says what to do about it.
-  if (rooms.length === 0 || scored || (loaded && (state.skills ?? []).length === 0)) {
+  // Nothing to say before the first read, or before there is a camera at
+  // all: the empty stage already says what to do about that one.
+  if (!loaded || rooms.length === 0) {
     host.hidden = true;
     return;
   }
 
-  const steps = [
-    { label: "Camera publishing", done: true },
-    // Only when the sleep/wake feature is configured. Without it the
-    // encoder is assumed to be running somewhere already, and a step for a
-    // machine nobody is starting would be a step that never completes.
+  // The blocking link, most upstream first, because fixing a downstream
+  // symptom while an upstream link is down is wasted effort. Each carries
+  // the one thing worth doing about it.
+  let tone = "warn";
+  let head;
+  let why = "";
+  if (machine === "stopped") {
+    head = "Encoder machine is stopped";
+    why = "It starts itself when a camera publishes. Give it about a minute.";
+  } else if (stuck) {
+    tone = "bad";
+    head = `Encoder machine has been ${machine} for ${lasted(since)}`;
+    why =
+      machine === "stopping"
+        ? "A start is refused while it is still stopping, so nothing will score until this finishes."
+        : "A cold start is about a minute. This one is not arriving.";
+  } else if (machine === "starting") {
+    head = "Encoder machine is starting";
+    why = "About a minute: it boots, then loads four gigabytes of weights.";
+  } else if (!connected) {
+    head = "Waiting for the watcher";
+    why = "The machine is up; the encoder loads before the socket can open.";
+  } else if (skills === 0) {
+    head = "Nothing to look for yet";
+    why = "A goal is what gives the watcher skills to score. Write one above.";
+  } else if (feed === null || feed.secondsAgo > 30) {
+    tone = "bad";
+    head = `No frames from ${room} for ${arrived(feed?.secondsAgo)}`;
+    why = "Check the tab sharing this screen is still open.";
+  } else if (!scoring) {
+    head = "Connected, waiting for the first scored frame";
+    why = "";
+  } else {
+    tone = "good";
+    head = `Scoring ${skills} skill${skills === 1 ? "" : "s"} on ${room}`;
+  }
+
+  // Every link, with its own truth rather than a tick derived from the one
+  // before it. This is what makes a contradiction visible instead of
+  // plausible: "machine starting" beside "watcher connected" is a stale
+  // machine state, and it was previously impossible to see that from here.
+  const links = [
     ...(machine === null
       ? []
-      : [{ label: "Encoder machine", done: machine === "running", note: machine }]),
-    { label: "Encoder loaded", done: connected, note: connected ? "" : "about a minute" },
-    { label: "Scoring this camera", done: false },
+      : [
+          {
+            label: "Machine",
+            value: machine,
+            at: since,
+            ok: machine === "running",
+            bad: stuck || machine === "stopped",
+          },
+        ]),
+    {
+      label: "Watcher",
+      value: connected ? (state.perception[0].encoderId ?? "connected") : "not connected",
+      ok: connected,
+    },
+    { label: room, value: arrived(feed?.secondsAgo), ok: feed !== null && feed.secondsAgo <= 30 },
+    { label: "Skills", value: String(skills), ok: skills > 0 },
+    { label: "Scoring", value: seen ? arrived(seen.secondsAgo) : "not yet", ok: scoring },
   ];
 
-  const at = steps.findIndex((s) => !s.done);
-  const pct = Math.round((steps.filter((s) => s.done).length / steps.length) * 100);
-  const since = state.encoderSince ?? 0;
-  const waited = since > 0 ? Math.round((Date.now() - since) / 1000) : 0;
-
   host.hidden = false;
+  host.dataset.tone = tone;
   host.innerHTML =
-    `<div class="startup-top">` +
-    `<b>${esc(steps[at]?.label ?? "Ready")}</b>` +
-    (steps[at]?.note ? `<span>${esc(steps[at].note)}</span>` : "") +
-    (waited > 3 ? `<span class="mono">${waited}s</span>` : "") +
+    `<div class="stat-top">` +
+    `<b>${esc(head)}</b>` +
+    (why ? `<span>${esc(why)}</span>` : "") +
     `</div>` +
-    `<div class="startup-bar"><i style="width:${pct}%"></i></div>` +
-    `<div class="startup-steps">${steps
-      .map((s) => `<span class="${s.done ? "done" : ""}">${esc(s.label)}</span>`)
-      .join("")}</div>`;
+    // Hidden while healthy. A working system saying five things about itself
+    // is five things to read before the thing you came for.
+    (tone === "good"
+      ? ""
+      : `<div class="stat-links">${links
+          .map(
+            (l) =>
+              `<span class="${l.bad ? "bad" : l.ok ? "ok" : ""}">` +
+              `${esc(l.label)}<b>${esc(l.value)}</b>` +
+              (l.at && !l.ok ? `<i class="mono">${esc(lasted(l.at))}</i>` : "") +
+              `</span>`,
+          )
+          .join("")}</div>`);
 }
 
 function renderAll() {
   pruneTraces();
   pruneLegend();
+  // Forced rather than left to the frame-rate path: a label can change under
+  // a running chart - a proposal applied, a skill re-created - and the line
+  // is keyed on the skill, so without this it would keep showing the sentence
+  // that has just been replaced.
+  detectorKey = null;
+  renderDetector(focusSkill ?? loudest());
   announceGoals();
   renderGoals();
   renderSkills();
@@ -1151,6 +1251,54 @@ function pushScore(skillKey, score, phase) {
   const pts = traces.get(lead) ?? [];
   $("r-score").textContent = num(score);
   $("r-peak").textContent = num(Math.max(...pts.map((pt) => pt.score)));
+  renderDetector(lead);
+}
+
+//: The skill the detector line is currently describing, so a line that has
+//: not changed is not rewritten at the frame rate.
+let detectorKey = null;
+
+/**
+ * The sentence the score is a comparison against.
+ *
+ * A label is the whole of a skill here: there is no training, the text is
+ * embedded and the vector IS the detector. So the one thing needed to judge
+ * a score is the sentence that produced it, and it lived in a `title`
+ * attribute on a legend chip - invisible precisely when it matters, which is
+ * while watching a curve move. A skill reading 0.91 with its label out of
+ * sight is a number nobody can act on, and that is how it was reported.
+ *
+ * The band comes too, because 0.91 means nothing on its own: a skill enters
+ * at its own `enterConf` and leaves at its own `exitConf`, and whether 0.91
+ * is firing depends entirely on where those sit. `view` is here for the same
+ * reason - a layout skill is reading the shape of the screen with the content
+ * averaged away, so it is answering a different question from its own child,
+ * and two skills on one chart can legitimately disagree because of it.
+ */
+function renderDetector(key) {
+  const host = $("r-detector");
+  if (host === null) return;
+  const skill = (state.skills ?? []).find((s) => s.key === key) ?? null;
+  if (skill === null) {
+    host.hidden = true;
+    detectorKey = null;
+    return;
+  }
+  if (detectorKey === key) return;
+  detectorKey = key;
+
+  const band = `${num(skill.exitConf)}–${num(skill.enterConf)}`;
+  host.hidden = false;
+  host.innerHTML =
+    `<span class="dot" style="background:${hueOf(key)}"></span>` +
+    `<b class="dk">${esc(key)}</b>` +
+    `<q>${esc(skill.label)}</q>` +
+    `<span class="dm mono">${esc(band)}</span>` +
+    // Only when it is `layout`, as in the skills list: `full` is what almost
+    // everything is, and a chip on every line is noise rather than signal.
+    (skill.view === "layout" ? `<span class="dm">layout</span>` : "") +
+    `<span class="dm">${esc(skill.surface)}</span>` +
+    (skill.weightState === "pending" ? `<span class="dm">no vector yet</span>` : "");
 }
 
 /** The series currently reading highest, so the readout tracks the action. */
@@ -1226,6 +1374,10 @@ function renderLegend(scores) {
         el.addEventListener("click", () => {
           focusSkill = focusSkill === key ? null : key;
           syncLegend(scores);
+          // Now, not on the next arriving frame. Clicking a chip to find out
+          // what a skill is looking for and waiting for a frame to be told is
+          // the same invisibility in a slower form.
+          renderDetector(focusSkill ?? loudest());
           drawPlot();
         });
         legendNodes.set(key, { el, value });
