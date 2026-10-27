@@ -340,6 +340,7 @@ function renderStartup() {
 
 function renderAll() {
   pruneTraces();
+  pruneLegend();
   announceGoals();
   renderGoals();
   renderSkills();
@@ -539,6 +540,25 @@ function renderGoals() {
         const { removedSkills = [] } = await res.json().catch(() => ({}));
         if (focusGoal === g.key) focusGoal = null;
         goalWas.delete(g.key);
+
+        // Off the screen now, not after another round trip.
+        //
+        // The engine has already said it is gone, and what came next was a
+        // fetch of the whole state followed by a redraw - so the card you
+        // had just deleted sat there through a request, looking like the
+        // click had not registered. Dropping it from the local state and
+        // redrawing is the same end state, reached without the wait, and
+        // load() below still runs to reconcile anything this cannot know.
+        //
+        // The skills go with it for the same reason. The engine reports
+        // which ones it swept, and leaving them on screen - in the list, in
+        // the chart, in the legend - is the half of the deletion that
+        // looked broken.
+        const swept = new Set(removedSkills);
+        state.goals = (state.goals ?? []).filter((x) => x.key !== g.key);
+        state.skills = (state.skills ?? []).filter((s) => !swept.has(s.key));
+        renderAll();
+
         // Say what else went. A skill vanishing from the list with no
         // explanation reads as a bug rather than as the tidy-up it is.
         toast({
@@ -1175,6 +1195,39 @@ function renderLegend(scores) {
   const hit = keys.some((k) => scores[k].phase === "active");
   const box = document.querySelector(".bbox");
   if (box) box.classList.toggle("hit", hit);
+}
+
+/**
+ * Drop legend entries for skills that no longer exist.
+ *
+ * `renderLegend` already refuses to draw a skill the registry does not have,
+ * and that was not enough, because it only ever runs on an arriving score.
+ * Delete a goal while nothing is publishing - which is most of the time, and
+ * is exactly when someone is tidying up - and no score ever arrives, so the
+ * pill for a skill that is gone stays in the legend for the life of the page.
+ * It reads as a deletion that only half happened, because it is one.
+ *
+ * So the registry gets to prune it directly, the way it already prunes the
+ * series behind it. Nodes are removed rather than the whole legend rebuilt:
+ * each one owns a click listener and a rebuild makes clicking one a race
+ * against its own replacement.
+ */
+function pruneLegend() {
+  // Same guard as pruneTraces, for the same reason: an empty list before the
+  // first successful read is this module's initial value and means nothing.
+  if (!loaded) return;
+  const live = new Set((state.skills ?? []).map((s) => s.key));
+  let dropped = false;
+  for (const [key, node] of legendNodes) {
+    if (live.has(key)) continue;
+    node.el.remove();
+    legendNodes.delete(key);
+    dropped = true;
+  }
+  // Keep the shape honest, or the next score message compares against a set
+  // that includes what was just removed, finds no change, and rebuilds
+  // nothing - leaving the legend permanently short of a skill that is back.
+  if (dropped) legendShape = [...legendNodes.keys()].sort().join(",");
 }
 
 /** Text and state only. Touching nothing that holds a listener. */
