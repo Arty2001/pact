@@ -61,6 +61,9 @@ class Config:
 
     embed: EmbedKind
     embed_url: str | None
+    #: The service account key and the id of the machine to stop, for when
+    #: nothing has published for a while. Both absent on a laptop, where
+    #: there is nothing to stop and nothing to pay for.
     model_version: str
     adaptor: str
     resolution: int
@@ -100,6 +103,11 @@ class Config:
         """
         return f"{self.model_version}/{self.adaptor}@{self.resolution}"
 
+    #: Defaulted, because the overwhelming case has neither: a laptop has
+    #: no machine to stop and nothing to pay for, and every test that builds
+    #: a Config would otherwise have to name two fields it does not use.
+    compute_key: str = ""
+    instance_id: str = ""
 
 def _env(name: str, default: str | None = None) -> str | None:
     v = os.environ.get(name)
@@ -152,6 +160,8 @@ def load(argv: list[str] | None = None) -> Config:
 
     add("--embed", choices=("local", "remote", "stub"), default=_env("PACT_EMBED", "local"))
     add("--embed-url", default=_env("PACT_EMBED_URL"))
+    add("--compute-key", default=_env("NEBIUS_COMPUTE_KEY", ""))
+    add("--instance-id", default=_env("NEBIUS_INSTANCE_ID", ""))
     add("--model-version", default=_env("PACT_MODEL", "c-radio_v3-b"))
     add("--adaptor", default=_env("PACT_ADAPTOR", "siglip2"))
     add(
@@ -196,6 +206,8 @@ def load(argv: list[str] | None = None) -> Config:
         surface=a.surface,
         embed=a.embed,
         embed_url=a.embed_url,
+        compute_key=a.compute_key or "",
+        instance_id=a.instance_id or "",
         model_version=a.model_version,
         adaptor=a.adaptor,
         resolution=a.resolution,

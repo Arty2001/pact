@@ -73,6 +73,7 @@ from .skills import (
     rank_candidates,
     score,
 )
+from .sleep import Sleeper
 from .store import Store
 from .teacher import FRAMES_PER_CALL, Teacher
 
@@ -216,6 +217,11 @@ class Runner:
         self._pending_calibration: list[str] = []
         #: Skills that gained a label and may now be worth refitting. Queued
         #: because labels arrive on the socket task and a refit is not quick.
+        #: When a frame last arrived from anywhere, for the idle check. Set
+        #: to now at birth rather than zero, so a machine that is still
+        #: loading four gigabytes is not immediately judged idle.
+        self._last_frame_at = time.time()
+        self.sleeper = Sleeper(cfg.compute_key, cfg.instance_id)
         self._pending_labels: list[str] = []
         #: (skill, room) pairs waiting for a label to be chosen for them.
         self._pending_relabel: list[tuple[str, str, float, float]] = []
@@ -1210,6 +1216,11 @@ class Runner:
                 await asyncio.sleep(STALL_AFTER_S / 2)
                 with contextlib.suppress(Exception):
                     await source.reconcile(source.known())
+                # The same tick asks whether this machine is still needed.
+                # It already wakes on the right cadence to notice silence,
+                # and a second timer would be a second thing to get wrong.
+                with contextlib.suppress(Exception):
+                    await self.sleeper.tick(self._last_frame_at, self.log)
 
         async def follow() -> None:
             while True:
@@ -1233,6 +1244,11 @@ class Runner:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._ready.wait(), timeout=15.0)
             async for room_name, surface, frame in source.frames():
+                # Stamped before anything can reject the frame. The question
+                # the sleeper asks is whether anything is publishing, not
+                # whether it was worth scoring - a room full of people
+                # sitting still is still a room being watched.
+                self._last_frame_at = time.time()
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
