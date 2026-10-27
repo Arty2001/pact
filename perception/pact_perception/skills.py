@@ -61,6 +61,21 @@ SCORED_KINDS = frozenset({"gate", "object", "action", "counter", "discriminator"
 #: distinction is carried rather than inferred.
 SURFACES = frozenset({"camera", "screen", "any"})
 
+#: Which picture of a frame a skill is asking about. "full" is the frame as
+#: it arrived. "layout" is the frame with its content averaged away, leaving
+#: only large-scale structure - see `embed.layout_only`, which is where the
+#: transform and the measurements behind it live.
+#:
+#: This exists because on a screen the two questions genuinely differ. "Is
+#: this a short-form video player" is answered by the chrome, and the clip
+#: inside it is noise that changes every few seconds and dominates the
+#: embedding - two Shorts frames with different clips in them measured 21.7
+#: apart raw and 0.73 apart under `layout`. A score that swings that far is a
+#: score no fixed threshold can sit under. "Full" stays the default because
+#: it is right for every camera skill and for any screen skill whose question
+#: is about what is on the screen rather than what the screen is.
+VIEWS = frozenset({"full", "layout"})
+
 
 def applies_to(skill: Skill, surface: str) -> bool:
     """
@@ -109,6 +124,11 @@ class Skill:
     label: str
     #: "camera", "screen", or "any". See `applies_to`.
     surface: str = "any"
+    #: "full" or "layout". See `VIEWS`. A weight vector is view-independent -
+    #: it is an embedded sentence - but `bias` and `temperature` are not: they
+    #: are fitted from the cosines a particular view produced, so changing
+    #: this invalidates the calibration exactly as moving the band does.
+    view: str = "full"
     w: np.ndarray | None = None
     bias: float = 0.0
     temperature: float = 1.0
@@ -304,6 +324,58 @@ def calibrate(
 
     temperature = (band_sigmas * sigma) / span_in_logits
     return bias, float(temperature)
+
+
+@dataclass(frozen=True, slots=True)
+class Ranked:
+    """One candidate label, measured against real frames."""
+
+    label: str
+    #: Mean cosine inside the window minus mean cosine outside it. Says a
+    #: threshold can exist at all.
+    separation: float
+    #: Standard deviation inside the window. Says whether a FIXED threshold
+    #: can hold, which is the only kind this system has.
+    spread: float
+    #: separation / spread. What actually decides it.
+    ratio: float
+
+
+def rank_candidates(
+    want: np.ndarray,
+    other: np.ndarray,
+    vectors: dict[str, np.ndarray],
+) -> list[Ranked]:
+    """
+    Order candidate labels by how well each separates these frames.
+
+    Pure, and separate from the call that produced the candidates, because
+    this is the part with a right answer. Generating labels needs something
+    that can see; choosing between them is arithmetic over embeddings
+    already recorded, and arithmetic belongs somewhere it can be tested.
+
+    The ratio rather than the separation is the sort key, and the difference
+    is not academic. A label keyed on something that changes - the clip
+    playing inside a video player, rather than the player - scores high on
+    the frames it was read off and swings as the content does. Measured on
+    real frames, the template SigLIP 2's own documentation recommends buys
+    about 5% more separation for 24% more spread: a bigger number and a
+    worse detector. A fixed threshold over time cannot use separation it
+    cannot rely on.
+    """
+    ranked: list[Ranked] = []
+    for label, w in vectors.items():
+        hit, miss = want @ w, other @ w
+        # A spread of exactly zero means every frame in the window embedded
+        # identically, which in practice means one frame. Treated as maximal
+        # uncertainty rather than as a perfect detector: dividing by an
+        # epsilon would hand first place to the least evidence.
+        spread = float(hit.std())
+        separation = float(hit.mean() - miss.mean())
+        ratio = separation / spread if spread > 1e-6 else 0.0
+        ranked.append(Ranked(label, separation, spread, ratio))
+    ranked.sort(key=lambda r: r.ratio, reverse=True)
+    return ranked
 
 
 def _logit(p: float) -> float:

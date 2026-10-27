@@ -26,25 +26,49 @@ from pathlib import Path
 
 import numpy as np
 
-SCHEMA = """
+#: The frames table, hoisted out of SCHEMA because the migration below has to
+#: be able to run the identical statement. Its primary key widened from `ts`
+#: to `(ts, view)`, and SQLite cannot ALTER a primary key - the table has to be
+#: rebuilt - so the DDL is written once here and reused rather than copied into
+#: the migration where the two could drift apart.
+_FRAMES_DDL = """
+CREATE TABLE IF NOT EXISTS frames (
+  ts         REAL    NOT NULL,
+  -- Which picture of this moment produced this vector: "full" or "layout".
+  -- Part of the key, not a tag. Two skills on one frame can want different
+  -- views, and with `ts` alone as the key the second INSERT OR REPLACE
+  -- silently overwrote the first - leaving one vector claiming to be the
+  -- frame, joined to observations from both views, with nothing to say which
+  -- one it was. A cosine measured on a blurred frame is not comparable to one
+  -- measured on a sharp frame, so that mixture corrupts every bias and
+  -- temperature fitted from it.
+  view       TEXT    NOT NULL DEFAULT 'full',
+  encoder_id TEXT    NOT NULL,
+  dim        INTEGER NOT NULL,
+  embedding  BLOB    NOT NULL,
+  PRIMARY KEY (ts, view)
+)"""
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS observations (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   skill_key TEXT    NOT NULL,
   ts        REAL    NOT NULL,
   score     REAL    NOT NULL,
   cos       REAL    NOT NULL,
-  phase     TEXT    NOT NULL
+  phase     TEXT    NOT NULL,
+  -- The view the scored vector came from. Redundant against the skill's own
+  -- row in the registry, and stored anyway: this is what makes the join to
+  -- `frames` pick the right one of two vectors at the same instant, and the
+  -- registry is in another process.
+  view      TEXT    NOT NULL DEFAULT 'full'
 );
 CREATE INDEX IF NOT EXISTS obs_skill_ts ON observations (skill_key, ts);
 
--- Embeddings are keyed on time rather than on a skill: one frame is scored by
--- every eligible skill, so storing it per skill would duplicate it N times.
-CREATE TABLE IF NOT EXISTS frames (
-  ts         REAL PRIMARY KEY,
-  encoder_id TEXT NOT NULL,
-  dim        INTEGER NOT NULL,
-  embedding  BLOB NOT NULL
-);
+-- Embeddings are keyed on time and view rather than on a skill: one frame is
+-- scored by every eligible skill, so storing it per skill would duplicate it
+-- N times. Per view, though, it genuinely is a different vector.
+{_FRAMES_DDL};
 
 -- What the loop is made of. source tells you whether to trust it: a human
 -- answer outranks a teacher adjudication when they disagree.
@@ -81,6 +105,7 @@ class Store:
         p.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(p, check_same_thread=False)
         self.db.executescript(SCHEMA)
+        self._add_views()
         # WAL so a long-running writer does not block a reader poking at the
         # same file to see what the system has been doing.
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -88,20 +113,70 @@ class Store:
         self._last_vacuum = 0.0
         self._uncommitted = 0
 
+    # ----------------------------------------------------------- migration
+
+    def _add_views(self) -> None:
+        """
+        Bring a database written before views up to one that has them.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op against a table that is
+        already there, so the statements above do nothing to a store that has
+        been recording since before this column existed - and the failure is
+        a confusing "no such column: view" at query time rather than at
+        startup.
+
+        The two tables need different treatment and that is the whole reason
+        this is a function rather than a line. `observations` takes a plain
+        ADD COLUMN. `frames` cannot: its primary key widened from `ts` to
+        `(ts, view)`, SQLite has no way to alter a primary key, and leaving
+        the narrow one in place is not a cosmetic difference - it is the bug
+        this whole change exists to avoid, where the layout vector replaces
+        the full one at the same instant. So the table is rebuilt.
+
+        Everything already stored was encoded from the frame as it arrived,
+        which is exactly what "full" means, so the backfill is not a guess.
+        """
+        if "view" not in self._columns("observations"):
+            self.db.execute("ALTER TABLE observations ADD COLUMN view TEXT NOT NULL DEFAULT 'full'")
+        if "view" not in self._columns("frames"):
+            self.db.execute("ALTER TABLE frames RENAME TO frames_pre_view")
+            self.db.execute(_FRAMES_DDL)
+            self.db.execute(
+                """INSERT INTO frames (ts, view, encoder_id, dim, embedding)
+                   SELECT ts, 'full', encoder_id, dim, embedding FROM frames_pre_view"""
+            )
+            self.db.execute("DROP TABLE frames_pre_view")
+        self.db.commit()
+
+    def _columns(self, table: str) -> set[str]:
+        return {str(row[1]) for row in self.db.execute(f"PRAGMA table_info({table})")}
+
     # ------------------------------------------------------------- writing
 
-    def observe(self, skill_key: str, ts: float, score: float, cos: float, phase: str) -> None:
+    def observe(
+        self,
+        skill_key: str,
+        ts: float,
+        score: float,
+        cos: float,
+        phase: str,
+        view: str = "full",
+    ) -> None:
         self.db.execute(
-            "INSERT INTO observations (skill_key, ts, score, cos, phase) VALUES (?,?,?,?,?)",
-            (skill_key, ts, score, cos, phase),
+            """INSERT INTO observations (skill_key, ts, score, cos, phase, view)
+               VALUES (?,?,?,?,?,?)""",
+            (skill_key, ts, score, cos, phase, view),
         )
         self._tick()
 
-    def remember_frame(self, ts: float, embedding: np.ndarray, encoder_id: str) -> None:
+    def remember_frame(
+        self, ts: float, embedding: np.ndarray, encoder_id: str, view: str = "full"
+    ) -> None:
         vec = np.asarray(embedding, dtype=np.float32)
         self.db.execute(
-            "INSERT OR REPLACE INTO frames (ts, encoder_id, dim, embedding) VALUES (?,?,?,?)",
-            (ts, encoder_id, int(vec.shape[-1]), vec.tobytes()),
+            """INSERT OR REPLACE INTO frames (ts, view, encoder_id, dim, embedding)
+               VALUES (?,?,?,?,?)""",
+            (ts, view, encoder_id, int(vec.shape[-1]), vec.tobytes()),
         )
         self._tick()
 
@@ -132,21 +207,27 @@ class Store:
 
     # ------------------------------------------------------------- reading
 
-    def examples(self, skill_key: str, encoder_id: str) -> list[Example]:
+    def examples(self, skill_key: str, encoder_id: str, view: str = "full") -> list[Example]:
         """
         Labels joined to the embeddings they describe.
 
         Filtered on encoder_id: an example gathered under a different encoder
         is not merely stale, it is a point in a different space, and training
         on a mix of the two produces a probe that fits neither.
+
+        Filtered on view for the same reason one level down. A label records a
+        moment, not a vector, and that moment may have been encoded twice -
+        once as it arrived and once with its content averaged away. Only one
+        of the two is the picture this skill was ever scored against, and a
+        probe fitted across both is fitted across two different spaces.
         """
         rows = self.db.execute(
             """SELECT e.label, e.source, f.embedding, f.dim
                FROM training_examples e
                JOIN frames f ON f.ts = e.frame_ts
-               WHERE e.skill_key = ? AND f.encoder_id = ?
+               WHERE e.skill_key = ? AND f.encoder_id = ? AND f.view = ?
                ORDER BY e.created_at""",
-            (skill_key, encoder_id),
+            (skill_key, encoder_id, view),
         ).fetchall()
         return [
             Example(
@@ -157,7 +238,9 @@ class Store:
             for label, source, blob, dim in rows
         ]
 
-    def frames_between(self, start: float, end: float, limit: int = 2000) -> list[float]:
+    def frames_between(
+        self, start: float, end: float, limit: int = 2000, view: str = "full"
+    ) -> list[float]:
         """
         Every stored frame inside a stretch of time, oldest first.
 
@@ -169,8 +252,9 @@ class Store:
         corrected.
         """
         rows = self.db.execute(
-            "SELECT ts FROM frames WHERE ts >= ? AND ts <= ? ORDER BY ts LIMIT ?",
-            (start, end, limit),
+            """SELECT ts FROM frames
+               WHERE ts >= ? AND ts <= ? AND view = ? ORDER BY ts LIMIT ?""",
+            (start, end, view, limit),
         ).fetchall()
         return [float(r[0]) for r in rows]
 
@@ -182,7 +266,13 @@ class Store:
         return {float(r[0]) for r in rows}
 
     def quiet_frames(
-        self, skill_key: str, start: float, end: float, limit: int, margin: float = 300.0
+        self,
+        skill_key: str,
+        start: float,
+        end: float,
+        limit: int,
+        margin: float = 300.0,
+        view: str = "full",
     ) -> list[float]:
         """
         Frames from outside a window, least like this skill first.
@@ -207,13 +297,45 @@ class Store:
         rows = self.db.execute(
             """SELECT f.ts FROM frames f
                LEFT JOIN observations o
-                 ON o.ts = f.ts AND o.skill_key = ?
-               WHERE f.ts < ? OR f.ts > ?
+                 ON o.ts = f.ts AND o.view = f.view AND o.skill_key = ?
+               WHERE f.view = ? AND (f.ts < ? OR f.ts > ?)
                ORDER BY COALESCE(o.cos, -1e9) ASC
                LIMIT ?""",
-            (skill_key, start - margin, end + margin, limit),
+            (skill_key, view, start - margin, end + margin, limit),
         ).fetchall()
         return [float(r[0]) for r in rows]
+
+    def scored_frames(
+        self, skill_key: str, since: float, until: float, limit: int = 600
+    ) -> np.ndarray:
+        """
+        Embeddings of frames this skill has already scored, in a window.
+
+        Joined through observations rather than taken from `frames` directly,
+        which gets the surface right for free: a skill only ever scores its
+        own surface, so anything it has an observation for is a frame it
+        could legitimately be compared against. The frames table has no
+        surface of its own, and picking negatives from the wrong one would
+        flatter any label at all.
+
+        The view comes along the same way, and that is why this takes no view
+        argument. Each observation carries the view it was scored in, so
+        matching it in the join yields the vectors this skill actually saw -
+        a skill asking about layout gets layout vectors on both sides of the
+        comparison, which is the only way `rank_candidates` means anything.
+        """
+        rows = self.db.execute(
+            """SELECT f.embedding, f.dim
+               FROM observations o JOIN frames f ON f.ts = o.ts AND f.view = o.view
+               WHERE o.skill_key = ? AND o.ts BETWEEN ? AND ?
+               ORDER BY o.ts DESC LIMIT ?""",
+            (skill_key, since, until, limit),
+        ).fetchall()
+        if not rows:
+            return np.zeros((0, 0), dtype=np.float32)
+        return np.stack(
+            [np.frombuffer(blob, dtype=np.float32).reshape(dim) for blob, dim in rows]
+        )
 
     def cosines(self, skill_key: str, limit: int = 600) -> np.ndarray:
         rows = self.db.execute(
@@ -222,16 +344,24 @@ class Store:
         ).fetchall()
         return np.asarray([r[0] for r in rows], dtype=np.float64)
 
-    def nearest_frame_ts(self, ts: float, tolerance: float = 2.0) -> float | None:
+    def nearest_frame_ts(
+        self, ts: float, tolerance: float = 2.0, view: str = "full"
+    ) -> float | None:
         """
-        The stored frame closest to a moment.
+        The stored frame closest to a moment, in a given view.
 
         A teacher verdict or a human answer arrives seconds after the frame it
         is about, so a label has to be attached by proximity rather than by an
         exact timestamp it was never given.
+
+        The view matters even though what comes back is only a timestamp. A
+        moment is encoded in whichever views were wanted at the time, so the
+        nearest moment overall may be one this skill's view never saw - and a
+        label pinned there joins to nothing, which is a label silently lost
+        rather than one that is wrong.
         """
         row = self.db.execute(
-            "SELECT ts FROM frames ORDER BY ABS(ts - ?) LIMIT 1", (ts,)
+            "SELECT ts FROM frames WHERE view = ? ORDER BY ABS(ts - ?) LIMIT 1", (view, ts)
         ).fetchone()
         if row is None:
             return None
@@ -255,7 +385,11 @@ class Store:
         kept = self.db.execute("SELECT frame_ts FROM training_examples").fetchall()
         keep = {float(r[0]) for r in kept}
 
-        rows = self.db.execute("SELECT ts FROM frames WHERE ts < ?", (cutoff,)).fetchall()
+        # DISTINCT because one moment is now several rows - one per view - and
+        # the DELETE below drops every view of a doomed timestamp in one go.
+        rows = self.db.execute(
+            "SELECT DISTINCT ts FROM frames WHERE ts < ?", (cutoff,)
+        ).fetchall()
         doomed = [(float(r[0]),) for r in rows if float(r[0]) not in keep]
         self.db.executemany("DELETE FROM frames WHERE ts = ?", doomed)
         cur = self.db.execute("DELETE FROM observations WHERE ts < ?", (cutoff,))

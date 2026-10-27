@@ -36,6 +36,10 @@ export const ADDITIONS: readonly string[] = [
   "ALTER TABLE transitions ADD COLUMN needed_conf REAL",
   "ALTER TABLE goals ADD COLUMN sequence_window_s REAL NOT NULL DEFAULT 600",
   "ALTER TABLE instances ADD COLUMN nudged_at INTEGER",
+  // Where a target came from, when the sentence did not name one. NULL
+  // for every goal whose number the person stated themselves, which is
+  // most of them.
+  "ALTER TABLE goals ADD COLUMN source_url TEXT",
 ];
 
 export const SCHEMA = `
@@ -146,6 +150,44 @@ CREATE TABLE IF NOT EXISTS reminders (
   done     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS reminders_due ON reminders (done, at);
+
+-- A better label, measured but not yet applied.
+--
+-- One row per skill, newest replacing older: a proposal is a question
+-- waiting for an answer, and two of them open at once for the same skill is
+-- two answers for one decision. It is kept out of the skills table because
+-- a label IS the detector - writing one straight onto the row would change
+-- what the system believes on the strength of a vision call, and nobody
+-- would see the before and after numbers that justified it.
+-- The encoder's machine: whether it should be up, and since when nothing
+-- has needed it. One row, because there is one encoder.
+--
+-- Held here rather than in the Hub because the Hub's whole virtue is that it
+-- stores nothing - liveness *is* the set of open sockets. The moment it
+-- remembers when something stopped being live, it has state to reconcile and
+-- a clock to be wrong about. The Engine already owns both.
+CREATE TABLE IF NOT EXISTS compute (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  publishers INTEGER NOT NULL DEFAULT 0,
+  -- When the last publisher went away; 0 while one is live. Not a boolean,
+  -- because the grace period needs to know how long, not merely whether.
+  idle_since INTEGER NOT NULL DEFAULT 0,
+  state      TEXT NOT NULL DEFAULT 'unknown',
+  changed_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS proposals (
+  skill_key    TEXT PRIMARY KEY,
+  label        TEXT NOT NULL,
+  -- What it would replace, captured when proposed. The skill's own label
+  -- can change under a pending proposal, and then the numbers below would
+  -- be a comparison against something that is no longer there.
+  was          TEXT NOT NULL,
+  ratio_after  REAL NOT NULL,
+  ratio_before REAL NOT NULL,
+  runners_up   TEXT NOT NULL DEFAULT '[]',
+  at           INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS questions (
   id             TEXT PRIMARY KEY,

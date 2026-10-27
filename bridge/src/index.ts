@@ -196,6 +196,8 @@ Options
   --hub <url>        Pact hub base URL                        (required)
   --name <text>      Name shown on the wall
   --input <url>      RTSP / RTMP / HTTP URL, file path, or "testsrc"
+  --no-loop          Play a file once instead of for ever (files loop by
+                     default, because a wall is continuous)
   --config <file>    JSON array of sources; see sources.example.json
   --transcode        Re-encode to H.264 baseline. Needed for MJPEG and H.265.
   --rtsp-transport   tcp (default) or udp
@@ -224,6 +226,7 @@ if (typeof args.config === "string") {
     {
       name: typeof args.name === "string" ? args.name : "Bridge",
       input: args.input,
+      loop: args["no-loop"] === true ? false : undefined,
       transcode: args.transcode === true,
       rtspTransport: args["rtsp-transport"] === "udp" ? "udp" : "tcp",
       bitrate: typeof args.bitrate === "string" ? args.bitrate : undefined,

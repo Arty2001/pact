@@ -5,6 +5,17 @@ export interface SourceSpec {
   name: string;
   /** RTSP / RTMP / HTTP URL, a local file path, or the literal "testsrc". */
   input: string;
+  /**
+   * Replay a file for ever, rather than once.
+   *
+   * Defaults on for files, because a wall is a continuous thing. Without it
+   * the clip ends, ffmpeg exits, and the restart policy tears the peer
+   * connection down and renegotiates - so the feed dies for several seconds
+   * every time the file runs out. That is the difference between a demo
+   * somebody can leave running and one that looks broken whenever nobody
+   * happens to be watching.
+   */
+  loop?: boolean;
   /** Re-encode to H.264 baseline. Required for MJPEG, H.265, or anything odd. */
   transcode?: boolean;
   /** RTSP over TCP avoids packet loss on flaky wifi. Defaults to tcp. */
@@ -25,12 +36,27 @@ export interface SourceSpec {
  *               browser. Costs real CPU per stream.
  */
 export function ffmpegArgs(spec: SourceSpec, port: number): string[] {
+  // A file is the only seekable input here, so it is the only one that can
+  // loop. -stream_loop has to precede -i, and the timestamp flags are not
+  // optional with it: at the loop point the source PTS jumps back to zero,
+  // which the RTP muxer reads as time running backwards and drops the rest
+  // of the stream. genpts rebuilds a monotonic clock across the seam.
+  const file = spec.input !== "testsrc" && !/^[a-z]+:\/\//i.test(spec.input);
+  const looping = file && spec.loop !== false;
+
   const input: string[] =
     spec.input === "testsrc"
       ? ["-re", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30"]
       : spec.input.startsWith("rtsp://")
         ? ["-rtsp_transport", spec.rtspTransport ?? "tcp", "-i", spec.input]
-        : ["-re", "-i", spec.input];
+        : looping
+          ? [
+              "-stream_loop", "-1",
+              "-fflags", "+genpts",
+              "-avoid_negative_ts", "make_zero",
+              "-re", "-i", spec.input,
+            ]
+          : ["-re", "-i", spec.input];
 
   // testsrc is raw frames, so it always needs encoding regardless of the flag.
   const encode: string[] =

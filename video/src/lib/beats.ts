@@ -21,7 +21,7 @@ import { FPS } from "./theme";
 export const LEAD_F = 18;
 
 /** Per-beat lead: frames from the scene cut to the first word, measured from Sai's read. */
-export const LEAD_B = {"b1": 18, "b2": 4, "b3": 4, "b4": 3, "b5": 3, "b6": 4, "b7": 4, "b8": 3, "b9": 4} as const;
+export const LEAD_B = {"b1": 18, "demo": 18, "b2": 4, "b3": 4, "b4": 3, "b5": 3, "b6": 4, "b7": 4, "b8": 3, "b9": 4} as const;
 
 /** Phrase start times, seconds into the line. */
 export const PHRASE = {
@@ -35,6 +35,17 @@ export const PHRASE = {
     frontier: 11.12,
     perCamera: 16.64,
     almostNothing: 17.68,
+  },
+  demo: {
+    wholeThing: 0.0,
+    running: 1.34,
+    giveGoal: 2.08,
+    worksOut: 3.18,
+    startsWatching: 4.88,
+    everyCamera: 6.13,
+    goDoIt: 7.71,
+    fillsItself: 9.19,
+    heresHow: 10.71,
   },
   b2: {
     youStart: 0.0,

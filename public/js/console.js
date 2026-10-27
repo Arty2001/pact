@@ -24,8 +24,22 @@ const $ = (id) => document.getElementById(id);
 /** How many score samples the plot holds. ~25 s at 8 Hz. */
 const TRACE = 200;
 
-let state = { skills: [], goals: [], questions: [], perception: [], rooms: [] };
+/**
+ * How long the scores have to stop before the chart says anything about it.
+ *
+ * A still room is the designed state, not a fault - it is the whole reason
+ * an empty room costs nothing - so the bar for calling it out has to sit
+ * above a normal pause. Four seconds is the gap between two squats.
+ */
+const QUIET_MS = 20000;
+
+let state = { skills: [], goals: [], questions: [], proposals: [], perception: [], rooms: [] };
 let devices = [];
+/** deviceId -> { device, pc, pane, toasts }. Several at once, on purpose. */
+const feeds = new Map();
+/** The pane the chart and the hero count follow. One of them, not all. */
+let leadId = null;
+/** Kept for the places that only ever cared about the followed camera. */
 let current = null; // { device, pc }
 
 /** skillKey -> [{ score, phase }], one series per skill scoring this camera. */
@@ -76,13 +90,14 @@ setInterval(() => {
   // The live pip is a reading, not decoration: it reflects whether frames
   // actually arrived recently, not whether a socket happens to be open.
   $("pip").classList.toggle("on", Date.now() - lastFrameAt < 6000);
-  // A gate that shut four seconds ago should say so four seconds ago, not
-  // on the next frame - which by definition is not coming while it is shut.
-  if (Date.now() - lastScoreAt > 4000) {
+  // Only once the quiet has lasted long enough to be worth remarking on.
+  // Four seconds was the gap between two squats, so the chart announced
+  // itself broken every time someone stood up straight.
+  if (Date.now() - lastScoreAt > QUIET_MS) {
     drawPlot();
     renderNotices();
   }
-}, 1000);
+}, 2000);
 
 // ------------------------------------------------------------------ toast --
 
@@ -96,8 +111,11 @@ const TOAST_MS = 4200;
  * moment. Watching your own rep land is the thing the product is for, and
  * a number quietly incrementing in the corner of a video is not that.
  */
-function toast({ kind = "", lead, line, sub = "" }) {
-  const host = $("toasts");
+function toast({ kind = "", lead, line, sub = "", room = null }) {
+  // On the pane that saw it. With two rooms on the wall, "a rep counted" is
+  // only useful if you can tell which room counted it.
+  const feed = room === null ? null : [...feeds.values()].find((f) => f.device.room === room);
+  const host = feed?.toasts ?? $("toasts");
   if (host === null) return;
 
   const el = document.createElement("div");
@@ -110,7 +128,10 @@ function toast({ kind = "", lead, line, sub = "" }) {
 
   // Oldest falls off rather than letting a burst of reps bury the page.
   host.prepend(el);
-  while (host.children.length > 4) host.lastElementChild?.remove();
+  // Fewer on a pane than on the page: a pane is a fraction of the height
+  // and a stack of four would cover the thing being reported on.
+  const cap = host === $("toasts") ? 4 : 2;
+  while (host.children.length > cap) host.lastElementChild?.remove();
 
   requestAnimationFrame(() => el.classList.add("in"));
   const go = () => {
@@ -155,6 +176,7 @@ function announce(list) {
         lead: "+1",
         line: goal ? goal.description : tr.skillKey,
         sub: elsewhere + (progress || tr.skillKey),
+        room: tr.room ?? null,
       });
     } else if (tr.kind === "rejected") {
       // A near-miss is the most useful toast there is: it is the only one
@@ -163,9 +185,9 @@ function announce(list) {
         tr.neededConf > 0
           ? `peak ${num(tr.peak)}, needed ${num(tr.neededConf)}`
           : `held ${ms(tr.heldMs)}, needed ${ms(tr.neededMs)}`;
-      toast({ kind: "near", lead: "—", line: `${tr.skillKey} nearly counted`, sub: elsewhere + why });
+      toast({ kind: "near", lead: "—", line: `${tr.skillKey} nearly counted`, sub: elsewhere + why, room: tr.room ?? null });
     } else if (tr.kind === "escalate") {
-      toast({ kind: "ask", lead: "?", line: `${tr.skillKey} asked for a second opinion`, sub: elsewhere + (tr.reason ?? "") });
+      toast({ kind: "ask", lead: "?", line: `${tr.skillKey} asked for a second opinion`, sub: elsewhere + (tr.reason ?? ""), room: tr.room ?? null });
     }
   }
   announcedUntil = newest;
@@ -188,11 +210,132 @@ function announceGoals() {
 
 // ------------------------------------------------------------------ state --
 
+/** Set once a read has actually succeeded, so [] can be trusted as empty. */
+let loaded = false;
+
 async function load() {
   const res = await fetch("/api/engine/state");
   if (!res.ok) return;
   state = await res.json();
+  loaded = true;
   renderAll();
+}
+
+/**
+ * Where you stand today, in one sentence.
+ *
+ * The screen's question is "am I on track", and until now the only thing
+ * that answered it was a column of 13px rows in the right margin. A person
+ * opening this should know before they read anything.
+ *
+ * It states what is missing as well as what is done. "Nothing is watching"
+ * is the single most useful thing the page can say when it is true, and it
+ * was previously only discoverable by noticing that a black rectangle had
+ * replaced the video.
+ */
+function renderFinding() {
+  const goals = state.goals ?? [];
+  const live = (state.rooms ?? []).length;
+  const el = $("today-line");
+  const watch = $("bar-watch");
+  if (el === null) return;
+
+  watch.textContent = live > 0 ? `${live} camera${live === 1 ? "" : "s"} watching` : "nothing is watching";
+  watch.classList.toggle("is-live", live > 0);
+
+  if (goals.length === 0) {
+    el.textContent = "No goals yet. Write one and Pact works out what a camera would have to see.";
+    return;
+  }
+
+  const rows = goals.map((g) => ({ g, i: (g.instances ?? [])[0] }));
+  const done = rows.filter((r) => r.i?.state === "done" || r.i?.settledBy).length;
+  // A limit that has been broken is the thing you most need told, so it
+  // outranks the tally even when everything else went well.
+  const broken = rows.find((r) => r.g.type === "limit" && r.i?.state === "violated");
+
+  let line;
+  if (broken) {
+    line = `<b>${esc(broken.g.description)}</b> — over the limit today.`;
+  } else if (done === rows.length) {
+    line = `All <b>${rows.length}</b> done today.`;
+  } else {
+    const next = rows
+      .filter((r) => r.i && r.i.targetMin)
+      .sort((a, b) => (a.i.observed ?? 0) / a.i.targetMin - (b.i.observed ?? 0) / b.i.targetMin)[0];
+    const left = next ? Math.max(0, next.i.targetMin - (next.i.observed ?? 0)) : 0;
+    // The description is the sentence the person typed, so it is quoted
+    // rather than run into this one. "20 to go on i want to do 20 squats
+    // every day" reads as a sentence that lost track of itself.
+    line = next
+      ? `<b>${esc(fmt(left))}</b> to go — “${esc(next.g.description)}”.`
+      : `<b>${done}</b> of <b>${rows.length}</b> done today.`;
+  }
+
+  // The camera state is part of the finding, not a separate notice. A goal
+  // that cannot advance because nothing is publishing is the most common
+  // reason this page looks stuck, and saying so costs one clause.
+  el.innerHTML = live > 0 ? line : `${line} Nothing is watching, so nothing can be proved yet.`;
+}
+
+/**
+ * Getting ready, as four facts rather than a bar that fills on a timer.
+ *
+ * Every step below is something the control plane actually observes, so the
+ * progress cannot lie: the machine is running or it is not, perception has
+ * said hello or it has not, this camera has been scored or it has not. A
+ * percentage invented from an elapsed clock would be smoother and would
+ * mean nothing, and the one thing someone staring at a cold start needs is
+ * to know which part is slow.
+ *
+ * Hidden entirely once the last step is done, because a progress bar that
+ * stays on screen after it finishes is just furniture.
+ */
+function renderStartup() {
+  const host = $("startup");
+  if (host === null) return;
+
+  const rooms = state.rooms ?? [];
+  const room = activeRoom ?? rooms[0]?.room ?? null;
+  const machine = state.encoder ?? null;
+  const connected = (state.perception ?? []).length > 0;
+  const scored = (state.watching ?? []).some((w) => w.room === room);
+
+  // Nothing to report before a camera exists: the empty stage already says
+  // what to do, and two messages about the same absence is one too many.
+  if (rooms.length === 0 || scored) {
+    host.hidden = true;
+    return;
+  }
+
+  const steps = [
+    { label: "Camera publishing", done: true },
+    // Only when the sleep/wake feature is configured. Without it the
+    // encoder is assumed to be running somewhere already, and a step for a
+    // machine nobody is starting would be a step that never completes.
+    ...(machine === null
+      ? []
+      : [{ label: "Encoder machine", done: machine === "running", note: machine }]),
+    { label: "Encoder loaded", done: connected, note: connected ? "" : "about a minute" },
+    { label: "Scoring this camera", done: false },
+  ];
+
+  const at = steps.findIndex((s) => !s.done);
+  const pct = Math.round((steps.filter((s) => s.done).length / steps.length) * 100);
+  const since = state.encoderSince ?? 0;
+  const waited = since > 0 ? Math.round((Date.now() - since) / 1000) : 0;
+
+  host.hidden = false;
+  host.innerHTML =
+    `<div class="startup-top">` +
+    `<b>${esc(steps[at]?.label ?? "Ready")}</b>` +
+    (steps[at]?.note ? `<span>${esc(steps[at].note)}</span>` : "") +
+    (waited > 3 ? `<span class="mono">${waited}s</span>` : "") +
+    `</div>` +
+    `<div class="startup-bar"><i style="width:${pct}%"></i></div>` +
+    `<div class="startup-steps">${steps
+      .map((s) => `<span class="${s.done ? "done" : ""}">${esc(s.label)}</span>`)
+      .join("")}</div>`;
 }
 
 function renderAll() {
@@ -200,7 +343,9 @@ function renderAll() {
   announceGoals();
   renderGoals();
   renderSkills();
-  renderQuestions();
+  renderWaiting();
+  renderFinding();
+  renderStartup();
   renderMeta();
   renderNotices();
   renderTally();
@@ -215,6 +360,12 @@ function renderAll() {
  * saying stop.
  */
 function pruneTraces() {
+  // Only once a read has succeeded. An empty list before the first one is
+  // the module's own initial value and means nothing; after one it means
+  // the registry is empty, and refusing to act on that is what left deleted
+  // skills drawing curves of their own. A failed read never reaches here -
+  // load() returns before it assigns - so there is no third case.
+  if (!loaded) return;
   const live = new Set((state.skills ?? []).map((s) => s.key));
   for (const key of [...traces.keys()]) if (!live.has(key)) traces.delete(key);
   if (focusSkill !== null && !live.has(focusSkill)) focusSkill = null;
@@ -306,7 +457,6 @@ function renderGoals() {
             : 0;
 
       const win = g.windowStart ? `${g.windowStart}–${g.windowEnd}` : "any time";
-      const obs = today ? `${fmt(today.observed)}${today.targetMin ? ` / ${fmt(today.targetMin)}` : ""}` : "—";
 
       el.innerHTML = `
         <div class="goal-top">
@@ -314,7 +464,18 @@ function renderGoals() {
           <span class="chip ${chipFor(g, today)}">${esc(stateLabel(g, today))}</span>
           <button class="kill" type="button" title="Delete this goal">×</button>
         </div>
-        <div class="goal-meta">${esc(g.cadence)} · ${esc(win)} · <span class="mono">${esc(obs)}</span></div>
+        <div class="goal-fig"><b>${esc(fmt(today ? today.observed : 0))}</b><span>${
+          today?.targetMin ? `of ${esc(fmt(today.targetMin))}` : esc(stateLabel(g, today))
+        }</span></div>
+        <div class="goal-meta">${esc(g.cadence)} · ${esc(win)}${
+          // Only when the sentence named no number and a search found one.
+          // Shown because a target you cannot trace is a number this system
+          // invented and then held you to - and the whole promise here is
+          // that nothing gets asserted without evidence.
+          g.sourceUrl
+            ? ` · <a class="src" href="${esc(g.sourceUrl)}" target="_blank" rel="noopener noreferrer">target from source</a>`
+            : ""
+        }</div>
         <div class="prog"><i style="width:${pct}%"></i></div>
         <div class="uses"></div>
         <div class="streak"></div>`;
@@ -356,7 +517,25 @@ function renderGoals() {
           return;
         }
         kill.textContent = "…";
-        const res = await fetch(`/api/engine/goals/${g.key}`, { method: "DELETE" });
+        // Each segment encoded, the slashes left alone: a key is namespaced
+        // and the separators are part of the path, but anything else in it
+        // is data and has to survive the trip.
+        const addr = g.key.split("/").map(encodeURIComponent).join("/");
+        const res = await fetch(`/api/engine/goals/${addr}`, { method: "DELETE" });
+        if (!res.ok) {
+          // It used to report success whatever came back, so a goal with a
+          // key no route could match simply stayed, silently.
+          kill.textContent = "×";
+          kill.dataset.armed = "";
+          kill.classList.remove("armed");
+          toast({
+            kind: "bad",
+            lead: "!",
+            line: `Could not delete ${g.description}`,
+            sub: `the engine answered ${res.status}`,
+          });
+          return;
+        }
         const { removedSkills = [] } = await res.json().catch(() => ({}));
         if (focusGoal === g.key) focusGoal = null;
         goalWas.delete(g.key);
@@ -375,8 +554,22 @@ function renderGoals() {
 
       // Fourteen days. A faint cell for a day with nothing, never an empty
       // hole: absence should read as texture rather than a broken chain.
+      //
+      // The padding is the whole point and it was missing, so a goal made
+      // today drew one lone cell and a goal made yesterday drew two. On a
+      // card that is otherwise full width, a stray eleven-pixel square reads
+      // as a rendering fault rather than as a history that has not happened
+      // yet. Days with no occurrence are hollow, so they stay distinct from
+      // a day that exists and is still pending.
       const streak = el.querySelector(".streak");
-      for (const i of [...(g.instances ?? [])].reverse().slice(-14)) {
+      const days = [...(g.instances ?? [])].reverse().slice(-14);
+      for (let k = days.length; k < 14; k++) {
+        const d = document.createElement("i");
+        d.className = "none";
+        d.title = "no occurrence yet";
+        streak.append(d);
+      }
+      for (const i of days) {
         const d = document.createElement("i");
         d.className = i.state;
         d.title = `${i.occurrenceOn}: ${i.state}${i.settledBy ? ` · settled by ${i.settledBy}` : ""}`;
@@ -491,7 +684,13 @@ function renderSkills() {
         <span style="display:flex; gap:6px; align-items:center">
           <span class="chip ${w}">${esc(s.weightState)}</span>
           <span class="chip">${s.sampleHz} Hz</span>
+          <button type="button" class="chip act" title="Work out what this should be looking for">rethink</button>
         </span>`;
+      // Reachable without speaking. The voice path covers the complaint as
+      // it is made, but someone scrolling a list of skills and seeing one
+      // that has never fired is having the same thought, and asking them to
+      // say it out loud to act on it is a worse product.
+      el.querySelector(".act").addEventListener("click", () => rethink(s.key));
       return el;
     }),
   );
@@ -499,10 +698,20 @@ function renderSkills() {
 
 // -------------------------------------------------------------- questions --
 
-function renderQuestions() {
+/**
+ * Everything that needs a person, in one place.
+ *
+ * Questions and label proposals share this card because they are the same
+ * kind of thing from where you are sitting: the system has got as far as it
+ * can on its own and the next step is yours. Splitting them into two cards
+ * would mean the one you are not looking at goes unanswered.
+ */
+function renderWaiting() {
   const qs = state.questions ?? [];
-  $("q-card").hidden = qs.length === 0;
+  const props = state.proposals ?? [];
+  $("q-card").hidden = qs.length === 0 && props.length === 0;
   $("questions").replaceChildren(
+    ...props.map(proposalItem),
     ...qs.map((q) => {
       const el = document.createElement("div");
       el.className = "q-item";
@@ -515,6 +724,68 @@ function renderQuestions() {
       return el;
     }),
   );
+}
+
+/**
+ * A proposed label, with the measurement that argues for it.
+ *
+ * The number is shown rather than hidden behind "I think this is better",
+ * because it is the only reason to believe the proposal at all - it is
+ * separation over spread on frames already recorded, so a person can tell
+ * a real improvement from a model being agreeable. The runners-up are
+ * offered too: the ranking knows which phrase separates these frames, and
+ * you know which one describes what you actually meant.
+ */
+function proposalItem(p) {
+  const times = (p.ratio_after / Math.max(p.ratio_before, 0.01)).toFixed(1);
+  const el = document.createElement("div");
+  el.className = "q-item";
+  el.innerHTML =
+    `<div class="q-prompt">Should <b>${esc(p.skill_key)}</b> look for ` +
+    `“${esc(p.label)}” instead of “${esc(p.was)}”?</div>` +
+    `<div class="q-note">Separates ${times}x better on the frames you just showed me.</div>` +
+    `<div class="q-acts"></div>`;
+  const acts = el.querySelector(".q-acts");
+  acts.append(btn("Use it", "primary", () => decide(p.skill_key, true, p.label)));
+  for (const other of (p.runners_up ?? []).slice(0, 2)) {
+    acts.append(btn(`“${other}”`, "ghost", () => decide(p.skill_key, true, other)));
+  }
+  acts.append(btn("Keep current", "ghost", () => decide(p.skill_key, false)));
+  return el;
+}
+
+/**
+ * Ask what a skill should have been looking for.
+ *
+ * Twenty minutes, because this is pressed about something that has already
+ * been going on - nobody opens the skill list to report the present. The
+ * answer comes back as a proposal in the waiting card, not as a change.
+ */
+async function rethink(skillKey) {
+  const res = await fetch(`/api/engine/skills/${encodeURIComponent(skillKey)}/relabel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ minutesBack: 20 }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.asked) {
+    // The usual reason is that nothing is listening, and saying "thinking"
+    // over silence is the lie that costs the most trust.
+    toast({ kind: "warn", lead: "Can't", line: "no perception worker connected" });
+    return;
+  }
+  toast({ lead: "Looking", line: `at what ${skillKey} should match`, sub: "last 20 minutes" });
+}
+
+async function decide(skillKey, accept, label) {
+  const res = await fetch(`/api/engine/proposals/${encodeURIComponent(skillKey)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ accept, label }),
+  });
+  if (!res.ok) toast({ kind: "warn", lead: "Failed", line: `couldn’t change ${skillKey}` });
+  else if (accept) toast({ lead: "Relabelled", line: skillKey, sub: label });
+  void load();
 }
 
 async function answer(id, value) {
@@ -759,14 +1030,41 @@ function requestPlot() {
 function quietBecause() {
   if ((state.perception ?? []).length === 0) return "no watcher is connected";
   if (devices.length === 0) return "no camera is publishing";
-  if (Date.now() - lastScoreAt > 4000) {
-    return "nothing is moving — the gate skips a still room, so it costs nothing";
+  if (lastScoreAt === 0) {
+    return devices.length > 0
+      ? "connected, waiting for the first scored frame"
+      : "waiting for a camera";
   }
-  return "warming up";
+  if (Date.now() - lastScoreAt <= QUIET_MS) return "warming up";
+
+  // A watcher that has never reported on this room is not watching it, which
+  // looks exactly like a still room from here and wants the opposite fix.
+  // Saying "nothing is moving" when a subscription is delivering nothing
+  // sends you to stand in front of a camera that was never being read.
+  const seen = (state.watching ?? []).find((w) => w.room === activeRoom);
+  if (activeRoom !== null && seen === undefined) {
+    return "the watcher is not receiving this camera — it may still be connecting";
+  }
+  if (seen !== undefined && seen.secondsAgo > 30) {
+    return `nothing from this camera for ${Math.round(seen.secondsAgo)}s — check it is still sharing`;
+  }
+  const idle = Math.round((Date.now() - lastScoreAt) / 1000);
+  // The motion gate does not apply to a screen - perception exempts it,
+  // because a desktop is legitimately motionless for minutes at a time and
+  // a still screen is still worth reading. So on a screen this cannot be
+  // the gate, and saying it is sends you looking for movement that was
+  // never the requirement.
+  if (current?.device?.kind === "screen") {
+    return `no scores for ${idle}s — a screen is never gated, so this is the feed, not stillness`;
+  }
+  return `still for ${idle}s — the gate skips a motionless room, so it costs nothing`;
 }
 
 
 function pushScore(skillKey, score, phase) {
+  // Refuse to start a series for something the registry no longer lists,
+  // or a deletion grows a fresh curve from the next frame in flight.
+  if (loaded && !(state.skills ?? []).some((s) => s.key === skillKey)) return;
   const s = seriesFor(skillKey);
   s.push({ score, phase });
   if (s.length > TRACE) s.shift();
@@ -824,7 +1122,13 @@ let legendShape = "";
 function renderLegend(scores) {
   const host = $("legend");
   if (host === null) return;
-  const keys = Object.keys(scores).sort();
+  // A deleted skill can still arrive in one last scores message, because
+  // perception is told by a registry push that races the frame it is
+  // already scoring. The registry is the authority on what exists.
+  const live = loaded ? new Set((state.skills ?? []).map((s) => s.key)) : null;
+  const keys = Object.keys(scores)
+    .filter((k) => live === null || live.has(k))
+    .sort();
 
   const shape = keys.join(",");
   if (shape !== legendShape) {
@@ -880,12 +1184,13 @@ function syncLegend(scores) {
 // ------------------------------------------------------------------ video --
 
 /**
- * One pill per camera on the wall, plus a way to add another.
+ * One pill per camera, and the pills are a multi-select.
  *
  * Every camera runs the whole skill set against its own frames, with its own
  * motion gate and its own calibration fitted from its own background - so
- * this strip chooses what to look at, not what is running. Hidden entirely
- * when there is nothing to choose between.
+ * this chooses what to LOOK at, not what is running. Turning two on shows
+ * two, because the question a wall answers is which room something happened
+ * in, and one pane at a time cannot answer it.
  */
 function renderCams() {
   const host = $("cams");
@@ -895,12 +1200,20 @@ function renderCams() {
   if (devices.length === 0) return;
 
   for (const d of devices) {
+    const on = feeds.has(d.id);
     const el = document.createElement("button");
     el.type = "button";
-    el.className = "cam" + (current?.device?.id === d.id ? " on" : "");
-    el.setAttribute("aria-pressed", String(current?.device?.id === d.id));
-    el.innerHTML = '<i></i><span>' + esc(d.name) + "</span>";
-    el.addEventListener("click", () => void showCamera(d));
+    el.className = "cam" + (on ? " on" : "");
+    el.setAttribute("aria-pressed", String(on));
+    el.innerHTML = "<i></i><span>" + esc(d.name) + "</span>";
+    el.addEventListener("click", () => {
+      // The last one on stays on. Turning every camera off leaves a stage
+      // saying nothing is publishing while something is, which reads as a
+      // fault rather than as a choice.
+      if (on && feeds.size > 1) dropFeed(d.id);
+      else if (!on) void addFeed(d);
+      else setLead(d.id);
+    });
     host.append(el);
   }
 
@@ -912,262 +1225,149 @@ function renderCams() {
   host.append(add);
 }
 
-async function showCamera(device) {
-  if (current?.device?.id === device.id) return;
-  teardown();
+/** The pane the chart follows. Scores are per camera; a chart is not. */
+function setLead(id) {
+  const feed = feeds.get(id);
+  if (feed === undefined || leadId === id) return;
+  leadId = id;
+  current = { device: feed.device, pc: feed.pc };
+  activeRoom = feed.device.room ?? null;
+  // The old camera's series would otherwise go on drawing beside the new
+  // one's, two rooms on one pair of axes, agreeing about nothing.
+  traces.clear();
+  focusSkill = null;
+  $("cam-name").textContent = feed.device.name;
+  $("cam-meta").textContent = `${feed.device.kind} · ${feed.device.trackNames.length} track`;
+  for (const [fid, f] of feeds) f.pane.classList.toggle("lead", fid === id);
+  renderCams();
+  drawPlot();
+}
+
+async function addFeed(device) {
+  if (feeds.has(device.id)) return;
+
+  const pane = document.createElement("div");
+  pane.className = "feed";
+  const video = document.createElement("video");
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  const name = document.createElement("span");
+  name.className = "feed-name";
+  name.textContent = device.name;
+  const toasts = document.createElement("div");
+  toasts.className = "feed-toasts";
+  pane.append(video, name, toasts);
+  pane.addEventListener("click", () => setLead(device.id));
+
   try {
     const { pc, stream } = await subscribe(device);
-    current = { device, pc };
-    // Scores are per camera, so switching has to drop the old camera's
-    // series rather than draw two rooms onto one pair of axes.
-    activeRoom = device.room ?? null;
-    traces.clear();
-    focusSkill = null;
-    $("feed").srcObject = stream;
+    video.srcObject = stream;
+    feeds.set(device.id, { device, pc, pane, toasts });
+    $("wall").append(pane);
     $("stage-empty").hidden = true;
     $("hud").hidden = false;
-    $("cam-name").textContent = device.name;
-    $("cam-meta").textContent = `${device.kind} · ${device.trackNames.length} track`;
-    renderCams();
-    drawPlot();
+    if (leadId === null) setLead(device.id);
+    else renderCams();
   } catch {
     // A feed that will not connect should not blank the page; the goal data
     // beside it is still true.
-    $("stage-empty").hidden = false;
+    pane.remove();
+    if (feeds.size === 0) $("stage-empty").hidden = false;
     renderCams();
   }
 }
 
+function dropFeed(id) {
+  const feed = feeds.get(id);
+  if (feed === undefined) return;
+  try {
+    feed.pc?.close();
+  } catch {
+    // Already closed.
+  }
+  feed.pane.remove();
+  feeds.delete(id);
+  if (leadId === id) {
+    leadId = null;
+    const next = [...feeds.keys()][0];
+    if (next !== undefined) setLead(next);
+    else {
+      current = null;
+      activeRoom = null;
+      traces.clear();
+      $("hud").hidden = true;
+      $("stage-empty").hidden = false;
+      drawPlot();
+    }
+  }
+  renderCams();
+}
+
+/** Everything off, for a page that is losing its cameras altogether. */
 function teardown() {
-  current?.pc?.close();
-  current = null;
-  $("feed").srcObject = null;
-}
-
-// --------------------------------------------------------------- speaking --
-
-/**
- * Voice, in and out.
- *
- * Recognition runs in this browser and only the transcript travels, which is
- * the same bargain the motion gate and the encoder make: do the work where
- * the data already is, and send only what it meant. Audio never leaves the
- * device, which is also the only honest answer to what a microphone in your
- * front room is doing.
- */
-const Speech = globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null;
-let listener = null;
-/** The button's state: whether the user wants it listening at all. */
-let listening = false;
-/** Whether it is listening right now, which is false while it talks. */
-let deaf = false;
-/** What it last said, and when it stopped saying it. */
-let lastSpoken = "";
-let spokeUntil = 0;
-
-/**
- * A room microphone hears the speaker in the same room.
- *
- * Left running, the assistant transcribes its own reply, treats it as a new
- * question, answers that, and hears itself again. The recogniser is stopped
- * for as long as it is thinking or talking - there is nothing worth hearing
- * in that window anyway, because the person is listening.
- */
-function deafen() {
-  deaf = true;
-  try {
-    listener?.stop();
-  } catch {
-    // Already stopped; the onend handler will not restart while deaf.
-  }
-}
-
-function undeafen() {
-  deaf = false;
-  if (!listening || listener === null) return;
-  try {
-    listener.start();
-  } catch {
-    // Already running, which is the harmless half of this race.
-  }
-}
-
-/**
- * Did we just say this?
- *
- * Belt and braces for the moment between the speaker finishing and the
- * recogniser being told to listen again, where a reverberant room can still
- * deliver the tail of our own sentence.
- */
-function isOwnEcho(text) {
-  if (Date.now() - spokeUntil > 1500) return false;
-  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
-  const said = norm(lastSpoken);
-  const got = norm(text);
-  return got.length > 0 && (said.includes(got) || got.includes(said.slice(0, 40)));
-}
-
-function setAiState(text, thinking = false) {
-  $("ai-state").textContent = text;
-  $("ai").classList.toggle("thinking", thinking);
-}
-
-function showExchange(heard, say, ui = {}) {
-  const h = $("ai-heard");
-  h.hidden = !heard;
-  if (heard) h.textContent = heard;
-  $("ai-said").textContent = say;
-  $("ai").dataset.tone = ui.tone ?? "calm";
-  applyUi(ui);
-}
-
-/**
- * The page rearranging itself around what was just said.
- *
- * Only ever moves attention - focus a goal, narrow the chart, hold a line.
- * Nothing the assistant says can change what the ledger recorded, so the
- * worst this can do is look at the wrong thing.
- */
-function applyUi(ui) {
-  if (ui.focusGoal) {
-    focusGoal = ui.focusGoal;
-    renderGoals();
-    renderTally();
-  }
-  if (ui.focusSkill && traces.has(ui.focusSkill)) {
-    focusSkill = ui.focusSkill;
-    drawPlot();
-  }
-  if (ui.banner) $("ai-said").textContent = ui.banner;
-}
-
-function speak(text) {
-  const synth = globalThis.speechSynthesis;
-  if (!synth || !text) return;
-  synth.cancel();
-  lastSpoken = text;
-  deafen();
-
-  const u = new SpeechSynthesisUtterance(text);
-  u.rate = 1.04;
-  u.pitch = 1;
-
-  const done = () => {
-    spokeUntil = Date.now();
-    // A short wait before listening again: a speaker does not stop dead, and
-    // the first thing a mic hears after it is the end of our own sentence
-    // coming back off the walls.
-    setTimeout(undeafen, 450);
-  };
-  u.onend = done;
-  u.onerror = done;
-  // Some browsers never fire onend. Falling back on a length estimate is
-  // worse than a real event and far better than staying deaf forever.
-  setTimeout(done, 1200 + text.length * 70);
-
-  synth.speak(u);
-}
-
-async function ask(text, { aloud = true } = {}) {
-  if (!text.trim()) return;
-  showExchange(text, "…");
-  setAiState("thinking", true);
-  try {
-    const res = await fetch("/api/engine/assistant", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, room: activeRoom }),
-    });
-    const { say = "I lost that one.", ui = {} } = await res.json().catch(() => ({}));
-    showExchange(text, say, ui);
-    if (aloud && say) speak(say);
-    else undeafen();
-  } catch {
-    showExchange(text, "I could not reach the engine.");
-    undeafen();
-  } finally {
-    setAiState(listening ? "listening" : "idle", false);
-  }
-}
-
-function startListening() {
-  if (!Speech || listening) return;
-  listener = new Speech();
-  listener.lang = "en-US";
-  listener.interimResults = true;
-  listener.continuous = false;
-
-  listener.onresult = (e) => {
-    const last = e.results[e.results.length - 1];
-    const text = last[0].transcript.trim();
-    if (deaf || isOwnEcho(text)) return;
-    // Interim results stream into the "you" line, so the band reacts while
-    // you are still talking rather than after you stop.
-    $("ai-heard").hidden = false;
-    $("ai-heard").textContent = text;
-    if (last.isFinal) {
-      // Deaf from the moment there is something to answer: thinking and
-      // speaking are both windows where the only voice is ours.
-      deafen();
-      void ask(text);
-    }
-  };
-  listener.onerror = (e) => {
-    // "no-speech" and "aborted" are what a quiet room and our own stop()
-    // produce. Neither is a reason to turn the microphone off.
-    if (e.error === "no-speech" || e.error === "aborted") return;
-    stopListening();
-  };
-  listener.onend = () => {
-    // Chrome ends a non-continuous session on every pause. Restart while the
-    // button is still pressed, or one sentence is all you ever get - but not
-    // while we are talking, which is the whole point.
-    if (listening && !deaf) {
-      try {
-        listener.start();
-      } catch {
-        stopListening();
-      }
-    }
-  };
-
-  listening = true;
-  $("mic").setAttribute("aria-pressed", "true");
-  setAiState("listening");
-  try {
-    listener.start();
-  } catch {
-    stopListening();
-  }
-}
-
-function stopListening() {
-  listening = false;
-  deaf = false;
-  $("mic").setAttribute("aria-pressed", "false");
-  setAiState("idle");
-  try {
-    listener?.stop();
-  } catch {
-    // Already stopped; nothing to undo.
-  }
-  listener = null;
-}
-
-if (Speech === null) {
-  $("mic").disabled = true;
-  $("mic").title = "This browser has no speech recognition. Chrome does.";
-} else {
-  $("mic").addEventListener("click", () => (listening ? stopListening() : startListening()));
+  for (const id of [...feeds.keys()]) dropFeed(id);
 }
 
 // ---------------------------------------------------------------- sockets --
 
+/*
+ * Both sockets recover from `onclose`, which assumes the browser is told.
+ * A half-open socket is never told: the connection is gone and the event
+ * never fires, so the page waits for a channel that is already dead. It
+ * looks from here exactly like a quiet system, which is the whole problem.
+ *
+ * So each one is watched. Silence alone is not evidence - a wall changes
+ * rarely and a still room scores nothing - but silence past the point where
+ * something should have arrived is worth spending a reconnect on. Closing is
+ * all that happens here; the existing onclose handler does the reopening, so
+ * there is one path back up rather than two.
+ */
+
+/** Any message at all, per socket. Not scores - liveness, not activity. */
+let engineSeenAt = Date.now();
+let hubSeenAt = Date.now();
+let engineWs = null;
+let hubWs = null;
+
+/**
+ * Long enough that a genuinely idle minute does not cause churn, short
+ * enough that nobody stands in front of a camera for a minute wondering.
+ */
+const ENGINE_SILENCE_MS = 35000;
+/** The Hub speaks only when the wall changes, so it is allowed much longer. */
+const HUB_SILENCE_MS = 150000;
+
+setInterval(() => {
+  // Only suspect the engine socket while something should be reporting on
+  // it. With nothing publishing, silence is the correct and expected state
+  // and reconnecting into it achieves nothing but churn.
+  if (devices.length > 0 && Date.now() - engineSeenAt > ENGINE_SILENCE_MS) {
+    engineSeenAt = Date.now();
+    try {
+      engineWs?.close();
+    } catch {
+      // Already closing; onclose still runs and reopens.
+    }
+  }
+  if (Date.now() - hubSeenAt > HUB_SILENCE_MS) {
+    hubSeenAt = Date.now();
+    try {
+      hubWs?.close();
+    } catch {
+      // Same.
+    }
+  }
+}, 5000);
+
 function hubSocket() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/hub/ws`);
+  hubWs = ws;
+  hubSeenAt = Date.now();
 
   ws.onmessage = (e) => {
+    hubSeenAt = Date.now();
     const msg = JSON.parse(e.data);
     if (msg.type === "state") devices = msg.devices;
     else if (msg.type === "up") devices = [...devices.filter((d) => d.id !== msg.device.id), msg.device];
@@ -1175,13 +1375,18 @@ function hubSocket() {
     else return;
 
     renderMeta();
+    // Anything that has gone off the wall takes its pane with it; anything
+    // new waits to be turned on, except when nothing is on at all.
+    for (const id of [...feeds.keys()]) {
+      if (!devices.some((d) => d.id === id)) dropFeed(id);
+    }
     if (devices.length === 0) {
       teardown();
       $("stage-empty").hidden = false;
       $("hud").hidden = true;
       renderCams();
-    } else if (!current || !devices.some((d) => d.id === current.device.id)) {
-      void showCamera(devices[0]);
+    } else if (feeds.size === 0) {
+      void addFeed(devices[0]);
     } else {
       renderCams();
     }
@@ -1192,8 +1397,11 @@ function hubSocket() {
 function engineSocket() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/api/engine/ws`);
+  engineWs = ws;
+  engineSeenAt = Date.now();
 
   ws.onmessage = (e) => {
+    engineSeenAt = Date.now();
     const msg = JSON.parse(e.data);
     if (msg.type === "changed") {
       void load();
@@ -1317,7 +1525,14 @@ $("g-plan").addEventListener("click", async () => {
   const res = await fetch("/api/engine/plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sentence, tz: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+    body: JSON.stringify({
+      sentence,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      // What is publishing. The planner cannot see the wall, and a goal
+      // drafted for a surface nobody is sharing never fires - it should at
+      // least know that is what it is doing.
+      surfaces: [...new Set(devices.map((d) => (d.kind === "screen" ? "screen" : "camera")))],
+    }),
   });
 
   if (!res.ok) {
@@ -1480,3 +1695,213 @@ function stepOrder(goal, index) {
   ].sort((a, b) => a - b);
   return indices.indexOf(index) + 1;
 }
+
+// The empty stage carries the same action, because that is where the feed
+// will be and so where the hand goes. One handler, two buttons.
+$("add-camera-2").addEventListener("click", () => $("add-camera").click());
+
+// --------------------------------------------------------------- the voice --
+
+/**
+ * The assistant band.
+ *
+ * `showExchange` and `speak` were called from the engine socket and defined
+ * nowhere, so every assistant message threw a ReferenceError inside the
+ * socket handler and the band kept its placeholder for ever. The mic had no
+ * listener at all. What looked like a bad design was an unwired one.
+ */
+
+const ai = $("ai");
+
+/** Idle is a button, not a wide empty box pretending to be an input. */
+function aiIdle(idle) {
+  ai.dataset.idle = idle ? "1" : "0";
+}
+aiIdle(true);
+
+/**
+ * Show one turn: what it heard, what it said.
+ *
+ * Both halves, because the commonest way a voice feature loses trust is
+ * acting on something you did not say without ever showing you what it
+ * thought it heard.
+ */
+function showExchange(heard, say, ui = {}) {
+  const h = $("ai-heard");
+  h.textContent = heard;
+  h.hidden = !heard;
+
+  $("ai-said").textContent = say || "—";
+  ai.dataset.tone = ui.tone ?? "calm";
+  ai.classList.remove("thinking");
+  $("ai-state").textContent = "";
+  aiIdle(false);
+
+  // The console's own attention follows the assistant's. Naming a skill and
+  // then leaving you to find it is the half-done version of this.
+  if (ui.focusSkill) {
+    focusSkill = ui.focusSkill;
+    renderAll();
+    drawPlot();
+  }
+  if (ui.focusGoal) {
+    focusGoal = ui.focusGoal;
+    renderAll();
+  }
+}
+
+/**
+ * Say it out loud, when the browser can.
+ *
+ * Wrapped because speechSynthesis is missing or mute on enough platforms
+ * that an unguarded call is a crash on somebody's phone, and a silent
+ * assistant is far better than a broken page.
+ */
+function speak(text) {
+  if (!text) return;
+  try {
+    if (!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  } catch {
+    // Nothing to do and nothing worth saying: the text is already on screen.
+  }
+}
+
+/** Send what was said and show the answer. */
+async function askPact(text) {
+  if (!text) return;
+  showExchange(text, "…", { tone: "calm" });
+  ai.classList.add("thinking");
+  $("ai-state").textContent = "thinking";
+  try {
+    const res = await fetch("/api/engine/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, room: devices[0]?.room ?? "" }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const say = body.say ?? "I could not think just then.";
+    showExchange(text, say, body.ui ?? {});
+    speak(say);
+  } catch {
+    showExchange(text, "I could not reach my own head just then.", { tone: "alert" });
+  } finally {
+    ai.classList.remove("thinking");
+    $("ai-state").textContent = "";
+  }
+}
+
+/**
+ * The microphone.
+ *
+ * Web Speech where it exists, a typed prompt where it does not. Falling back
+ * to typing rather than hiding the control: the assistant is the same
+ * feature either way, and a button that vanishes on Firefox reads as broken.
+ */
+const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+let listening = null;
+
+/**
+ * What went wrong, in words a person can act on.
+ *
+ * Every failure used to arrive as "I did not catch that", which made a
+ * refused permission look exactly like mumbling - so the button appeared to
+ * do nothing and there was no way to find out why.
+ */
+const MIC_TROUBLE = {
+  "not-allowed": "I need permission to use the microphone. Allow it in the padlock menu, then try again.",
+  "service-not-allowed": "This browser is blocking speech recognition. Type instead?",
+  "audio-capture": "I cannot find a microphone on this device.",
+  network: "Speech recognition needs the network and could not reach it.",
+  aborted: "",
+  "no-speech": "I did not hear anything.",
+};
+
+/** Typing is always available, so the assistant is never simply unusable. */
+function askByTyping() {
+  const typed = window.prompt("Ask Pact");
+  if (typed && typed.trim()) void askPact(typed.trim());
+}
+
+$("mic").addEventListener("click", async () => {
+  if (listening) {
+    listening.stop();
+    return;
+  }
+  if (!Recognition) {
+    askByTyping();
+    return;
+  }
+
+  // Said before anything slow happens. The permission prompt can sit there
+  // for as long as it takes someone to read it, and until onstart fires
+  // there is otherwise no sign the button did anything at all.
+  aiIdle(false);
+  $("ai-state").textContent = "starting";
+  ai.classList.add("thinking");
+
+  // Asked for explicitly rather than left to the recogniser. Chrome's own
+  // prompt from SpeechRecognition is easy to miss and gives no catchable
+  // failure, so a denied microphone just looked like silence.
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Released at once: the recogniser opens its own. Holding this one keeps
+    // the recording indicator lit for as long as the tab is open.
+    for (const track of stream.getTracks()) track.stop();
+  } catch {
+    ai.classList.remove("thinking");
+    $("ai-state").textContent = "";
+    showExchange("", MIC_TROUBLE["not-allowed"], { tone: "nudge" });
+    askByTyping();
+    return;
+  }
+
+  const rec = new Recognition();
+  rec.lang = navigator.language || "en-GB";
+  rec.interimResults = true;
+  rec.continuous = false;
+
+  rec.onstart = () => {
+    listening = rec;
+    ai.classList.remove("thinking");
+    ai.classList.add("listening");
+    $("ai-state").textContent = "listening";
+    $("mic").setAttribute("aria-pressed", "true");
+  };
+  // Interim results are shown as they arrive, so you can see it mishearing
+  // you while there is still time to stop and say it again.
+  rec.onresult = (e) => {
+    const said = [...e.results].map((r) => r[0].transcript).join("").trim();
+    const h = $("ai-heard");
+    h.textContent = said;
+    h.hidden = !said;
+    if (e.results[e.results.length - 1].isFinal) void askPact(said);
+  };
+  rec.onerror = (e) => {
+    const why = MIC_TROUBLE[e.error] ?? `Speech recognition failed (${e.error}).`;
+    if (why) showExchange("", why, { tone: "nudge" });
+    // Anything but a stray silence leaves typing open, so one bad attempt
+    // does not end the conversation.
+    if (e.error !== "no-speech" && e.error !== "aborted") askByTyping();
+  };
+  rec.onend = () => {
+    listening = null;
+    ai.classList.remove("listening", "thinking");
+    $("mic").setAttribute("aria-pressed", "false");
+    const state = $("ai-state");
+    if (state.textContent === "listening" || state.textContent === "starting") state.textContent = "";
+  };
+
+  // start() throws InvalidStateError if one is already running, and an
+  // uncaught throw here leaves the button stuck looking busy for ever.
+  try {
+    rec.start();
+  } catch {
+    ai.classList.remove("thinking");
+    $("ai-state").textContent = "";
+    askByTyping();
+  }
+});

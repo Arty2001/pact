@@ -4,7 +4,16 @@ import type { UiIntent } from "./assistant.ts";
 import type { ToolCall } from "./nebius.ts";
 import { evaluate, inWindow } from "./evaluate.ts";
 import { sequence, stepsOf } from "./sequence.ts";
+import { ground, needsGrounding } from "./ground.ts";
 import { plan } from "./planner.ts";
+import {
+  type ComputeState,
+  decide,
+  start as startInstance,
+  statusOf,
+  stop as stopInstance,
+  Tokens,
+} from "../compute.ts";
 import { ADDITIONS, MIGRATIONS, SCHEMA } from "./schema.ts";
 import type {
   EngineMessage,
@@ -77,6 +86,24 @@ const MAX_CORRECTION_MIN = 240;
  */
 const LEDGER_RETAIN_MS = 14 * 24 * 60 * 60 * 1000;
 
+/**
+ * A key, made addressable.
+ *
+ * A key is a path segment before it is anything else, and the planner is a
+ * model being asked for one - it produced "nos youtube_shorts_limit", whose
+ * space made a goal that no URL could name. Normalising on the way in is
+ * cheaper than every route downstream having to cope: slashes stay, because
+ * a key is namespaced and they are the namespace.
+ */
+function asKey(raw: unknown): string {
+  return String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9/_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_/]+|[_/]+$/g, "");
+}
+
 /** The same planner model. It already knows the vocabulary of this system. */
 const ASSISTANT_MODEL = "nvidia/nemotron-3-super-120b-a12b";
 
@@ -102,10 +129,28 @@ export class Engine implements DurableObject {
    * separate socket the browser keeps open regardless.
    */
   private lastFrameAt = new Map<string, number>();
+  /**
+   * When perception last reported SCORES for a room.
+   *
+   * Distinct from lastFrameAt, which only moves on the browser's own frame
+   * posting and so says nothing about whether anything is analysing them.
+   * Without this the console cannot tell a quiet gate from a subscription
+   * that is delivering nothing, and it guessed - wrongly, and confidently.
+   */
+  private lastScoreAt = new Map<string, number>();
 
   constructor(
     private ctx: DurableObjectState,
-    private env: { NEBIUS_API_KEY?: string },
+    // Narrowed to what the Engine actually reads, so the bindings it has no
+    // business touching are not even in scope here. The two compute fields
+    // are optional and the feature is simply off without them, which is the
+    // laptop deployment.
+    private env: {
+      NEBIUS_API_KEY?: string;
+      NEBIUS_INSTANCE_ID?: string;
+      NEBIUS_COMPUTE_TOKEN?: string;
+      TAVILY_API_KEY?: string;
+    },
   ) {
     this.ctx.storage.sql.exec(SCHEMA);
     for (const statement of [...ADDITIONS, ...MIGRATIONS]) {
@@ -135,6 +180,13 @@ export class Engine implements DurableObject {
       return Response.json(this.state());
     }
 
+    // How many cameras are publishing, from the Hub. Idempotent by design:
+    // it is a count, not an event.
+    if (path === "/compute/publishers" && request.method === "POST") {
+      const body = (await request.json().catch(() => ({}))) as { publishers?: number };
+      return this.onPublishers(Math.max(0, Math.trunc(Number(body.publishers ?? 0))));
+    }
+
     if (path === "/plan" && request.method === "POST") return this.plan(request);
     if (path === "/assistant" && request.method === "POST") return this.assistant(request);
 
@@ -152,10 +204,15 @@ export class Engine implements DurableObject {
     // from a run that is now known to have been wrong sits on screen until
     // midnight with no way to say so - which is its own kind of lying about
     // what the camera saw.
-    const resetMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)\/instances$/);
+    // Keys are matched loosely and decoded, because a key is whatever was
+    // stored - and a planner that emitted "nos youtube_shorts_limit" made a
+    // goal that no route could address, so deleting it did nothing and said
+    // ok. A pattern that only accepts well-formed keys cannot clean up a
+    // badly-formed one, which is exactly when you need it to.
+    const resetMatch = path.match(/^\/goals\/(.+)\/instances$/);
     if (resetMatch && request.method === "DELETE") {
-      this.sql("DELETE FROM instances WHERE goal_key = ?", resetMatch[1]);
-      this.log.info("goal.evaluate", { goal: resetMatch[1], detail: "instances cleared" });
+      this.sql("DELETE FROM instances WHERE goal_key = ?", decodeURIComponent(resetMatch[1]));
+      this.log.info("goal.evaluate", { goal: decodeURIComponent(resetMatch[1]), detail: "instances cleared" });
       this.broadcastWatchers();
       return Response.json({ ok: true });
     }
@@ -163,9 +220,9 @@ export class Engine implements DurableObject {
     // Ordered above the goal delete deliberately: its path pattern
     // allows slashes, so it matches this one too and would answer it
     // by deleting nothing and reporting ok.
-    const goalMatch = path.match(/^\/goals\/([A-Za-z0-9_\-/]+)$/);
+    const goalMatch = path.match(/^\/goals\/(.+)$/);
     if (goalMatch && request.method === "DELETE") {
-      const key = goalMatch[1];
+      const key = decodeURIComponent(goalMatch[1]);
       // Written out rather than left to ON DELETE CASCADE, which only fires
       // when foreign keys are enforced and nothing here guarantees they are.
       this.sql("DELETE FROM goal_skills WHERE goal_key = ?", key);
@@ -178,9 +235,13 @@ export class Engine implements DurableObject {
       // product per frame forever and crowding the chart it appears on.
       // Delete a goal and whatever was only ever its goes with it; anything
       // another goal still shares is kept by the same query.
-      const orphans = this.rows<{ key: string }>(
-        "SELECT key FROM skills WHERE key NOT IN (SELECT skill_key FROM goal_skills)",
-      ).map((r) => r.key);
+      // Joined against goals, not just goal_skills. A join row whose goal no
+      // longer exists still names a skill, and a reference from a goal that
+      // is gone kept every skill in the registry looking used - so nothing
+      // was ever swept again after the first deletion that left one behind.
+      // Counting only live references makes this self-healing whatever the
+      // table has accumulated.
+      const orphans = this.unreferencedSkills();
       for (const orphan of orphans) this.sql("DELETE FROM skills WHERE key = ?", orphan);
 
       this.log.info("goal.settle", {
@@ -193,24 +254,55 @@ export class Engine implements DurableObject {
       return Response.json({ ok: true, removedSkills: orphans });
     }
 
-    const skillMatch = path.match(/^\/skills\/([A-Za-z0-9_\-/]+)$/);
+    // Ask perception what this skill SHOULD be looking for. Ordered above
+    // the bare skill patterns because those allow slashes and would swallow
+    // this path whole.
+    const relabelMatch = path.match(/^\/skills\/(.+)\/relabel$/);
+    if (relabelMatch && request.method === "POST") {
+      const key = asKey(decodeURIComponent(relabelMatch[1]));
+      const body = (await request.json().catch(() => ({}))) as { minutesBack?: number };
+      // Clamped the same way a spoken correction is: a window of days read
+      // off a request body would have perception describe last Tuesday.
+      const minutes = Math.min(Math.max(Number(body.minutesBack ?? 0), 0), MAX_CORRECTION_MIN);
+      // Both ends or neither. Half a window would have perception read the
+      // label off a span open at one end, which is not a span.
+      const stamp = Date.now();
+      const from = minutes > 0 ? stamp - minutes * 60_000 : undefined;
+      const to = from === undefined ? undefined : stamp;
+      return Response.json({ ok: true, asked: this.askRelabel(key, from, to) });
+    }
+
+    const proposalMatch = path.match(/^\/proposals\/(.+)$/);
+    if (proposalMatch && request.method === "POST") {
+      return this.decideProposal(asKey(decodeURIComponent(proposalMatch[1])), request);
+    }
+    if (proposalMatch && request.method === "DELETE") {
+      const key = asKey(decodeURIComponent(proposalMatch[1]));
+      this.sql("DELETE FROM proposals WHERE skill_key = ?", key);
+      this.broadcastWatchers();
+      return Response.json({ ok: true });
+    }
+
+    const skillMatch = path.match(/^\/skills\/(.+)$/);
     if (skillMatch && request.method === "DELETE") {
       // A skill a goal still names cannot go: the goal would be left asking
       // for evidence nothing can produce, which reads as "never fired"
       // rather than as the broken reference it is.
       const used = this.rows<{ goal_key: string }>(
-        "SELECT goal_key FROM goal_skills WHERE skill_key = ?",
-        skillMatch[1],
+        `SELECT gs.goal_key FROM goal_skills gs
+         JOIN goals g ON g.key = gs.goal_key
+         WHERE gs.skill_key = ?`,
+        decodeURIComponent(skillMatch[1]),
       ).map((r) => r.goal_key);
       if (used.length > 0) {
         this.log.warn("skill.rejected", {
           detail: "delete refused, still in use",
-          skill: skillMatch[1],
+          skill: decodeURIComponent(skillMatch[1]),
           goals: used.join(","),
         });
         return Response.json({ error: "in use", goals: used }, { status: 409 });
       }
-      this.sql("DELETE FROM skills WHERE key = ?", skillMatch[1]);
+      this.sql("DELETE FROM skills WHERE key = ?", decodeURIComponent(skillMatch[1]));
       this.pushRegistry();
       return Response.json({ ok: true });
     }
@@ -240,6 +332,10 @@ export class Engine implements DurableObject {
    * looking at it.
    */
   async alarm(): Promise<void> {
+    // Before the goals, because this is the one thing on the tick that is
+    // costing money while it waits.
+    await this.tickCompute();
+
     for (const goal of this.goals()) {
       this.ensureInstance(goal);
     }
@@ -277,6 +373,20 @@ export class Engine implements DurableObject {
       this.log.info("goal.evaluate", { detail: `pruned ${cut} transitions past retention` });
     }
 
+    // Rows left by a goal that went before the joins were cleaned up, and
+    // the skills they stranded. Done on the tick because with no goals left
+    // there is no deletion to hang it off, and a registry full of detectors
+    // nothing asks for is scored on every frame forever.
+    const stranded = this.unreferencedSkills();
+    if (stranded.length > 0) {
+      for (const key of stranded) this.sql("DELETE FROM skills WHERE key = ?", key);
+      this.log.info("goal.settle", {
+        detail: "swept skills no goal names",
+        orphaned_skills: stranded.join(","),
+      });
+      this.pushRegistry();
+    }
+
     // The next wake is whichever comes first: the regular tick, or a nudge.
     const next = this.rows<{ at: number }>(
       "SELECT at FROM reminders WHERE done = 0 ORDER BY at LIMIT 1",
@@ -300,12 +410,44 @@ export class Engine implements DurableObject {
         { status: 503 },
       );
     }
-    const { sentence, tz } = (await request.json()) as { sentence?: string; tz?: string };
+    const { sentence, tz, surfaces } = (await request.json()) as {
+      sentence?: string;
+      tz?: string;
+      surfaces?: string[];
+    };
     if (!sentence) return Response.json({ error: "sentence is required" }, { status: 400 });
+
+    // A skill that exists is not the same as a skill that works. One that
+    // has never produced a transition is one whose label matched nothing,
+    // and reusing it inherits that silently - so the count travels with it.
+    const fired = new Map<string, number>(
+      this.rows<{ skill_key: string; n: number }>(
+        "SELECT skill_key, COUNT(*) AS n FROM transitions WHERE kind = 'entered' GROUP BY skill_key",
+      ).map((r) => [r.skill_key, Number(r.n)]),
+    );
+
+    // Only when the sentence named no number. Searching to second-guess
+    // somebody's own stated quantity would be useless and rude, and it runs
+    // on every goal anyone writes, so restraint here is a latency decision
+    // as much as a correctness one.
+    const key = this.env.TAVILY_API_KEY;
+    const guidance =
+      key && needsGrounding(sentence) ? ((await ground(key, sentence)) ?? undefined) : undefined;
+    if (guidance) {
+      this.log.info("planner.call", {
+        sentence,
+        detail: `target grounded in ${guidance.sources.length} source(s)`,
+        sources: guidance.sources.map((s) => s.url).join(" "),
+      });
+    }
 
     const started = Date.now();
     try {
-      const draft = await plan(this.env.NEBIUS_API_KEY, sentence, this.skills(), tz ?? "UTC");
+      const draft = await plan(
+        this.env.NEBIUS_API_KEY,
+        sentence,
+        this.planContext(tz, Array.isArray(surfaces) ? surfaces : [], fired, guidance),
+      );
       this.log.info("planner.call", {
         sentence,
         created: draft.created,
@@ -374,6 +516,7 @@ export class Engine implements DurableObject {
     }
 
     if (msg.type === "scores") {
+      this.lastScoreAt.set(msg.room, Date.now());
       // Straight out to the browsers and then gone. Nothing is persisted,
       // which is what keeps this from quietly becoming the observations
       // table the whole process split exists to avoid.
@@ -439,6 +582,67 @@ export class Engine implements DurableObject {
         say,
         ui: { focusSkill: msg.skillKey, banner: say, tone: "calm" },
       });
+    }
+
+    if (msg.type === "proposal") {
+      const was = this.rows<{ label: string }>(
+        "SELECT label FROM skills WHERE key = ?",
+        msg.skillKey,
+      )[0]?.label;
+      if (was === undefined) return;
+
+      // Worse or barely better is not worth asking about. The ratio is
+      // separation over spread on recorded frames, so a tie means the two
+      // labels describe the same frames equally well - and a prompt to
+      // approve a change that measures the same is noise that teaches
+      // people to approve without reading.
+      if (msg.ratioAfter <= msg.ratioBefore * 1.15) {
+        this.log.info("probe.refit", {
+          skill: msg.skillKey,
+          detail: "label proposal declined, no real improvement",
+          holdout_before: msg.ratioBefore,
+          holdout_after: msg.ratioAfter,
+          accepted: false,
+        });
+        return;
+      }
+
+      this.sql(
+        `INSERT OR REPLACE INTO proposals
+           (skill_key, label, was, ratio_after, ratio_before, runners_up, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        msg.skillKey,
+        msg.label,
+        was,
+        msg.ratioAfter,
+        msg.ratioBefore,
+        JSON.stringify(msg.runnersUp ?? []),
+        Date.now(),
+      );
+      this.log.info("probe.refit", {
+        skill: msg.skillKey,
+        detail: `label proposal: "${msg.label}" over "${was}"`,
+        holdout_before: msg.ratioBefore,
+        holdout_after: msg.ratioAfter,
+        accepted: false,
+      });
+
+      // Said out loud, with the ratio in plain words. The person who
+      // complained is owed an answer in the same breath, and "I think I
+      // know what I was missing" is a far better answer than silence while
+      // forty labels accumulate.
+      const times = (msg.ratioAfter / Math.max(msg.ratioBefore, 0.01)).toFixed(1);
+      const say =
+        `I think ${msg.skillKey} should be looking for "${msg.label}" instead. ` +
+        `On the frames you just showed me that separates ${times} times better ` +
+        `than what it has now. Want me to change it?`;
+      this.toWatchers({
+        type: "assistant",
+        heard: "",
+        say,
+        ui: { focusSkill: msg.skillKey, banner: say, tone: "curious" },
+      });
+      this.broadcastWatchers();
     }
   }
 
@@ -512,7 +716,7 @@ export class Engine implements DurableObject {
     // Only a changed label invalidates the vector — the label IS the detector.
     const prior = this.rows<Record<string, unknown>>(
       "SELECT * FROM skills WHERE key = ?",
-      body.key,
+      asKey(body.key),
     )[0];
     const keep = prior && String(prior.label) === body.label ? prior : undefined;
 
@@ -539,7 +743,7 @@ export class Engine implements DurableObject {
          cooldown_s, escalate_after_s, min_cycle_s, classes, margin, sample_hz,
          w, encoder_id, dim, bias, temperature, weight_state, n_labels, created_at)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      body.key,
+      asKey(body.key),
       body.kind ?? "object",
       body.label,
       body.room ?? null,
@@ -586,12 +790,76 @@ export class Engine implements DurableObject {
       return Response.json({ error: "key and description are required" }, { status: 400 });
     }
 
+    // evaluate() skips gates on purpose - a gate is a precondition, not a
+    // thing to achieve - so a goal with nothing else has no sub-goals, and a
+    // goal with no sub-goals can never be met. It would sit on the console
+    // looking ordinary and never advance, and nothing would say why. Refused
+    // here rather than discovered a week later.
+    const doing = (body.uses ?? []).filter((u) => u.role !== "gate");
+
+    // A gate watching a different surface from the thing beneath it does not
+    // fail cleanly. A camera gate over a screen goal fires on the people
+    // INSIDE whatever video is playing, so the goal reports the content of
+    // the media instead of the fact of it and appears to work intermittently
+    // - which is worse than broken, because nobody debugs something that
+    // sometimes gives the right answer. The planner is told this plainly and
+    // still does it, so it is checked here too. `any` means the skill was
+    // written with no opinion and matches either.
+    // Through asKey, because the insert below stores the normalised form and
+    // a lookup on the raw one silently finds nothing - which here meant
+    // "no opinion" and skipped the whole check. The normalisation and this
+    // have to agree about what a key is or the guard never fires.
+    const surfaceOf = (key: string): string => {
+      const row = this.rows<{ surface: string }>(
+        "SELECT surface FROM skills WHERE key = ?",
+        asKey(key),
+      )[0];
+      return row?.surface ?? "any";
+    };
+    for (const gate of (body.uses ?? []).filter((u) => u.role === "gate")) {
+      const gateSurface = surfaceOf(gate.skillKey);
+      if (gateSurface === "any") continue;
+      const wrong = doing.find((u) => {
+        const s = surfaceOf(u.skillKey);
+        return s !== "any" && s !== gateSurface;
+      });
+      if (wrong !== undefined) {
+        this.log.warn("skill.rejected", {
+          goal: body.key,
+          skill: gate.skillKey,
+          detail: `gate watches ${gateSurface}, ${wrong.skillKey} watches ${surfaceOf(wrong.skillKey)}`,
+        });
+        return Response.json(
+          {
+            error:
+              `the gate "${gate.skillKey}" watches a ${gateSurface} and ` +
+              `"${wrong.skillKey}" watches a ${surfaceOf(wrong.skillKey)}. A gate ` +
+              "has to watch the same surface as the thing it gates, or it can " +
+              "never open for it - and a camera gate over a screen goal fires " +
+              "on the people inside whatever video is playing.",
+          },
+          { status: 400 },
+        );
+      }
+    }
+    if ((body.uses ?? []).length > 0 && doing.length === 0) {
+      return Response.json(
+        {
+          error:
+            "a goal needs at least one non-gate skill. A gate says where to " +
+            "look; something beneath it has to be the thing being measured, " +
+            "or the goal can never settle.",
+        },
+        { status: 400 },
+      );
+    }
+
     this.sql(
       `INSERT OR REPLACE INTO goals
         (key, description, type, cadence, done_min, done_max, window_start, window_end,
-         tz, sequence_window_s, step_value, step_period, step_on, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      body.key,
+         tz, sequence_window_s, step_value, step_period, step_on, source_url, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      asKey(body.key),
       body.description,
       body.type ?? "target",
       body.cadence ?? "daily",
@@ -604,6 +872,7 @@ export class Engine implements DurableObject {
       body.stepValue ?? null,
       body.stepPeriod ?? null,
       body.stepOn ?? null,
+      body.sourceUrl ?? null,
       Date.now(),
     );
 
@@ -613,8 +882,8 @@ export class Engine implements DurableObject {
         `INSERT OR REPLACE INTO goal_skills
           (goal_key, skill_key, role, class_key, min_count, accumulate, sequence_index)
          VALUES (?,?,?,?,?,?,?)`,
-        body.key,
-        use.skillKey,
+        asKey(body.key),
+        asKey(use.skillKey),
         use.role,
         use.classKey ?? null,
         use.minCount ?? null,
@@ -804,6 +1073,7 @@ export class Engine implements DurableObject {
             skillKey: q.skillKey,
             prompt: q.prompt,
           })),
+          proposals: this.pendingProposals(),
           room: [...this.lastFrameAt.keys()][0] ?? null,
         });
         log.info("question.asked", { detail: "unprompted", prompt: turn.say });
@@ -1038,6 +1308,7 @@ export class Engine implements DurableObject {
           skillKey: q.skillKey,
           prompt: q.prompt,
         })),
+        proposals: this.pendingProposals(),
         room: [...this.lastFrameAt.keys()][0] ?? null,
       });
     } catch (err) {
@@ -1045,7 +1316,7 @@ export class Engine implements DurableObject {
       return Response.json({ say: "I could not reach my own head just then." });
     }
 
-    const applied = this.applyActions(turn.actions, log);
+    const applied = await this.applyActions(turn.actions, log);
     log.info("question.answered", {
       detail: "said",
       say: turn.say,
@@ -1059,8 +1330,33 @@ export class Engine implements DurableObject {
     return Response.json({ say: turn.say, ui: turn.ui, applied });
   };
 
+  /**
+   * Skills no surviving goal names.
+   *
+   * NOT EXISTS rather than NOT IN: a single NULL in the subquery makes
+   * NOT IN match nothing at all, silently, which is a strange way for a
+   * cleanup to fail. The join to goals is the other half - a join row whose
+   * goal is gone still names a skill, and those leftovers kept every skill
+   * looking used, so nothing was swept again after the first deletion that
+   * left one behind.
+   */
+  private unreferencedSkills(): string[] {
+    this.sql(
+      `DELETE FROM goal_skills
+       WHERE NOT EXISTS (SELECT 1 FROM goals g WHERE g.key = goal_skills.goal_key)`,
+    );
+    return this.rows<{ key: string }>(
+      `SELECT key FROM skills s
+       WHERE NOT EXISTS (
+         SELECT 1 FROM goal_skills gs
+         JOIN goals g ON g.key = gs.goal_key
+         WHERE gs.skill_key = s.key
+       )`,
+    ).map((r) => r.key);
+  }
+
   /** What the model asked for, done by the only thing allowed to do it. */
-  private applyActions(actions: ToolCall[], log: Logger): string[] {
+  private async applyActions(actions: ToolCall[], log: Logger): Promise<string[]> {
     const done: string[] = [];
     for (const call of actions) {
       const a = call.args;
@@ -1111,7 +1407,53 @@ export class Engine implements DurableObject {
             ? `corrected ${a.happened === true ? 1 : 0} over ${minutes}m by voice`
             : `labelled ${a.happened === true ? 1 : 0} by voice`,
         });
+
+        // "That IS happening and you missed it" is the one complaint worth
+        // acting on twice. The label is evidence toward a refit, which
+        // needs around forty of them before it beats the sentence it
+        // started from - weeks of complaints for a detector that is wrong
+        // today. So the same breath also asks what the label SHOULD have
+        // said, which is answerable from this one window alone.
+        //
+        // Only for a miss. Someone saying a skill fired when it should not
+        // have is not describing what to look for, and re-reading the label
+        // off frames that are explicitly the wrong thing would propose a
+        // detector for them.
+        // The same window the label was pinned to. The frames that prove
+        // the complaint are the ones the complaint is about, and they stop
+        // being in front of the camera the moment someone turns to speak.
+        if (a.happened === true) this.askRelabel(skillKey, from, to);
         done.push(`label_frame ${skillKey}`);
+      } else if (call.name === "create_goal") {
+        const sentence = String(a.sentence ?? "").trim();
+        if (!sentence) continue;
+        try {
+          const made = await this.planAndCreate(sentence, this.goals()[0]?.tz);
+          if (made) done.push(`create_goal ${made}`);
+          this.pushRegistry();
+          this.broadcastWatchers();
+        } catch (err) {
+          // Reported rather than swallowed: a goal someone asked for out
+          // loud and did not get is the one failure they will definitely
+          // notice, and silence here reads as the assistant ignoring them.
+          log.error("service.error", {
+            detail: `could not create a goal from "${sentence}": ${String(err).slice(0, 140)}`,
+          });
+        }
+      } else if (call.name === "apply_label") {
+        // The same method the button calls, so a spoken yes and a clicked
+        // one cannot diverge. A model that invents a skill key changes
+        // nothing, which is the right outcome: there is nothing to apply
+        // unless something measured it.
+        const key = asKey(String(a.skill_key ?? ""));
+        if (this.decide(key, a.accept !== false) === null) {
+          log.warn("skill.rejected", {
+            skill: key,
+            detail: "apply_label with no proposal waiting",
+          });
+          continue;
+        }
+        done.push(`apply_label ${key}`);
       } else if (call.name === "answer_question") {
         const id = String(a.id ?? "");
         const value = String(a.value ?? "");
@@ -1165,6 +1507,391 @@ export class Engine implements DurableObject {
   // --------------------------------------------------------------- reading
 
   /** Everything the UI needs, in one request. */
+  /**
+   * Ask perception to reconsider a skill's label.
+   *
+   * Returns how many workers were asked, because the honest answer to
+   * "why has nothing come back" is usually that nothing was listening.
+   * The room is left to perception: it knows which surface the skill
+   * scores and which of its rooms has frames.
+   */
+  private askRelabel(skillKey: string, from?: number, to?: number): number {
+    const room = [...this.lastFrameAt.keys()][0] ?? "";
+    let asked = 0;
+    for (const ws of this.perceptionSockets(room)) {
+      this.send(ws, { type: "relabel", room, skillKey, from, to });
+      asked += 1;
+    }
+    if (asked === 0) {
+      this.log.warn("skill.rejected", {
+        skill: skillKey,
+        detail: "relabel asked with no perception worker listening",
+      });
+    }
+    return asked;
+  }
+
+  /**
+   * Apply or discard a proposed label.
+   *
+   * Applying one throws the fitted vector away. That looks wasteful and is
+   * the only correct thing to do: a probe is a logistic regression anchored
+   * to the zero-shot vector of the label it was fitted against, so keeping
+   * a fit across a label change leaves a detector anchored to a sentence
+   * nobody can read any more. Better to start again from a sentence that
+   * measured better than to carry forward a fit for the wrong question.
+   */
+  private async decideProposal(skillKey: string, request: Request): Promise<Response> {
+    const body = (await request.json().catch(() => ({}))) as { accept?: boolean; label?: string };
+    const label = this.decide(skillKey, body.accept !== false, body.label);
+    if (label === null) return Response.json({ error: "no proposal" }, { status: 404 });
+    return Response.json({ ok: true, label });
+  }
+
+  /**
+   * The decision itself, reachable from a click or from a spoken yes.
+   *
+   * One method rather than two because the two must not diverge: a label
+   * applied by voice and a label applied by button have to leave the same
+   * row, the same log line and the same recalibration behind. Returns the
+   * label now in force, or null if there was nothing to decide.
+   */
+  private decide(skillKey: string, accept: boolean, chosen?: string): string | null {
+    const row = this.rows<{ label: string; was: string; ratio_after: number }>(
+      "SELECT label, was, ratio_after FROM proposals WHERE skill_key = ?",
+      skillKey,
+    )[0];
+    if (row === undefined) return null;
+    this.sql("DELETE FROM proposals WHERE skill_key = ?", skillKey);
+
+    if (!accept) {
+      // Logged as loudly as an acceptance. A rejected proposal is evidence
+      // about what this person actually means, and the only place it can be
+      // read later is here.
+      this.log.info("probe.refit", {
+        skill: skillKey,
+        detail: `label proposal rejected, kept "${row.was}"`,
+        accepted: false,
+      });
+      this.broadcastWatchers();
+      return row.was;
+    }
+
+    // A runner-up may be chosen instead of the winner, because the person
+    // reading the candidates knows things no cosine does.
+    const label = (chosen ?? row.label).trim() || row.label;
+    this.sql(
+      `UPDATE skills SET label = ?, w = NULL, encoder_id = NULL,
+       weight_state = 'pending', n_labels = 0, bias = 0.0, temperature = 1.0
+       WHERE key = ?`,
+      label,
+      skillKey,
+    );
+    this.log.info("probe.refit", {
+      skill: skillKey,
+      detail: `label replaced: "${row.was}" -> "${label}"`,
+      holdout_after: row.ratio_after,
+      accepted: true,
+    });
+    // Perception embeds a skill with no vector on the next registry push,
+    // and recalibrates it from background frames because the calibration
+    // went with the vector.
+    this.pushRegistry();
+    this.broadcastWatchers();
+
+    const say = `Changed ${skillKey} to look for "${label}". It needs a minute of ordinary frames to recalibrate.`;
+    this.toWatchers({
+      type: "assistant",
+      heard: "",
+      say,
+      ui: { focusSkill: skillKey, banner: say, tone: "calm" },
+    });
+    return label;
+  }
+
+  /**
+   * Label changes measured and waiting on a yes, for the assistant.
+   *
+   * The times figure is computed here rather than carried, because the
+   * ratio is only meaningful against the label it would replace and the
+   * model should never be handed two numbers to divide out loud.
+   */
+  private pendingProposals() {
+    return this.rows<{
+      skill_key: string;
+      label: string;
+      was: string;
+      ratio_after: number;
+      ratio_before: number;
+    }>("SELECT * FROM proposals ORDER BY at DESC").map((r) => ({
+      skillKey: r.skill_key,
+      label: r.label,
+      was: r.was,
+      times: r.ratio_after / Math.max(r.ratio_before, 0.01),
+    }));
+  }
+
+  /**
+   * How long nothing may want the encoder before its machine is stopped.
+   *
+   * Ten minutes is a compromise with a cold start, not a guess. Bringing the
+   * encoder back costs about a minute of a person watching a blank console,
+   * so stopping eagerly to save a few cents of compute spends the one thing
+   * the product cannot afford to waste. Ten minutes covers a tab refresh, a
+   * walk to the other room, and a phone that locked itself.
+   */
+  private static readonly IDLE_GRACE_MS = 10 * 60_000;
+
+  /** Built lazily, because most deploys have no compute token at all. */
+  private tokens: Tokens | null = null;
+
+  private computeConfig() {
+    return {
+      instanceId: this.env.NEBIUS_INSTANCE_ID,
+      token: this.env.NEBIUS_COMPUTE_TOKEN,
+    };
+  }
+
+  /**
+   * Record the live publisher count and act on it.
+   *
+   * The count is written before anything is decided, so a cloud call that
+   * fails still leaves the Engine knowing the truth - the alarm will act on
+   * it a minute later. Deciding first and recording after would mean a
+   * failed start also forgot why it wanted to start.
+   */
+  private async onPublishers(publishers: number): Promise<Response> {
+    const now = Date.now();
+    const was = this.computeRow();
+    // Only stamped on the transition to nothing-live. Re-stamping on every
+    // notification would push the deadline forward for ever and the machine
+    // would never stop.
+    const idleSince = publishers > 0 ? 0 : was.idle_since || now;
+    this.sql(
+      `INSERT INTO compute (id, publishers, idle_since, state, changed_at)
+       VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET publishers = ?, idle_since = ?, changed_at = ?`,
+      publishers,
+      idleSince,
+      was.state,
+      now,
+      publishers,
+      idleSince,
+      now,
+    );
+    await this.tickCompute();
+    return Response.json({ ok: true, publishers, state: this.computeRow().state });
+  }
+
+  private computeRow(): {
+    publishers: number;
+    idle_since: number;
+    state: ComputeState;
+    changed_at: number;
+  } {
+    const row = this.rows<{
+      publishers: number;
+      idle_since: number;
+      state: string;
+      changed_at: number;
+    }>("SELECT publishers, idle_since, state, changed_at FROM compute WHERE id = 1")[0];
+    return {
+      publishers: row?.publishers ?? 0,
+      idle_since: row?.idle_since ?? 0,
+      state: (row?.state ?? "unknown") as ComputeState,
+      changed_at: row?.changed_at ?? 0,
+    };
+  }
+
+  /**
+   * Ask the cloud what the machine is doing, and start or stop it if needed.
+   *
+   * Called from the publisher notification and from the alarm, because the
+   * two cover different failures. The notification is how a camera gets a
+   * machine quickly; the alarm is how a stop still happens when the last
+   * publisher left and then nothing else ever arrived to ask.
+   */
+  private async tickCompute(): Promise<void> {
+    const cfg = this.computeConfig();
+    if (!cfg.instanceId || !cfg.token) return;
+    this.tokens ??= new Tokens(cfg.token);
+
+    const row = this.computeRow();
+    let state: ComputeState;
+    try {
+      state = await statusOf(cfg, this.tokens);
+    } catch (err) {
+      // Reported, not swallowed, and nothing is attempted on top of it. A
+      // status read that failed means the next decision would be made on a
+      // belief rather than a fact, and the expensive mistakes here are all
+      // made confidently.
+      this.log.warn("service.error", {
+        detail: `could not read encoder instance: ${String(err).slice(0, 120)}`,
+      });
+      return;
+    }
+
+    if (state !== row.state) {
+      this.sql("UPDATE compute SET state = ?, changed_at = ? WHERE id = 1", state, Date.now());
+      this.log.info("service.start", {
+        detail: `encoder machine ${state}`,
+        publishers: row.publishers,
+      });
+      this.broadcastWatchers();
+    }
+
+    const action = decide(state, row.publishers, row.idle_since, Date.now(), Engine.IDLE_GRACE_MS);
+    if (action === "wait") return;
+
+    try {
+      if (action === "start") {
+        await startInstance(cfg, this.tokens);
+        this.sql("UPDATE compute SET state = 'starting', changed_at = ? WHERE id = 1", Date.now());
+        // Said out loud, because the alternative is a minute of silence that
+        // reads exactly like the thing being broken. The console has no other
+        // way to know the difference between "warming up" and "dead".
+        const say = "Bringing the encoder up - about a minute before it can score anything.";
+        this.log.info("service.start", { detail: "encoder machine start requested" });
+        this.toWatchers({ type: "assistant", heard: "", say, ui: { banner: say, tone: "calm" } });
+      } else {
+        await stopInstance(cfg, this.tokens);
+        this.sql("UPDATE compute SET state = 'stopping', changed_at = ? WHERE id = 1", Date.now());
+        this.log.info("service.start", {
+          detail: "encoder machine stopped, nothing publishing",
+          idle_ms: Date.now() - row.idle_since,
+        });
+      }
+      this.broadcastWatchers();
+    } catch (err) {
+      this.log.error("service.error", {
+        detail: `encoder machine ${action} failed: ${String(err).slice(0, 120)}`,
+      });
+    }
+  }
+
+  /**
+   * Everything the planner sees besides the sentence.
+   *
+   * One method because there are two ways in - the dialog and the voice -
+   * and a goal written by speaking has to be the same goal as one written
+   * by typing. Two copies of this would drift the first time either grew a
+   * field.
+   */
+  private planContext(
+    tz: string | undefined,
+    live: string[],
+    fired: Map<string, number>,
+    guidance: Awaited<ReturnType<typeof ground>> | undefined,
+  ) {
+    return {
+      tz: tz ?? "UTC",
+      now: Date.now(),
+      catalogue: this.skills(),
+      fired,
+      goals: this.goals().map((g) => ({
+        key: g.key,
+        description: g.description,
+        type: g.type,
+        uses: this.links(g.key).map((l) => `${l.role}:${l.skillKey}`),
+      })),
+      // What the console can see publishing. The Engine does not hold the
+      // device list - the Hub does - so this comes from the page that is
+      // already looking at it rather than through another round trip.
+      live,
+      guidance: guidance ?? undefined,
+    };
+  }
+
+  /** Transitions per skill, so the planner can tell "exists" from "works". */
+  private firedCounts(): Map<string, number> {
+    return new Map<string, number>(
+      this.rows<{ skill_key: string; n: number }>(
+        "SELECT skill_key, COUNT(*) AS n FROM transitions WHERE kind = 'entered' GROUP BY skill_key",
+      ).map((r) => [r.skill_key, Number(r.n)]),
+    );
+  }
+
+  /**
+   * Compile a sentence into a goal and write it.
+   *
+   * Spoken goals go through the Engine's own create routes rather than
+   * straight to SQL, so the voice path inherits every check the dialog
+   * already passes - key normalisation, the gate/surface backstop, the
+   * refusal to write a child before its parent. A second write path would
+   * be a second set of bugs.
+   *
+   * Returns what was made, for the assistant to read back. A goal nobody
+   * described is a goal nobody can tell is wrong.
+   */
+  private async planAndCreate(sentence: string, tz: string | undefined): Promise<string> {
+    const key = this.env.NEBIUS_API_KEY;
+    if (!key) return "";
+    const tavily = this.env.TAVILY_API_KEY;
+    const guidance =
+      tavily && needsGrounding(sentence) ? ((await ground(tavily, sentence)) ?? undefined) : undefined;
+
+    const draft = await plan(key, sentence, this.planContext(tz, [], this.firedCounts(), guidance));
+
+    // Gates before the skills that depend on them: dependsOn is a foreign
+    // key into this same table, so a child written first is a child whose
+    // gate chain is broken from birth.
+    const named = new Set(draft.uses.map((u) => u.key));
+    const ordered = [...draft.uses].sort(
+      (a, b) => (a.kind === "gate" ? -1 : 0) - (b.kind === "gate" ? -1 : 0),
+    );
+    for (const u of ordered) {
+      if (!u.isNew) continue;
+      await this.fetch(
+        new Request("https://pact/skills", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: u.key,
+            kind: u.kind,
+            label: u.label,
+            surface: u.surface,
+            dependsOn: u.dependsOn && named.has(u.dependsOn) ? u.dependsOn : null,
+          }),
+        }),
+      );
+    }
+
+    await this.fetch(
+      new Request("https://pact/goals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: draft.key,
+          description: draft.description,
+          type: draft.type,
+          cadence: draft.cadence,
+          doneMin: draft.doneMin,
+          sourceUrl: draft.sourceUrl ?? null,
+          windowStart: draft.windowStart,
+          windowEnd: draft.windowEnd,
+          tz: tz ?? "UTC",
+          uses: draft.uses.map((u) => ({
+            skillKey: u.key,
+            role: u.role,
+            classKey: u.classKey,
+            minCount: u.minCount,
+            accumulate: u.accumulate,
+            sequenceIndex: u.sequenceIndex,
+          })),
+        }),
+      }),
+    );
+
+    this.log.info("planner.call", {
+      sentence,
+      detail: `goal created by voice: ${draft.key}`,
+      created: draft.created,
+      reused: draft.reused,
+    });
+    const watches = draft.uses.map((u) => u.label).join("; ");
+    return `${draft.description} — watching for ${watches}`;
+  }
+
   private state() {
     return {
       skills: this.skills(),
@@ -1175,7 +1902,23 @@ export class Engine implements DurableObject {
         ...this.sequenceView(goal),
       })),
       questions: this.openQuestions(),
+      // What the encoder's machine is doing, so a cold start can be shown as
+      // a cold start. Only present when the feature is configured at all.
+      encoder: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().state : null,
+      // When it last changed, so a wait can be shown as a wait of a known
+      // length rather than a spinner that might mean anything.
+      encoderSince: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().changed_at : null,
+      proposals: this.rows<Record<string, unknown>>("SELECT * FROM proposals ORDER BY at DESC").map(
+        (r) => ({ ...r, runners_up: JSON.parse(String(r.runners_up ?? "[]")) }),
+      ),
       rooms: [...this.lastFrameAt].map(([room, at]) => ({ room, secondsAgo: (Date.now() - at) / 1000 })),
+      // Which rooms something is actually scoring, as opposed to which are
+      // merely publishing. The difference is the whole of "why is nothing
+      // happening".
+      watching: [...this.lastScoreAt].map(([room, at]) => ({
+        room,
+        secondsAgo: (Date.now() - at) / 1000,
+      })),
       perception: this.ctx
         .getWebSockets()
         .map((ws) => this.metaOf(ws))
@@ -1497,6 +2240,9 @@ function toGoal(r: Record<string, unknown>): Goal {
     stepValue: r.step_value === null ? null : Number(r.step_value),
     stepPeriod: r.step_period === null ? null : (r.step_period as Goal["stepPeriod"]),
     stepOn: r.step_on === null ? null : (r.step_on as Goal["stepOn"]),
+    // Nullish rather than null-checked: the column is an ALTER, so a row
+    // written before it existed reads as undefined rather than null.
+    sourceUrl: r.source_url == null ? null : String(r.source_url),
     createdAt: Number(r.created_at),
   };
 }

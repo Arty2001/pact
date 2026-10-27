@@ -213,15 +213,25 @@ a { color: var(--proved-text); }
 
 /* ------------------------------------------------------------------ page */
 
+/* The page reads top to bottom now: today's answer, then anything waiting on
+   you, then the evidence. The two-column grid moved down to `.cols`, which
+   holds only the things you look at after you already know where you stand. */
 .page {
   max-width: 1480px;
   margin: 0 auto;
   padding: clamp(14px, 2.4vw, 24px);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(14px, 2vw, 20px);
+}
+.cols {
   display: grid;
   gap: clamp(14px, 2vw, 20px);
   grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
 }
-@media (max-width: 1080px) { .page { grid-template-columns: minmax(0, 1fr); } }
+/* 1080 was too late: at 1100px the right column is 300px holding goal
+   descriptions and skill rows, which is where the overlapping started. */
+@media (max-width: 1240px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 
 .col { display: flex; flex-direction: column; gap: clamp(14px, 2vw, 20px); min-width: 0; }
 
@@ -253,15 +263,17 @@ a { color: var(--proved-text); }
   padding: 12px 16px;
   border-bottom: 1px solid var(--hair);
 }
+/* Sentence case at a readable size. Eleven px of tracked uppercase is the
+   one typographic move that says "dashboard template" loudest, and at that
+   size a section name is harder to read than the data under it. */
 .card > header h2 {
   margin: 0;
-  font-size: 11px;
+  font-size: 13.5px;
   font-weight: 600;
-  letter-spacing: .09em;
-  text-transform: uppercase;
-  color: var(--dim);
+  letter-spacing: -.01em;
+  color: var(--fg);
 }
-.card > header .note { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
+.card > header .note { margin-left: auto; font-size: 12px; color: var(--dimmer); }
 
 /* ------------------------------------------------------------ the cameras */
 
@@ -299,7 +311,9 @@ a { color: var(--proved-text); }
 .stage {
   position: relative;
   background: #070B10;
-  aspect-ratio: 16 / 9;
+  /* No fixed ratio: the wall decides the height, because two panes side by
+     side in a 16/9 box would each be 8:9 and show a slice of a room. */
+  min-height: 220px;
   overflow: hidden;
   /* Inset by a hair so the glass edge stays visible around the frame -
      a dark rectangle flush to the border reads as a hole in the pane. */
@@ -308,13 +322,72 @@ a { color: var(--proved-text); }
 }
 .stage video { width: 100%; height: 100%; object-fit: cover; display: block; }
 
+/* The wall. auto-fit rather than a count, so three cameras on a wide screen
+   sit in a row and the same three stack on a phone without a breakpoint
+   per number.
+
+   Called `feed` and not `pane`: the join page already had `.pane` for its
+   three states, and the two definitions only disagreed about `display` - so
+   everything else here still applied and clipped that page into a dark
+   sixteen-by-nine box with its own heading behind it. */
+.wall {
+  display: grid;
+  gap: 5px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+.wall:empty { display: none; }
+
+.feed {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #04070A;
+  border-radius: calc(var(--r3) - 8px);
+  overflow: hidden;
+  cursor: pointer;
+}
+/* One pane fills the stage as before; the ratio only matters once there
+   are several and they have to agree on a shape. */
+.wall:has(.feed:only-child) { gap: 0; }
+
+/* Which pane the chart and the count are following. A ring rather than a
+   hue: it is a selection, not a verdict about what the camera saw. */
+.feed.lead { box-shadow: inset 0 0 0 2px var(--proved); }
+
+.feed-name {
+  position: absolute;
+  left: 9px; top: 8px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--on-dark);
+  background: rgba(7, 11, 16, .64);
+  padding: 3px 8px;
+  border-radius: 5px;
+  pointer-events: none;
+  max-width: calc(100% - 18px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Reactions belong to the pane that saw them, which is the whole reason a
+   wall is worth having: two rooms, and you can tell which one counted. */
+.feed-toasts {
+  position: absolute;
+  left: 9px; right: 9px; bottom: 9px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 6px;
+  pointer-events: none;
+}
+.feed-toasts .toast { padding: 7px 11px 7px 9px; }
+.feed-toasts .toast .lead { font-size: 15px; min-width: 16px; }
+.feed-toasts .toast .line { font-size: 11.5px; }
+
 .stage-empty {
   position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 12px; text-align: center; padding: 24px;
   color: var(--on-dark-dim);
 }
-.stage-empty b { color: var(--on-dark); font-size: 16px; font-weight: 600; letter-spacing: -.015em; }
+.stage-empty b { color: var(--on-dark); font-size: 15px; font-weight: 600; letter-spacing: -.015em; }
 .stage-empty span { font-size: 13px; max-width: 44ch; color: var(--on-dark-dim); }
 .stage-empty strong { color: var(--on-dark); font-weight: 600; }
 
@@ -365,8 +438,8 @@ a { color: var(--proved-text); }
 /* --------------------------------------------------------------- signal */
 
 .signal { padding: 14px 16px 16px; }
-.readout { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 12px; }
-.readout div { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
+.readout { display: flex; gap: 10px 22px; flex-wrap: wrap; margin-bottom: 12px; }
+.readout div { font-size: 12px; color: var(--dimmer); }
 .readout b {
   display: block; font-size: 18px; color: var(--fg); font-weight: 700;
   letter-spacing: -.025em; font-variant-numeric: tabular-nums;
@@ -388,6 +461,9 @@ a { color: var(--proved-text); }
   white-space: nowrap;
 }
 .sig i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+/* A legend entry with a long skill key should shorten, not widen the row. */
+.sig .k { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sig { max-width: 100%; }
 .sig .v { color: var(--fg); font-variant-numeric: tabular-nums; }
 .sig:hover { background: #fff; }
 /* Pressed is a filter, not a verdict, so it reads as a selection: a ring and
@@ -439,10 +515,24 @@ a { color: var(--proved-text); }
   gap: 8px;
 }
 .goal:last-child { border-bottom: 0; }
-.goal-top { display: flex; align-items: baseline; gap: 10px; }
-.goal-top .name { font-weight: 600; font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -.01em; }
-.goal-top .key { font-family: var(--mono); font-size: 10px; color: var(--dimmer); }
-.goal-meta { font-family: var(--mono); font-size: 10.5px; color: var(--dimmer); }
+/* Wraps. The name, the state chip and the delete control were three
+   unshrinkable children of one flex row, so a long description pushed the
+   chip out of the card instead of moving to the next line. */
+.goal-top { display: flex; align-items: baseline; gap: 6px 10px; flex-wrap: wrap; }
+.goal-top .name {
+  font-weight: 600; font-size: 13.5px; letter-spacing: -.01em;
+  flex: 1 1 12ch; min-width: 0;
+  /* Two lines, then ellipsis - a description is the thing you identify the
+     goal by, so cutting it at one line loses the half that distinguishes
+     two morning routines from each other. */
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.goal-top .key { font-family: var(--mono); font-size: 12px; color: var(--dimmer); }
+.goal-meta {
+  font-size: 12px; color: var(--dimmer);
+  overflow-wrap: anywhere;
+}
 
 .prog { height: 4px; background: var(--sunk); border-radius: 3px; overflow: hidden; }
 .prog i { display: block; height: 100%; background: var(--proved); border-radius: 3px; transition: width .3s ease-out; }
@@ -463,6 +553,8 @@ a { color: var(--proved-text); }
    goal is actually working. */
 .streak { display: flex; gap: 3px; }
 .streak i { width: 11px; height: 11px; border-radius: 3px; background: var(--sunk); }
+/* A day that has not come round yet: present, but not a record. */
+.streak i.none { background: none; box-shadow: inset 0 0 0 1px var(--hair); }
 .streak i.done { background: var(--proved); }
 .streak i.violated { background: var(--bad); }
 .streak i.active { background: var(--watch); }
@@ -478,19 +570,40 @@ a { color: var(--proved-text); }
   color: var(--dim);
   border: 1px solid transparent;
   white-space: nowrap;
+  /* A chip naming a long skill key used to push the card wider than the
+     column. It gives way before the card does. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .chip.proved   { background: var(--proved-wash);  color: var(--proved-text);  border-color: var(--proved-edge); }
 .chip.watching { background: var(--watch-wash);   color: var(--watch-text);   border-color: var(--watch-edge); }
 .chip.pending  { background: var(--pending-wash); color: var(--pending-text); border-color: var(--pending-edge); }
 .chip.bad      { background: var(--bad-wash);     color: var(--bad-text);     border-color: var(--bad-edge); }
 
+/* A chip that does something. Quiet until pointed at: it sits in a row
+   of chips that only report, and a button shouting among them would
+   read as the row's subject rather than one of its controls. */
+.chip.act {
+  cursor: pointer;
+  border-color: var(--line);
+  background: transparent;
+  transition: background .14s ease, color .14s ease;
+}
+.chip.act:hover  { background: var(--watch-wash); color: var(--watch-text); }
+.chip.act:focus-visible { outline: 2px solid var(--watch-edge); outline-offset: 1px; }
+
 /* ---------------------------------------------------------------- skills */
 
 .skills { display: flex; flex-direction: column; }
 .skill {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr) auto;
-  gap: 10px;
+  /* The kind column was a fixed 78px and the label an auto track, so a long
+     key and a long label fought over a width neither could have and the
+     chips rode over the top. Everything that can shrink now may, and the
+     row wraps to two lines before anything overlaps. */
+  grid-template-columns: minmax(58px, auto) minmax(0, 1fr) auto;
+  gap: 6px 10px;
   align-items: center;
   /* Indented by depth in the gate tree. A child is only eligible while its
      parent is open, and that is worth seeing at a glance rather than by
@@ -518,8 +631,16 @@ a { color: var(--proved-text); }
   pointer-events: none;
 }
 .skill .kind { font-family: var(--mono); font-size: 9.5px; color: var(--dimmer); text-transform: uppercase; letter-spacing: .05em; }
-.skill .key { font-family: var(--mono); font-size: 11px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.skill .label { font-size: 11px; color: var(--dimmer); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill .key { font-family: var(--mono); font-size: 11px; color: var(--fg); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill .label { font-size: 11px; color: var(--dimmer); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Narrow: the label drops to its own line under the key rather than being
+   squeezed into a few characters of ellipsis, which told you nothing. */
+@media (max-width: 520px) {
+  .skill { grid-template-columns: minmax(0, 1fr) auto; }
+  .skill .kind { grid-column: 1 / -1; }
+  .skill .label { grid-column: 1 / -1; white-space: normal; }
+}
 
 /* --------------------------------------------------------------- notices */
 
@@ -542,6 +663,9 @@ a { color: var(--proved-text); }
 .q-item:last-child { border-bottom: 0; }
 .q-prompt { font-size: 13px; margin-bottom: 10px; }
 .q-acts { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+/* The measurement under a proposal. Quieter than the question but still
+   readable, because it is the whole reason to say yes. */
+.q-note { font-size: 11.5px; color: var(--dimmer); margin: -5px 0 9px; }
 
 /* --------------------------------------------------------------- buttons */
 
@@ -1010,3 +1134,340 @@ body.join {
   text-wrap: pretty;
 }
 .said.muted { color: var(--dim); font-family: var(--mono); font-size: 12px; }
+
+/* The citation on a goal whose target came from a search. Quiet: it matters
+   that it is there and checkable, not that it is noticed first. */
+.goal-meta .src { color: var(--watch-text); text-decoration: underline dotted; }
+.goal-meta .src:hover { text-decoration-style: solid; }
+
+
+/* ====================================================================== today */
+
+/* The screen's one question is "am I on track today". Before this block the
+   answer lived in the right margin at 13px - smaller than the wordmark - and
+   the biggest thing on the page was a black rectangle saying no camera was
+   publishing. The largest element now carries the answer, which is the one
+   rule every dashboard that reads well obeys. */
+.today {
+  background: rgba(255, 255, 255, .72);
+  border: 1px solid var(--glass-top);
+  box-shadow: var(--lift), var(--inner);
+  border-radius: var(--r3);
+  padding: clamp(18px, 2.4vw, 26px);
+  display: grid;
+  gap: 18px;
+}
+
+.today-head { display: grid; gap: 6px; }
+.today-head h1 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -.025em;
+  color: var(--fg);
+}
+/* The finding: the one fact in today's data that most needs attention. It
+   sits where it is read first rather than in a caption at the bottom of a
+   card, which is where it used to be - as the assistant's "Ask me how you're
+   doing", an invitation to find out rather than an answer. */
+.today .finding {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--dim);
+  max-width: 68ch;
+}
+.today .finding b { color: var(--fg); font-weight: 600; }
+
+.rings { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.rings .empty { grid-column: 1 / -1; }
+
+/* One goal. The figure leads at 32px and everything else is support, so a
+   glance answers the question without reading a word. */
+.rings .goal {
+  padding: 14px 16px;
+  border: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
+  border-radius: var(--r2);
+  background: var(--glass-hi);
+  display: grid;
+  gap: 9px;
+  align-content: start;
+}
+.rings .goal:last-child { border-bottom: 1px solid var(--hair); }
+
+.goal-fig { display: flex; align-items: baseline; gap: 7px; }
+.goal-fig b {
+  font-family: var(--display);
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+}
+.goal-fig span { font-size: 13px; color: var(--dimmer); font-variant-numeric: tabular-nums; }
+.rings .goal.is-done .goal-fig b { color: var(--proved-text); }
+.rings .goal.is-violated .goal-fig b { color: var(--bad-text); }
+
+.rings .goal-top .name { font-size: 14px; }
+
+.today-act { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ============================================================ under the hood */
+
+/* Folded, because a skill's label IS its detector - the most important thing
+   on the page to someone debugging and the least important to someone
+   checking whether they did their squats. */
+.fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  cursor: pointer;
+  list-style: none;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary h2 {
+  margin: 0; font-size: 13.5px; font-weight: 600; letter-spacing: -.01em; color: var(--fg);
+}
+.fold > summary .note { margin-left: auto; font-size: 12px; color: var(--dimmer); }
+.fold > summary::after {
+  content: "";
+  width: 7px; height: 7px;
+  border-right: 1.5px solid var(--dimmer);
+  border-bottom: 1.5px solid var(--dimmer);
+  transform: rotate(45deg) translate(-2px, -2px);
+  transition: transform .18s ease;
+}
+.fold[open] > summary::after { transform: rotate(-135deg) translate(-2px, -2px); }
+.fold[open] > summary { border-bottom: 1px solid var(--hair); }
+.fold > summary:focus-visible { outline: 2px solid var(--watch-edge); outline-offset: -2px; }
+
+.sys { padding: 12px 16px; border-bottom: 1px solid var(--hair); }
+.sys div { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
+.sys span { color: var(--dimmer); }
+.sys b { font-family: var(--mono); font-size: 12px; color: var(--dim); font-weight: 500; overflow-wrap: anywhere; }
+
+.sub-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px 6px;
+  font-size: 13px; font-weight: 600; color: var(--fg);
+}
+.sub-head .note { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--dimmer); }
+
+/* ------------------------------------------------------------------ the bar */
+
+/* Plain words, not telemetry. The encoder id and the frame counters are the
+   system's report on itself; leading with them meant the first thing read on
+   the page was never about the person reading it. */
+.bar-watch { font-size: 12.5px; color: var(--dim); margin-left: auto; }
+.bar-watch.is-live { color: var(--proved-text); }
+.bar-clock { font-family: var(--mono); font-size: 12px; color: var(--dimmer); margin-left: 14px; }
+
+@media (max-width: 560px) {
+  .bar-watch { display: none; }
+  .bar-clock { margin-left: auto; }
+  .today-head h1 { font-size: 22px; }
+  .goal-fig b { font-size: 28px; }
+}
+
+/* Flat fills. The inspector measured a glow on the buttons; a shadow on a
+   control at rest reads as a floating object rather than a thing to press. */
+.btn.primary { box-shadow: none; }
+
+.actions.start { justify-content: flex-start; }
+.btn.start { justify-self: start; }
+.dialog-note { margin: 0; color: var(--dim); font-size: 13px; }
+
+
+/* =================================================== what the render showed */
+
+/* The assistant was centred in its own band, floating between the answer and
+   the evidence with nothing either side of it. It belongs on the page's one
+   left edge like everything else. */
+/* Inside .page now, which already sets the width and the gutters. The auto
+   margin it used to carry is what kept it centred: on a flex item in a column
+   container an auto cross-axis margin cancels the stretch and shrinks the item
+   to its content, so the band sat in the middle of the page with nothing
+   either side of it. */
+.ai {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  justify-content: flex-start;
+}
+.ai .ai-body { flex: 1 1 auto; min-width: 0; }
+
+/* Sentence case. One tracked uppercase label is the allowance for a whole
+   screen and the camera chips already spend it. */
+.ai-state {
+  font-family: var(--ui);
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* A black rectangle is right behind a video and wrong in front of nothing.
+   Empty, the pane is a surface on the page like any other, so the largest
+   element on the screen stops being an announcement that something is
+   missing. The dark treatment returns the moment a feed does. */
+.stage:has(.stage-empty:not([hidden])) { background: var(--sunk); }
+.stage:has(.stage-empty:not([hidden])) .stage-empty b { color: var(--fg); }
+.stage:has(.stage-empty:not([hidden])) .stage-empty span { color: var(--dim); }
+.stage:has(.stage-empty:not([hidden])) .stage-empty strong { color: var(--fg); }
+
+/* Panels sit on the ground. The camera card floated on a 20% black shadow
+   with a 40px blur, which reads as a dialog rather than as part of the page. */
+.card:has(.stage) { box-shadow: var(--lift), var(--inner); }
+
+/* An empty section keeps its frame and says one thing, rather than leaving a
+   grey sentence adrift in a field of white. */
+.rings .empty {
+  border: 1px dashed var(--line);
+  border-radius: var(--r2);
+  padding: 22px 18px;
+  text-align: center;
+  color: var(--dim);
+  font-size: 13.5px;
+}
+
+/* Data and labels read at 13px. The readout under the chart and the goal
+   meta were the last things still set below it. */
+body { font-size: 13px; }
+.readout div { font-size: 12.5px; }
+.goal-meta { font-size: 12.5px; }
+.card > header .note { font-size: 12.5px; }
+
+/* The phone's margin applies to the bar too; the clock was sitting 12px from
+   the edge while everything under it sat at 16. */
+@media (max-width: 560px) {
+  .bar { padding-left: 16px; padding-right: 16px; }
+}
+
+/* A short column keeps its own height instead of stretching to meet a tall
+   one. Stretched, the right column grew a 440px tail of nothing and the
+   camera card grew a blank band inside itself to match. */
+.cols { align-items: start; }
+
+/* ================================================== the feed, as the hero */
+
+/* Pact's equivalent of a recovery ring is not a number: it is a camera with
+   a model reading it several times a second. Making the day's tally the
+   biggest thing answered "where do I stand" and stopped showing what the
+   product is, so the feed is the hero and the tally is the strip above it. */
+.stage-card { border-radius: var(--r3); }
+.stage-card .stage { min-height: clamp(320px, 46vh, 560px); }
+.stage-card > .cams,
+.stage-card > .stage,
+.stage-card > .signal { margin-inline: clamp(12px, 1.4vw, 16px); }
+.stage-card > .signal { margin-bottom: clamp(12px, 1.4vw, 16px); }
+
+/* Today is now two lines above the feed, not a card that fills a screen. */
+.today {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px 20px;
+  flex-wrap: wrap;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  padding: 2px 2px 0;
+}
+.today-head { gap: 3px; }
+.today .finding { font-size: 14.5px; }
+
+/* The readout is the AI's reading of the frame, so it is legible rather than
+   a row of 10px captions under a chart. These numbers moving is the whole
+   demonstration. */
+.readout { gap: 12px 26px; }
+.readout div { font-size: 12.5px; color: var(--dimmer); display: grid; gap: 1px; }
+.readout b { font-size: 19px; font-variant-numeric: tabular-nums; }
+
+/* Goals keep the big figure, now in their own card under the feed. */
+.rings { padding: 12px 14px; }
+
+/* Empty, the stage keeps its frame but not the hero's full height: a card
+   stretches to its neighbour only when it has something to fill it with. */
+.stage:has(.stage-empty:not([hidden])) { min-height: 300px; }
+.stage-empty .btn { margin-top: 4px; }
+
+/* ========================================= legibility, with real data in */
+
+/* Nothing under 11px, and no tracked uppercase outside the camera chips.
+   These rules only showed up once the page had goals and skills in it: with
+   an empty database the page had no chips to measure. */
+.skill .kind {
+  font-size: 11px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.skill .key,
+.skill .label { font-size: 12px; }
+.chip { font-size: 11px; }
+.goal .uses .chip { font-size: 11px; }
+.ev .t,
+.ev .b .q { font-size: 11px; }
+.where { font-size: 11px; }
+
+/* ===================================================== the assistant, idle */
+
+/* Idle it was a full-width grey box inviting you to ask it something: the
+   widest element on the page, saying nothing, looking like an input that
+   was not one. Idle is now a control the size of a control. It grows into
+   the band the moment there is an exchange to show. */
+.ai[data-idle="1"] { justify-content: flex-start; }
+.ai[data-idle="1"] .ai-body {
+  flex: 0 1 auto;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+.ai[data-idle="1"] .said {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--dimmer);
+}
+.ai[data-idle="1"] .ai-state { display: none; }
+
+/* Listening and thinking are the two states worth seeing from across a room,
+   so the mic carries them rather than a word at the end of the row. */
+.ai.listening .mic { border-color: var(--bad-edge); background: var(--bad-wash); color: var(--bad-text); }
+.ai.thinking .mic { border-color: var(--watch-edge); background: var(--watch-wash); }
+.ai .heard { font-size: 12.5px; }
+
+/* ============================================ getting ready, step by step */
+
+/* A cold start is about a minute and the encoder socket cannot open until
+   the model has loaded, so for that minute the page would otherwise sit
+   there looking broken. Each step is an observed fact, not a timer. */
+.startup {
+  margin: 0 clamp(12px, 1.4vw, 16px) 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--watch-edge);
+  background: var(--watch-wash);
+  border-radius: var(--r2);
+  display: grid;
+  gap: 8px;
+}
+.startup-top { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap; font-size: 13px; }
+.startup-top b { color: var(--fg); font-weight: 600; }
+.startup-top span { font-size: 12px; color: var(--dim); }
+
+.startup-bar { height: 4px; background: var(--sunk); border-radius: 3px; overflow: hidden; }
+.startup-bar i {
+  display: block; height: 100%;
+  background: var(--watch, var(--proved));
+  border-radius: 3px;
+  transition: width .4s ease-out;
+}
+
+.startup-steps { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11.5px; color: var(--dimmer); }
+/* A completed step reads as completed without a tick glyph on every row:
+   the colour change is the signal and it costs no width. */
+.startup-steps .done { color: var(--proved-text); }
+.startup-steps .done::before { content: "✓ "; }

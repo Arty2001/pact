@@ -4,10 +4,18 @@ The loop. Frames in, state transitions out.
 Everything else in this package is a piece that can be tested on its own;
 this is the only file that knows the order they go in:
 
-    source -> motion gate -> embed -> score every eligible skill
+    source -> motion gate -> embed per view -> score every eligible skill
            -> state machine per skill -> transition up to the Engine
 
-Three things here are less obvious than the pipeline.
+Four things here are less obvious than the pipeline.
+
+The encode is once per distinct view, not once per frame and not once per
+skill. A skill declares which picture of a frame it is asking about - the
+frame as it arrived, or the frame with its content averaged away - and skills
+sharing a view share an encode. In the ordinary case every eligible skill
+wants the same one and this is exactly the single encode it always was; the
+second is paid only when some skill on this surface genuinely asks a
+different question of the same pixels.
 
 The sample rate is the maximum over whatever is currently eligible, not a
 constant. A gate asking "is anyone in this room" is fine twice a minute; a
@@ -48,7 +56,7 @@ from PIL import Image
 
 from . import sources
 from .config import Config, load
-from .embed import Embedder, LocalEmbedder, RemoteEmbedder, StubEmbedder
+from .embed import Embedder, LocalEmbedder, RemoteEmbedder, StubEmbedder, as_view
 from .gate import MotionGate
 from .ledger import Ledger, decode_weights
 from .log import Logger
@@ -62,6 +70,7 @@ from .skills import (
     calibrate,
     discriminate,
     loosen_for,
+    rank_candidates,
     score,
 )
 from .store import Store
@@ -69,6 +78,9 @@ from .teacher import FRAMES_PER_CALL, Teacher
 
 #: Background cosines kept per skill, for calibration. Twenty minutes at
 #: 0.5 Hz, which is enough for a stable quantile without unbounded growth.
+#: How far back to read a label off when the complaint named no window.
+_RELABEL_RECENT_S = 90.0
+
 _CALIBRATION_WINDOW = 600
 
 #: Enough samples for a stable high quantile. A skill is not scored before
@@ -115,6 +127,27 @@ def rebanded_keys(
             was.params.enter_conf != now.params.enter_conf
             or was.params.exit_conf != now.params.exit_conf
         )
+    }
+
+
+def reviewed_keys(before: Mapping[str, Skill], after: Mapping[str, Skill]) -> set[str]:
+    """
+    Keys that changed which picture of a frame they are asking about.
+
+    The same consequence as a moved band, reached a different way, and worth
+    naming separately because the remedy is larger. A moved band leaves the
+    cosines in hand still valid - they were measured on the right picture, and
+    only the threshold solved from them is wrong. A changed view does not:
+    those cosines came from a different image, so the history has to go too,
+    not merely the fit solved from it.
+
+    The weight vector survives either way. It is an embedded sentence, and a
+    sentence does not know which view will be dotted against it.
+    """
+    return {
+        key
+        for key, now in after.items()
+        if (was := before.get(key)) is not None and was.view != now.view
     }
 
 
@@ -184,6 +217,8 @@ class Runner:
         #: Skills that gained a label and may now be worth refitting. Queued
         #: because labels arrive on the socket task and a refit is not quick.
         self._pending_labels: list[str] = []
+        #: (skill, room) pairs waiting for a label to be chosen for them.
+        self._pending_relabel: list[tuple[str, str, float, float]] = []
         self._pending_weights: list[Skill] = []
         #: Set the first time a registry lands. A frame scored before the
         #: skills are known is a frame silently thrown away, and on a short
@@ -195,6 +230,7 @@ class Runner:
 
         self.ledger.on_registry(self._on_registry)
         self.ledger.on_label(self._on_label)
+        self.ledger.on_relabel(self._on_relabel)
 
     # ---------------------------------------------------------- the registry
 
@@ -230,6 +266,7 @@ class Runner:
                 kind=kind,
                 label=str(row.get("label", "")),
                 surface=str(row.get("surface") or "any"),
+                view=str(row.get("view") or "full"),
                 w=decode_weights(encoded, dim) if encoded else None,
                 bias=float(row.get("bias", 0.0)),
                 temperature=float(row.get("temperature", 1.0)),
@@ -242,19 +279,32 @@ class Runner:
             )
 
         rebanded = rebanded_keys(self.skills, fresh)
+        reviewed = reviewed_keys(self.skills, fresh)
         self.skills = fresh
         for room in self.rooms.values():
             for key in list(room.states):
                 if key not in fresh:
                     del room.states[key]
-            for key in rebanded:
+            for key in rebanded | reviewed:
                 room.calibrated.discard(key)
                 room.refits.pop(key, None)
+            for key in reviewed:
+                # Unlike a moved band, the samples themselves are no longer
+                # evidence: they are cosines against a picture this skill has
+                # stopped asking about, and refitting from them would aim the
+                # new thresholds at the old view's background.
+                room.history.pop(key, None)
         if rebanded:
             self.log.info(
                 "probe.refit",
                 detail="band moved, recalibrating",
                 skills=len(rebanded),
+            )
+        if reviewed:
+            self.log.info(
+                "probe.refit",
+                detail="view changed, recalibrating from scratch",
+                skills=len(reviewed),
             )
 
         # Anything with no vector, or one fitted elsewhere, needs its label
@@ -300,7 +350,7 @@ class Runner:
             return
 
         if end - start < 1.0:
-            frame_ts = self.store.nearest_frame_ts(start, tolerance=30.0)
+            frame_ts = self.store.nearest_frame_ts(start, tolerance=30.0, view=skill.view)
             if frame_ts is None:
                 self.log.warn(
                     "question.answered",
@@ -315,10 +365,10 @@ class Runner:
             self._pending_labels.append(skill_key)
             return
 
-        self._label_span(skill_key, start, end, label, source)
+        self._label_span(skill_key, start, end, label, source, skill.view)
 
     def _label_span(
-        self, skill_key: str, start: float, end: float, label: int, source: str
+        self, skill_key: str, start: float, end: float, label: int, source: str, view: str = "full"
     ) -> None:
         """
         Label every frame in a stretch, and find counter-examples to match.
@@ -336,7 +386,13 @@ class Runner:
         quietly corrupted skill.
         """
         already = self.store.labelled_ts(skill_key)
-        inside = [ts for ts in self.store.frames_between(start, end) if ts not in already]
+        # In this skill's view only. A moment encoded in both views is one
+        # moment, and labelling it twice would put the same answer in front of
+        # the fit twice over while the second copy points at a vector this
+        # skill has never been scored against.
+        inside = [
+            ts for ts in self.store.frames_between(start, end, view=view) if ts not in already
+        ]
         if not inside:
             self.log.warn(
                 "question.answered",
@@ -360,7 +416,9 @@ class Runner:
         # the labels every other path collected.
         opposite = [
             ts
-            for ts in self.store.quiet_frames(skill_key, start, end, limit=len(inside) * 2)
+            for ts in self.store.quiet_frames(
+                skill_key, start, end, limit=len(inside) * 2, view=view
+            )
             if ts not in already
         ][: len(inside)]
         for ts in opposite:
@@ -403,6 +461,15 @@ class Runner:
             self._registry_changed.clear()
             await self._fill_weights()
 
+    def _on_relabel(self, skill_key: str, room_name: str, start: float, end: float) -> None:
+        """Queued, because choosing a label costs a vision call."""
+        self._pending_relabel.append((skill_key, room_name, start, end))
+
+    async def _flush_relabel(self) -> None:
+        while self._pending_relabel:
+            skill_key, room_name, start, end = self._pending_relabel.pop()
+            await self._relabel(skill_key, room_name, start, end)
+
     async def _flush_labels(self) -> None:
         while self._pending_labels:
             skill = self.skills.get(self._pending_labels.pop())
@@ -444,6 +511,22 @@ class Runner:
             self.log.info("service.start", detail="watching", room=name)
         return room
 
+    def _chain_open(self, skill: Skill, room: Room) -> bool:
+        """Is every gate above this skill currently active?"""
+        parent = skill.depends_on
+        hops = 0
+        while parent and hops < 8:
+            st = room.states.get(parent)
+            if st is None or st.phase != "active":
+                return False
+            parent = self.skills[parent].depends_on if parent in self.skills else None
+            hops += 1
+        return True
+
+    def _driving(self, room: Room, surface: str = "any") -> list[Skill]:
+        """The subset whose gates are open, and which may therefore fire."""
+        return [s for s in self._eligible(room, surface) if self._chain_open(s, room)]
+
     def _eligible(self, room: Room, surface: str = "any") -> list[Skill]:
         """
         Skills whose gate chain is open, and which are about this surface.
@@ -457,26 +540,27 @@ class Runner:
         business scoring a bathroom camera, and the reason to enforce it is
         not the wrong answer - which would be a harmlessly low score - but
         that scoring also calibrates. See `skills.applies_to`.
+
+        The gate chain is deliberately NOT tested here, and that is the whole
+        point of this function. Scoring also calibrates, and calibration fits
+        a threshold above ordinary background - so a child only ever scored
+        while its gate was open saw nothing BUT the thing it was meant to
+        detect, called that ordinary, and put its bar above it. Measured on a
+        live skill: an identical label to its gate, cosines within 0.001 of
+        it, and a bias of 0.142 against a 90th-percentile cosine of 0.128. It
+        could not fire, ever, and nothing said so.
+
+        Skipping a child here never saved anything worth having either. The
+        embedding is already paid for by the time this runs, so a skill costs
+        one dot product - microseconds - against a calibration that is either
+        right or permanently broken. `_driving` applies the gate where it
+        belongs, to the state machine.
         """
-        out: list[Skill] = []
-        for skill in self.skills.values():
-            if skill.kind not in SCORED_KINDS or not skill.ready:
-                continue
-            if not applies_to(skill, surface):
-                continue
-            parent = skill.depends_on
-            open_chain = True
-            hops = 0
-            while parent and hops < 8:
-                st = room.states.get(parent)
-                if st is None or st.phase != "active":
-                    open_chain = False
-                    break
-                parent = self.skills[parent].depends_on if parent in self.skills else None
-                hops += 1
-            if open_chain:
-                out.append(skill)
-        return out
+        return [
+            skill
+            for skill in self.skills.values()
+            if skill.kind in SCORED_KINDS and skill.ready and applies_to(skill, surface)
+        ]
 
     def _rate(self, eligible: list[Skill]) -> float:
         """The fastest rate any currently eligible skill needs."""
@@ -522,28 +606,51 @@ class Runner:
             )
             return self.cfg.idle_hz
 
-        embedding = self.embedder.encode_image(image)
-        self.log.debug("embed.done", ms=round(embedding.ms, 1), dim=embedding.dim)
+        eligible = self._eligible(room, surface)
+        # One encode per DISTINCT view, not per skill. Almost always that is
+        # one: every camera skill asks about the frame as it arrived, and so
+        # does every screen skill whose question is about the content. A
+        # second encode is paid only when some skill on this surface genuinely
+        # asks a different question of the same pixels, and then it is not
+        # optional - a layout skill scored against a sharp frame is scored
+        # against the noise it exists to throw away.
+        #
+        # An empty registry still encodes once. The vector is what a label is
+        # later fitted against, and a frame nobody scored today may be the
+        # counter-example a correction needs tomorrow.
+        views = {skill.view for skill in eligible} or {"full"}
+        embeddings: dict[str, np.ndarray] = {}
+        for view in sorted(views):
+            embedding = self.embedder.encode_image(as_view(image, view))
+            embeddings[view] = embedding.vector
+            self.log.debug(
+                "embed.done", ms=round(embedding.ms, 1), dim=embedding.dim, view=view
+            )
+            # The embedding is what a label is eventually fitted against, and
+            # it is stored under the view that produced it: two vectors at one
+            # instant are two different measurements, and a store that could
+            # not tell them apart would hand a layout skill a sharp frame's
+            # vector and call it the same moment.
+            self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id, view)
 
-        # Both of these exist for the labelling loop rather than for
-        # debugging. The image is what a teacher call sends; the embedding is
-        # what a label is eventually fitted against. Discarding either would
-        # mean an answer taught the system nothing.
+        # The frame as it arrived, not as any skill chose to see it. This is
+        # what a teacher call sends, and the teacher's whole advantage is that
+        # it CAN read a screen - handing it the averaged version would destroy
+        # the only thing it is better at than the encoder.
         room.recent.append((now, image))
-        self.store.remember_frame(now, embedding.vector, self.embedder.encoder_id)
 
-        for skill in self._eligible(room, surface):
-            await self._score_one(skill, embedding.vector, now, room, room_name)
+        for skill in eligible:
+            await self._score_one(skill, embeddings[skill.view], now, room, room_name)
 
         # One snapshot per frame, capped: a console redraws at human speed,
         # and 8 Hz of socket traffic per camera buys nothing a person can see.
         if room.snapshot and now - room.last_sent >= _SNAPSHOT_EVERY_S:
             room.last_sent = now
             await self.ledger.scores(
-                room_name, self._rate(self._eligible(room, surface)), dict(room.snapshot)
+                room_name, self._rate(self._driving(room, surface)), dict(room.snapshot)
             )
 
-        hz = self._rate(self._eligible(room, surface))
+        hz = self._rate(self._driving(room, surface))
         if abs(hz - room.asked_hz) > 1e-6:
             # The publisher owns its clock, so this is a request, not a
             # command. Sent only on change: a counter going eligible is the
@@ -601,6 +708,7 @@ class Runner:
             value,
             float(np.dot(np.atleast_2d(skill.w)[0], e)) if skill.w is not None else 0.0,
             state_now.phase if state_now else "idle",
+            skill.view,
         )
 
         # An uncalibrated skill must not drive its state machine. With bias at
@@ -617,6 +725,29 @@ class Runner:
         if skill.key not in room.calibrated:
             room.warming.add(skill.key)
             return
+
+        # The gate belongs here rather than around the scoring. A closed gate
+        # means this cannot be happening, so it must not fire - but the score
+        # above was still worth taking, because that is what calibration is
+        # built from and a sample only taken while the gate is open is a
+        # sample of the answer rather than of the background.
+        #
+        # Returning here outright was wrong, and wrong in the worst direction:
+        # a session already open when its gate shut never got another sample,
+        # so it never closed. Twenty minutes of watching, the browser closed,
+        # and the session stays open forever - no `exited`, no duration, no
+        # credit for any of it. Worse, `busy` stays true for that room, so the
+        # motion gate stops gating and every frame goes through the encoder
+        # for the rest of the run.
+        #
+        # A closed gate is not an absence of information. It is the strongest
+        # possible evidence the thing is NOT happening, so it scores zero and
+        # the machine closes the session the ordinary way, through exit_s.
+        if not self._chain_open(skill, room):
+            open_state = room.states.get(skill.key)
+            if open_state is None or open_state.phase == "idle":
+                return
+            value = 0.0
 
         state = room.states.get(skill.key, initial(now))
         nxt, event = step(state, value, now, skill.params)
@@ -669,7 +800,7 @@ class Runner:
         if label is not None:
             # Attach the label to the frame it describes, not to the moment
             # the answer came back - the two are seconds apart.
-            frame_ts = self.store.nearest_frame_ts(now, tolerance=30.0)
+            frame_ts = self.store.nearest_frame_ts(now, tolerance=30.0, view=skill.view)
             if frame_ts is not None:
                 self.store.label(skill.key, frame_ts, label, "vlm")
                 await self._maybe_refit(skill)
@@ -717,6 +848,98 @@ class Runner:
             hops += 1
         return "; ".join(reversed(chain))
 
+    async def _relabel(
+        self, skill_key: str, room_name: str, start: float = 0.0, end: float = 0.0
+    ) -> None:
+        """
+        Work out what this skill SHOULD have said, and propose it.
+
+        Someone saying "that is happening, why are you not counting it" is
+        the most informative thing a person ever tells this system, and
+        until now all it bought was one row in training_examples - a single
+        yes against a vector that needs about forty before a refit beats the
+        sentence it started from. The complaint is immediate; the learning
+        was not.
+
+        So the complaint is answered immediately instead. The teacher can
+        see the frames and writes candidate captions; the embeddings cannot
+        write anything but know exactly which caption separates these frames
+        from everything else this skill has scored. Generating and choosing
+        are different jobs and neither model can do the other one.
+
+        Nothing is applied here. A label is the detector, so replacing one
+        is a change to what the system believes, and that belongs to the
+        person who noticed it was wrong.
+        """
+        skill = self.skills.get(skill_key)
+        room = self.rooms.get(room_name)
+        if skill is None or room is None or self.teacher is None:
+            return
+
+        now = time.time()
+        # The window the complaint named, or the recent past if it named
+        # none. Taking the last ninety seconds regardless was wrong for the
+        # case this feature exists for: "you missed that all morning" is
+        # about this morning, and by the time it has been said the camera is
+        # pointed at someone talking.
+        hi = end if end > 0 else now
+        lo = start if start > 0 and start < hi else hi - _RELABEL_RECENT_S
+        # Against what this skill has scored OUTSIDE that window, which is
+        # the best available picture of "ordinary" on this surface. Taken
+        # from the hour around it rather than all of history, so a label is
+        # chosen to separate today's room from today's room.
+        other = self.store.scored_frames(skill_key, lo - 3600, lo - 60, limit=600)
+        want = self.store.scored_frames(skill_key, lo, hi, limit=200)
+        if want.size == 0 or other.size == 0:
+            self.log.warn(
+                "probe.refit",
+                skill=skill_key,
+                detail="not enough recorded frames either side to choose a label",
+            )
+            return
+
+        # Frames from the window if any are still in hand, newest otherwise.
+        # A complaint about twenty minutes ago has nothing left in the ring
+        # buffer, and showing the teacher the present instead would have it
+        # describe a person talking to a laptop.
+        held = [img for ts, img in room.recent if lo <= ts <= hi]
+        frames = (held or [img for _, img in room.recent])[-FRAMES_PER_CALL:]
+        candidates = await asyncio.to_thread(
+            self.teacher.propose, frames, skill.label, room.surface
+        )
+        if not candidates:
+            return
+
+        # The label in use is ranked alongside the candidates, not assumed
+        # to be worse. A proposal is only worth making if it beats what is
+        # already there on the same frames by the same measure.
+        texts = [*candidates, skill.label]
+        try:
+            vectors = dict(zip(texts, self.embedder.encode_text(texts), strict=False))
+        except Exception as err:
+            self.log.error("service.error", detail=f"encode_text failed: {err}")
+            return
+
+        ranked = rank_candidates(want, other, vectors)
+        best = ranked[0]
+        current = next(r for r in ranked if r.label == skill.label)
+        self.log.info(
+            "probe.refit",
+            skill=skill_key,
+            detail=f'label proposed: "{best.label}"',
+            n_examples=len(candidates),
+            holdout_before=round(current.ratio, 4),
+            holdout_after=round(best.ratio, 4),
+            accepted=best.label != skill.label,
+        )
+        await self.ledger.proposal(
+            skill_key,
+            best.label,
+            round(best.ratio, 4),
+            round(current.ratio, 4),
+            [r.label for r in ranked[:4] if r.label != skill.label],
+        )
+
     async def _maybe_refit(self, skill: Skill) -> None:
         """
         Refit this skill's probe if there are enough labels to try.
@@ -728,7 +951,7 @@ class Runner:
         """
         if skill.w is None:
             return
-        examples = self.store.examples(skill.key, self.embedder.encoder_id)
+        examples = self.store.examples(skill.key, self.embedder.encoder_id, skill.view)
         if len(examples) < MIN_EXAMPLES:
             return
 
@@ -968,11 +1191,25 @@ class Runner:
         should not drop the video, and losing one camera should not stop the
         others.
         """
-        from .sfu import SfuSource
+        from .sfu import STALL_AFTER_S, SfuSource
 
         source = SfuSource(self.cfg.hub, self.log, hz=self.cfg.idle_hz)
         engine = asyncio.create_task(self._hold_socket())
         embed = asyncio.create_task(self._embed_labels())
+
+        async def sweep() -> None:
+            """
+            Rebuild a stalled subscription even while the Hub is silent.
+
+            reconcile() knows how to drop a dead feed, but it only runs when
+            the wall changes - and a feed dying is not a change the Hub can
+            see, because the publisher is still connected to it. Without this
+            the repair waits for somebody to open or close a camera.
+            """
+            while True:
+                await asyncio.sleep(STALL_AFTER_S / 2)
+                with contextlib.suppress(Exception):
+                    await source.reconcile(source.known())
 
         async def follow() -> None:
             while True:
@@ -991,6 +1228,7 @@ class Runner:
                     await asyncio.sleep(3.0)
 
         watch = asyncio.create_task(follow())
+        repair = asyncio.create_task(sweep())
         try:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._ready.wait(), timeout=15.0)
@@ -998,6 +1236,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, room_name, surface
                 )
@@ -1005,7 +1244,7 @@ class Runner:
                 # on one clock, so the fastest room sets the pace.
                 source.set_rate(hz)
         finally:
-            for task in (engine, watch, embed):
+            for task in (engine, watch, embed, repair):
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -1019,6 +1258,7 @@ class Runner:
                 await self._fill_weights()
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 with Image.open(io.BytesIO(frame.jpeg)) as im:
                     image = im.convert("RGB")
                 await self._on_frame(
@@ -1050,6 +1290,7 @@ class Runner:
             async for frame in source.frames():
                 await self._flush_calibration()
                 await self._flush_labels()
+                await self._flush_relabel()
                 hz = await self._on_frame(
                     frame.image, frame.seq, frame.ts, source.name, self.cfg.room, self.cfg.surface
                 )

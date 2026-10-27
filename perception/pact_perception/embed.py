@@ -37,6 +37,7 @@ import contextlib
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import numpy as np
@@ -67,6 +68,50 @@ class Embedder(Protocol):
     def encode_text(self, texts: list[str]) -> np.ndarray: ...
 
 
+def usable_cpus() -> int:
+    """
+    How many cores this process may actually use, not how many exist.
+
+    `os.cpu_count()` reports the machine. Inside a container allocated
+    sixteen cores on a host that has a hundred and ninety-two, it returns a
+    hundred and ninety-two, torch starts that many threads, and they spend
+    their time contending for sixteen cores rather than working. Measured
+    against a four-thread laptop the container came out SLOWER - 208 ms a
+    frame against 195 - which is the shape this bug always has: more
+    hardware, less throughput, and nothing in the logs to say why.
+
+    The cgroup is asked first because that is what actually limits the
+    process, and a CPU quota is invisible to both `cpu_count` and the
+    affinity mask. Then the affinity mask, which catches cpuset pinning.
+    Then the machine, for a bare-metal run where all three agree anyway.
+    """
+    # cgroup v2: "<quota> <period>", or "max <period>" when unlimited.
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, round(int(quota) / int(period)))
+    except Exception:
+        pass
+
+    # cgroup v1: the same pair, in two files. A quota of -1 means unlimited.
+    try:
+        quota = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read_text())
+        period = int(Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            return max(1, round(quota / period))
+    except Exception:
+        pass
+
+    # Affinity, where the kernel has it: respects cpuset pinning, which a
+    # quota check cannot see.
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        pass
+
+    return max(1, os.cpu_count() or 1)
+
+
 def _pick_device(torch: Any, requested: str) -> str:
     """
     Resolve "auto" to the fastest thing actually present.
@@ -80,6 +125,66 @@ def _pick_device(torch: Any, requested: str) -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
+
+
+def layout_only(image: Image.Image, grid: int = 16) -> Image.Image:
+    """
+    Keep what a screen looks like; throw away what is on it.
+
+    The problem this solves is that the clip dominates the frame. Asked
+    whether you are watching short-form video, the honest signal is the
+    chrome - a bright upright panel on a dark ground, a column of round
+    buttons down one side - and the clip inside it is noise that changes
+    every few seconds. Measured on real frames, a content-led label swings
+    far more than a layout-led one, and a swing is what a fixed threshold
+    cannot sit under.
+
+    Averaging down to a coarse grid and back up destroys the detail and
+    leaves the structure: a dancing person and a cooking video become the
+    same mush inside the same unmistakable vertical panel. BOX is the
+    resampling that averages rather than samples, which is the whole point -
+    NEAREST would keep one pixel in each cell and so keep the noise.
+
+    A side effect worth having on purpose: what you were reading cannot be
+    recovered from the result. At this grid a page of text is a texture, so
+    the embedding records that you were reading, not what.
+
+    The grid is 16 because it was measured rather than chosen. Across 8 to
+    48, two Shorts frames with entirely different clips in them collapse
+    from a mean difference of 21.7 to 0.73 at 16 - a thirtyfold fall - while
+    the panel still stands 111 levels above the ground beside it and the
+    button column is at its most legible of any grid tried. Finer grids keep
+    more of the clip and, worse, let a page of text alias into visible bands
+    against the cell pitch: row variation runs 11.6 at 16, 16.3 at 32 and
+    35.5 at 48, which is text becoming readable again.
+    """
+    if grid < 2:
+        raise ValueError(f"grid must be at least 2, got {grid}")
+    w, h = image.size
+    small = image.convert("RGB").resize((grid, grid), Image.Resampling.BOX)
+    return small.resize((w, h), Image.Resampling.BILINEAR)
+
+
+def as_view(image: Image.Image, view: str) -> Image.Image:
+    """
+    The frame as a named view of itself, ready for the encoder.
+
+    One line of dispatch, kept here rather than at the call site because the
+    set of views and the transforms behind them belong together: adding a
+    third is then one function and one union rather than a branch spread
+    across the loop.
+
+    "full" is deliberately the identity and deliberately returns the SAME
+    object. The loop holds onto the raw frame for the teacher - which has to
+    be able to read a screen - and copying it per frame to no purpose is a
+    cost paid at the frame rate.
+
+    An unknown view is the identity too. The registry is data from elsewhere
+    and is allowed to be wrong; a view nobody implemented should degrade to
+    the ordinary path rather than take the loop down, and the mismatch is
+    already visible in the skill's fitted calibration going nowhere.
+    """
+    return layout_only(image) if view == "layout" else image
 
 
 def _l2(x: np.ndarray) -> np.ndarray:
@@ -124,11 +229,28 @@ class LocalEmbedder:
         # instead, which is both correct here and what the tensor cores want.
         self._amp = self.device.startswith("cuda")
 
+        # bfloat16 on the CPU as well, where the CPU can do it. Zen 4 and
+        # Sapphire Rapids carry AVX-512 bf16, and on those this is most of a
+        # halving for a matmul-bound forward pass. It is off by default and
+        # named, not inferred: it changes the numbers in the last couple of
+        # decimal places, and every skill's bias and temperature were fitted
+        # against float32 vectors. The shift is far smaller than any
+        # calibration band, but "far smaller than" is a claim worth letting
+        # someone turn off.
+        self._cpu_bf16 = (
+            self.device == "cpu"
+            and os.environ.get("PACT_CPU_BF16", "0") == "1"
+            and hasattr(torch, "bfloat16")
+        )
+
         if self.device == "cpu":
             # torch defaults to physical cores and leaves hyperthreads idle.
             # On an 8-thread laptop that is half the machine, and this is the
             # cheapest speedup available before reaching for a GPU.
-            torch.set_num_threads(max(1, os.cpu_count() or 1))
+            self.threads = usable_cpus()
+            torch.set_num_threads(self.threads)
+        else:
+            self.threads = 0
 
         self.encoder_id = f"{version}/{adaptor}@{resolution}"
 
@@ -161,13 +283,28 @@ class LocalEmbedder:
         )
         arr = np.asarray(im, dtype=np.float32) / 255.0
         x = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+        # channels_last is the layout oneDNN wants for convolution on a CPU.
+        # Handed NCHW it reorders internally on every call, which is work
+        # paid for per frame rather than once here.
+        if self.device == "cpu":
+            x = x.contiguous(memory_format=torch.channels_last)
         return x.to(self.device)
 
     def encode_image(self, image: Image.Image) -> Embedding:
         torch = self._torch
         started = time.perf_counter()
-        with torch.no_grad(), torch.autocast("cuda", enabled=self._amp, dtype=torch.float16):
-            out = self._model(self._tensor(image))
+        # inference_mode rather than no_grad: it also skips version counting
+        # and view tracking, which no_grad still pays for. Strictly the same
+        # numbers, strictly less bookkeeping.
+        if self._cpu_bf16:
+            with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16):
+                out = self._model(self._tensor(image))
+        else:
+            with (
+                torch.inference_mode(),
+                torch.autocast("cuda", enabled=self._amp, dtype=torch.float16),
+            ):
+                out = self._model(self._tensor(image))
         summary = out[self.adaptor_name].summary
         # .cpu() below forces a sync, so the number this returns is real work
         # rather than kernel-launch time. Worth stating: CUDA is asynchronous,

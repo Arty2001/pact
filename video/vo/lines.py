@@ -30,6 +30,15 @@ LINES: list[tuple[str, str]] = [
         "So Pact is designed to do it for almost nothing.",
     ),
     (
+        "demo",
+        "Here's the whole thing, running. "
+        "You give it a goal. It works out what to watch for, and starts watching. "
+        "Every camera you've got. "
+        "Then you go and do it. "
+        "It fills itself in. "
+        "Here's how.",
+    ),
+    (
         "b2",
         "You start with a goal. Type it, or say it out loud. "
         "I want to do twenty pushups every morning.",

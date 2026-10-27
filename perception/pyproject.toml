@@ -21,6 +21,14 @@ encoder = [
   "sentencepiece>=0.2",
   "protobuf>=5.0",
 ]
+# Pulling a camera off the SFU, which is what `--source sfu` does and what
+# the watcher runs in. These were installed by hand on one laptop and
+# declared nowhere, so `--source sfu` worked there and nowhere else: a
+# container built from this file crashed on the first frame with
+# ModuleNotFoundError. aiortc does the WebRTC; av is the decoder under it,
+# and the pair only handle H264 and VP8, which is why the publisher pins
+# its codec.
+sfu = ["aiortc>=1.15", "av>=17.1"]
 camera = ["opencv-python-headless>=4.10"]
 dev = ["pytest>=8.3", "ruff>=0.8"]
 

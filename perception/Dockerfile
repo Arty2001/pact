@@ -18,6 +18,15 @@
 ARG BASE=python:3.12-slim
 FROM ${BASE}
 
+# Which torch to install. The CPU wheel by default, because that is the
+# instance this is meant to run on. `skip` is for a base image that already
+# ships torch built against its own CUDA - a PyTorch CUDA image, say - where
+# installing the CPU wheel over the top silently replaces a working GPU build
+# with one that cannot see the GPU. That failure is invisible: everything
+# loads, nothing errors, and the encoder is simply slower than the machine
+# you paid for.
+ARG TORCH=cpu
+
 # libGL and libglib are OpenCV's runtime deps. Not needed for the relay or
 # folder sources, but a build that works for a local camera and then fails on
 # a webcam is a worse trade than 40 MB.
@@ -33,10 +42,20 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Dependencies before source, so editing a .py does not re-resolve the wheels.
+#
+# torchvision is installed from the SAME index as torch, in the same command,
+# and that is not tidiness. timm depends on torchvision, so leaving it to the
+# later install pulls PyPI's build - which is compiled against the CUDA torch
+# and not this one. The pair then imports as
+# `RuntimeError: operator torchvision::nms does not exist`, on the first line
+# of the encoder rather than at build time, so the image builds green and
+# dies on the first frame.
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir "." \
-    && pip install --no-cache-dir \
-       torch --index-url https://download.pytorch.org/whl/cpu \
+RUN pip install --no-cache-dir ".[sfu]" \
+    && if [ "$TORCH" = "cpu" ]; then \
+         pip install --no-cache-dir torch torchvision \
+           --index-url https://download.pytorch.org/whl/cpu; \
+       fi \
     && pip install --no-cache-dir \
        "transformers>=4.49,<5" timm einops sentencepiece protobuf
 
@@ -65,4 +84,11 @@ ENV PACT_ROOM=default \
 
 VOLUME ["/data"]
 
-ENTRYPOINT ["python", "-m", "pact_perception.run"]
+# One image, two roles. The module is the command rather than part of the
+# entrypoint, because a serverless endpoint usually lets you set the args and
+# not the entrypoint - and the encoder has to be able to run as a server:
+#
+#   docker run <image>                      # the watcher, as before
+#   docker run <image> pact_perception.serve  # the encoder behind HTTP
+ENTRYPOINT ["python", "-m"]
+CMD ["pact_perception.run"]

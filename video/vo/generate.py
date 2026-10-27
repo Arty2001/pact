@@ -48,8 +48,27 @@ async def render(key: str, text: str) -> None:
 
 
 async def main() -> None:
+    """
+    Render every line, or only the keys named on the command line.
+
+    The filter matters more than it looks. Every visual in the film is cued
+    off a phrase boundary measured out of these files, so re-rendering a line
+    that has not changed re-rolls its timings and silently walks the whole
+    beat out of sync with its own narration. Adding a tenth line should not
+    put the other nine at risk.
+
+        python generate.py            every line
+        python generate.py demo b3    just those two
+    """
     OUT.mkdir(parents=True, exist_ok=True)
+    only = set(sys.argv[1:])
+    if only:
+        unknown = only - {k for k, _ in LINES}
+        if unknown:
+            raise SystemExit(f"no such line: {', '.join(sorted(unknown))}")
     for key, text in LINES:
+        if only and key not in only:
+            continue
         await render(key, text)
 
 

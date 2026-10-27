@@ -97,6 +97,7 @@ export class Hub implements DurableObject {
       // This socket is now the liveness signal for this device.
       ws.serializeAttachment({ role: "publisher", device } satisfies SocketMeta);
       this.broadcast({ type: "up", device }, ws);
+      this.tellEngine();
     }
   }
 
@@ -113,12 +114,46 @@ export class Hub implements DurableObject {
     const meta = this.metaOf(ws);
     if (meta?.role === "publisher") {
       this.broadcast({ type: "down", id: meta.device.id }, ws);
+      this.tellEngine();
     }
   }
 
   // ----------------------------------------------------------------- helpers
 
   /** The live set, derived from open sockets. This is the whole registry. */
+  /**
+   * Tell the Engine how many cameras are publishing.
+   *
+   * A count rather than an event, because a count is idempotent and events
+   * are not: two `up`s and one `down` delivered out of order leave a counter
+   * wrong for ever, while the current number is simply the current number.
+   * The Hub derives it from open sockets anyway, so it is free to recompute
+   * and impossible to get out of step with.
+   *
+   * Fire and forget. The Engine deciding whether to start a machine must
+   * never be in the path of a camera joining a wall - a cloud API having a
+   * slow minute would otherwise stall every publisher handshake.
+   */
+  private tellEngine(): void {
+    const n = this.devices().length;
+    const engine = this.env.ENGINE.get(this.env.ENGINE.idFromName("engine"));
+    void engine
+      .fetch(
+        new Request("https://pact/compute/publishers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ publishers: n }),
+        }),
+      )
+      .catch(() => {
+        // Swallowed deliberately. There is nowhere useful to report this
+        // from: the Hub has no logger, and a camera joining must not fail
+        // because a billing optimisation could not be reached. The Engine's
+        // own alarm re-reads the count, so a dropped notification costs one
+        // tick rather than a stuck machine.
+      });
+  }
+
   private devices(): Device[] {
     return this.ctx
       .getWebSockets()

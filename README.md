@@ -274,15 +274,117 @@ any threshold fires immediately or never.
 
 ## Nebius and NVIDIA
 
-| | Model | Where |
-|---|---|---|
-| The 24/7 encoder | `nvidia/C-RADIOv3-B` | self-hosted, Nebius AI Cloud or local |
-| The planner | `nvidia/nemotron-3-super-120b-a12b` | Nebius Token Factory |
-| The teacher | `nvidia/Nemotron-3.5-Super-VL` | Nebius Token Factory |
+Three NVIDIA open models, each doing the job it is actually good at.
 
-C-RADIO is the vision encoder *inside* Nemotron 3.5 Super VL, so the edge
-index and the cloud teacher share one visual representation — the teacher's
-judgements land in a space the skills can actually learn from.
+| | Model | Where | Called |
+|---|---|---|---|
+| The 24/7 encoder | `nvidia/C-RADIOv3-B` + siglip2 | Nebius AI Cloud (or a laptop) | every sampled frame |
+| The planner | `nvidia/nemotron-3-super-120b-a12b` | Nebius Token Factory | once per goal written |
+| The assistant | `nvidia/nemotron-3-super-120b-a12b` | Nebius Token Factory | once per thing said to it |
+| The teacher | `nvidia/Nemotron-3.5-Super-VL` | Nebius Token Factory | only when a moment is ambiguous |
+
+**C-RADIO is the vision encoder *inside* Nemotron 3.5 Super VL.** That is the
+whole reason this works rather than a coincidence worth mentioning: the edge
+index and the cloud teacher share one visual representation, so the teacher's
+verdict is a label in the same space the skill's own vector lives in. A
+verdict from a model with a different encoder would be an opinion the skill
+could not learn from.
+
+### Where the split pays
+
+The encoder runs on everything and the reasoning models run on almost
+nothing. A camera at 8 Hz is 28,800 frames an hour through C-RADIO; the
+teacher sees four of them, and only when the state machine genuinely cannot
+decide. Token Factory is what makes that affordable - a 120B model priced per
+token is free at a tenth of a percent of frames and would be unthinkable at
+all of them.
+
+It also made the label loop possible at all. Nemotron 3.5 Super VL can look
+at the frames a person just complained about and *write* candidate labels for
+them, which closes a gap nothing else could: an embedding cannot be turned
+back into words, so when a skill stops matching there is no way to ask the
+vector what it should have said. Something that can see has to write it, and
+then the recorded embeddings choose between the candidates by separation over
+spread. Generating and choosing are different jobs and neither model can do
+the other one.
+
+### Nebius AI Cloud: where the encoder runs
+
+The encoder is the only part of this that can be moved. Everything else in
+perception is stateful - a WebRTC subscription, per-room calibration, state
+machines with dwell timers - and belongs beside the cameras. The encoder is a
+pure function: a frame in, 1152 numbers out, nothing remembered between
+calls.
+
+So it runs in two places, and both are real:
+
+| | where | how |
+|---|---|---|
+| In the perception process | a Nebius Compute VM | `--embed local`, the default |
+| As its own service | a **Nebius Serverless Endpoint** | `--embed-url https://...` |
+
+The same image serves both. `ENTRYPOINT` is `python -m` and the module is the
+command, so `pact_perception.run` is the watcher and `pact_perception.serve`
+is the encoder behind HTTP - which is also what a serverless endpoint needs,
+since those let you set the arguments and not the entrypoint.
+
+The endpoint is live and answers with what it is, because a vector is only
+meaningful against a weight vector from the same encoder and being wrong
+there is silent - the numbers look fine and mean nothing:
+
+```
+GET /health
+{"ok":true,"encoderId":"c-radio_v3-b/siglip2@384","dim":1152,"device":"cpu","threads":16}
+```
+
+**What the split costs, measured.** Inside one region the hop is a couple of
+milliseconds; the rest is JPEG encode and serialising 1152 floats back. About
+twelve milliseconds a frame on top of the encode. Across regions it is ninety,
+which is the version not to build. The demo runs `--embed local` because
+twelve milliseconds times eight frames a second is still twelve milliseconds
+nobody needs - but the endpoint exists, works, and is the honest answer to
+"could the encoder be serverless".
+
+**The endpoint does not scale to zero, so the control plane does it.** Nebius
+bills an endpoint for wall-clock time while it runs, whatever the traffic, and
+nothing there stops it on its own. The Hub already knows when a camera
+arrives, because a publisher socket opening *is* a camera arriving: the Engine
+starts the machine on the first publisher and stops it ten minutes after the
+last one leaves. Ten minutes because a tab refresh is not an empty house and a
+cold start is a minute of somebody watching a blank console.
+
+That same loop is what makes preemptible usable. A preempted endpoint goes to
+`STOPPED` and Nebius does not bring it back - it stays down until something
+starts it. Something does: the next camera to publish.
+
+**Two traps, both of which cost us an evening.**
+
+A stop/start through the Compute API **does not preserve local disk**, and the
+store is where every embedding and label the skills have learned lives. `/data`
+must be a network disk or they forget everything the first time the control
+plane saves money.
+
+And `os.cpu_count()` reports the machine, not the share of it you were given.
+A sixteen-core endpoint encoded a frame in **208 ms**; a four-thread laptop
+does it in **195**. In a container allocated sixteen cores on a host with a
+hundred and ninety-two, torch starts a hundred and ninety-two threads and they
+contend rather than work. More hardware, less throughput, nothing in the logs.
+The cgroup quota is asked first now, because that is what actually limits the
+process and it is invisible to both `cpu_count` and the affinity mask -
+and `/health` reports the thread count, because the only thing worse than this
+bug is this bug with no way to see it from outside.
+
+
+### Tavily: a target the system did not invent
+
+Pact's claim is that it does not take your word for whether something
+happened. That sits oddly beside a target it made up. "Do some squats every
+day" names no number, so one gets looked up and the goal keeps the URL - a
+person can then disagree with the guidance rather than with Pact. Only when
+the sentence has no number in it: "ten squats" means ten, and a cited URL is
+kept only if it was actually among the results, because a model asked for a
+citation will sometimes produce the shape of a reference rather than a
+reference.
 
 Two traps worth knowing. Every model id in Nebius's own documentation
 examples is decommissioned, including the one in their quickstart, so treat

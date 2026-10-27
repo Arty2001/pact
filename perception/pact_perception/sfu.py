@@ -66,9 +66,23 @@ class SfuSubscription:
         self._latest: Frame | None = None
         self._seq = 0
         self._closed = False
+        #: When a frame last arrived. A subscription that has stopped
+        #: delivering looks exactly like a still room from everywhere else.
+        self._last_at = time.time()
+        #: Why the drain stopped, if it did. Empty while it is running.
+        self.ended = ""
         #: Held, because asyncio keeps only a weak reference to a bare task
-        #: and this one may be collected mid-stream if nothing owns it.
+        #: and this one may be collected mid-stream if nothing owns it. Set
+        #: here and not only in the track handler: close() reads it, and a
+        #: subscription that never received a track is exactly the one that
+        #: gets closed - so leaving it unset turned a slow SFU into an
+        #: AttributeError that took the whole reconcile pass down with it,
+        #: stranding every other camera in the same sweep.
         self._drain_task: asyncio.Task[None] | None = None
+
+    @property
+    def silent_for(self) -> float:
+        return time.time() - self._last_at
 
     async def connect(self) -> None:
         async with httpx.AsyncClient(base_url=self.hub, timeout=30.0) as http:
@@ -149,9 +163,20 @@ class SfuSubscription:
         while not self._closed:
             try:
                 av_frame = await track.recv()
-            except Exception:
+            except Exception as err:
+                # Returning silently here is how a feed dies unnoticed: the
+                # task ends, `latest` freezes at the last picture, and the
+                # subscription stays in the table looking perfectly healthy.
+                if not self._closed:
+                    self.ended = str(err) or err.__class__.__name__
+                    self.log.warn(
+                        "service.error",
+                        detail=f"track ended for {self.device.name}: {self.ended}",
+                        room=self.device.room,
+                    )
                 return
             self._seq += 1
+            self._last_at = time.time()
             try:
                 image = av_frame.to_image()
             except Exception:
@@ -178,6 +203,19 @@ class SfuSubscription:
                 await self.pc.close()
 
 
+#: How long a subscription may deliver nothing before it is treated as dead.
+#: A publisher sends frames continuously, so this is not a quiet room - it is
+#: a feed that has stopped. Long enough to survive a renegotiation, short
+#: enough that nobody is standing in front of a camera wondering.
+STALL_AFTER_S = 12.0
+
+#: How long the Hub may say nothing before it gets asked directly. Quiet is
+#: normal - a wall changes rarely - so this only has to be short enough that
+#: an orphaned socket is noticed before anyone is standing in front of a
+#: camera wondering why nothing counts.
+_RECONCILE_S = 20.0
+
+
 class SfuSource:
     """
     Every live device on the wall, sampled at a requested rate.
@@ -198,8 +236,34 @@ class SfuSource:
     def set_rate(self, hz: float) -> None:
         self._hz = max(0.1, min(hz, 30.0))
 
+    async def _ask_hub(self) -> list[Device] | None:
+        """The live set, asked for rather than waited for."""
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as http:
+                res = await http.get(f"{self.hub}/api/hub/devices")
+                res.raise_for_status()
+                return [_device(d) for d in res.json().get("devices", [])]
+        except Exception:
+            # The Hub being unreachable is the socket's problem to report.
+            return None
+
     async def devices(self) -> AsyncIterator[list[Device]]:
-        """The live set, pushed by the Hub whenever it changes."""
+        """
+        The live set, pushed by the Hub and checked against it.
+
+        A push socket cannot tell you it has stopped being listened to. This
+        one went quiet after a deploy cycled the Hub - still open, still
+        pinging, no longer in anyone's broadcast set - and the wall stayed
+        empty for five minutes while a camera was publishing, because
+        "nothing has changed" and "I am no longer being told" arrive as
+        exactly the same silence.
+
+        So the socket is for latency and the Hub's own answer is for truth.
+        Every RECONCILE_S of quiet, ask. If the answer differs from what the
+        socket believes, the socket has been talking to nobody: hand back
+        the truth and return, which drops the connection and makes the
+        caller open an honest one.
+        """
         import json
 
         import websockets
@@ -207,7 +271,21 @@ class SfuSource:
         url = self.hub.replace("http://", "ws://").replace("https://", "wss://") + "/api/hub/ws"
         live: dict[str, Device] = {}
         async with websockets.connect(url, max_size=4 * 1024 * 1024) as ws:
-            async for raw in ws:
+            while not self._closed:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=_RECONCILE_S)
+                except TimeoutError:
+                    truth = await self._ask_hub()
+                    if truth is None or {d.id for d in truth} == set(live):
+                        continue
+                    self.log.warn(
+                        "service.error",
+                        detail="hub socket went quiet while the wall changed; reconnecting",
+                        devices=[d.name for d in truth],
+                    )
+                    yield truth
+                    return
+
                 try:
                     msg = json.loads(raw)
                 except (ValueError, TypeError):
@@ -224,11 +302,31 @@ class SfuSource:
                 yield list(live.values())
 
     async def reconcile(self, devices: list[Device]) -> None:
-        """Subscribe to anything new, drop anything gone."""
+        """
+        Subscribe to anything new, drop anything gone - or stalled.
+
+        A stalled subscription is the one that costs you an afternoon. It is
+        still in the table, so this loop skips it as already handled; its
+        drain task has ended, so no frame will ever arrive again; and every
+        layer above reads that as a quiet room. Dropping it here is all that
+        is needed, because the next pass then treats the device as new.
+        """
         want = {d.id: d for d in devices}
         for gone in [k for k in self._subs if k not in want]:
             await self._subs.pop(gone).close()
             self.log.info("service.stop", detail="unsubscribed", room=gone)
+
+        for dev_id in [k for k, s in self._subs.items() if self._stalled(s)]:
+            sub = self._subs.pop(dev_id)
+            self.log.warn(
+                "service.error",
+                detail=(
+                    f"no frames from {sub.device.name} for "
+                    f"{sub.silent_for:.0f}s; resubscribing"
+                ),
+                room=sub.device.room,
+            )
+            await sub.close()
 
         for dev_id, dev in want.items():
             if dev_id in self._subs or not dev.track_names:
@@ -245,6 +343,29 @@ class SfuSource:
                 await sub.close()
                 continue
             self._subs[dev_id] = sub
+
+    def known(self) -> list[Device]:
+        """
+        The devices this source currently holds a subscription for.
+
+        Used by the repair sweep, which has to reconcile against something
+        when the Hub has said nothing - a feed dying is not a change the Hub
+        can see, because the publisher is still connected to it.
+        """
+        return [s.device for s in self._subs.values()]
+
+    @staticmethod
+    def _stalled(sub: SfuSubscription) -> bool:
+        """
+        Dead, as opposed to merely quiet.
+
+        A publisher sends frames whether or not anything is moving - the
+        motion gate is further up and decides what to spend on them - so a
+        subscription delivering nothing at all is a broken one, not a still
+        room. A track that reported its own end is dead immediately; one that
+        has simply gone quiet is given STALL_AFTER_S first.
+        """
+        return bool(sub.ended) or sub.silent_for > STALL_AFTER_S
 
     async def frames(self) -> AsyncIterator[tuple[str, str, Frame]]:
         """

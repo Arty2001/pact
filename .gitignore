@@ -24,3 +24,8 @@ __pycache__/
 perception/traces/
 perception/frames/
 perception/debug/
+
+# The vendor firmware dump. Proprietary, device-specific, and 16 MB - not
+# ours to redistribute. Dump your own before flashing; see m5stackchan/README.
+m5stackchan/backup/
+.taste-skill/

@@ -1,0 +1,120 @@
+# Build the encoder image where there is room for it.
+#
+# A CUDA base plus four gigabytes of baked weights is about ten gigabytes,
+# which is more than a laptop with 17 GB free can build and far more than a
+# home connection wants to upload. Here the build and the registry are both
+# inside GitHub, so nothing crosses a domestic link.
+#
+# It needs no secrets. GITHUB_TOKEN can push to this repository's own package
+# namespace given `packages: write` below, so there is nothing to rotate and
+# nothing to leak.
+name: encoder image
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavour:
+        description: Which encoder to build
+        type: choice
+        default: gpu
+        options: [gpu, cpu]
+  push:
+    branches: [main]
+    paths:
+      - perception/Dockerfile
+      - perception/pyproject.toml
+      - perception/pact_perception/**
+
+concurrency:
+  # One build at a time. Two of these racing would fill the runner's disk
+  # and lose both, which is the failure this file exists to avoid.
+  group: encoder-image
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # A GitHub runner ships with Android SDKs, .NET, Haskell and several
+      # gigabytes of preinstalled toolchains this build never touches. The
+      # image does not fit without removing them.
+      - name: Make room
+        run: |
+          echo "before: $(df -h / | awk 'NR==2 {print $4}') free"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/share/swift "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune -af
+          echo "after:  $(df -h / | awk 'NR==2 {print $4}') free"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The GPU flavour takes a PyTorch CUDA base, which already carries
+      # torch built against its own CUDA - hence TORCH=skip. Installing the
+      # CPU wheel over the top would replace a working GPU build with one
+      # that cannot see the GPU, and the failure is invisible: everything
+      # loads, nothing errors, the encoder is simply slower than the machine
+      # you paid for.
+      # GHCR repository names must be lowercase, and this owner is not.
+      # Left as-is the push fails with "repository name must be lowercase"
+      # after the ten-gigabyte build has already happened, which is the
+      # most expensive possible moment to find out.
+      - name: Lowercase the owner
+        id: owner
+        run: echo "lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Choose the base
+        id: flavour
+        run: |
+          if [ "${{ inputs.flavour || 'gpu' }}" = "cpu" ]; then
+            echo "base=python:3.12-slim" >> "$GITHUB_OUTPUT"
+            echo "torch=cpu" >> "$GITHUB_OUTPUT"
+            echo "tag=cpu" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=pytorch/pytorch:2.6.0-cuda12.6-cudnn9-runtime" >> "$GITHUB_OUTPUT"
+            echo "torch=skip" >> "$GITHUB_OUTPUT"
+            echo "tag=gpu" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: perception
+          push: true
+          # Weights are baked at build time. A container that downloads four
+          # gigabytes on every start is a container that fails on a flaky
+          # network, and a serverless endpoint deletes its disk with the
+          # endpoint, so a runtime download would happen every single time.
+          build-args: |
+            BASE=${{ steps.flavour.outputs.base }}
+            TORCH=${{ steps.flavour.outputs.torch }}
+            PRELOAD=1
+          tags: |
+            ghcr.io/${{ steps.owner.outputs.lc }}/pact-encoder:${{ steps.flavour.outputs.tag }}
+            ghcr.io/${{ steps.owner.outputs.lc }}/pact-encoder:${{ github.sha }}
+          # No registry cache: the layers here are gigabytes of weights that
+          # change only when the model does, and pushing a cache of them
+          # costs more than the rebuild it saves.
+          provenance: false
+
+      - name: Say where it landed
+        run: |
+          echo "### Encoder image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/${{ steps.owner.outputs.lc }}/pact-encoder:${{ steps.flavour.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "digest ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run it as the encoder with the command \`pact_perception.serve\` on port 8080." >> "$GITHUB_STEP_SUMMARY"
+          echo "While this repository is private the package is private too: a puller needs credentials." >> "$GITHUB_STEP_SUMMARY"
