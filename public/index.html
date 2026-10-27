@@ -224,9 +224,17 @@
       <small>Nemotron turns this into skills and reuses any that already exist. Check what it drafts before creating — a skill's label <em>is</em> its detector.</small>
     </div>
     <div class="actions start">
-      <button type="button" class="btn" id="g-plan">Draft it</button>
+      <button type="button" class="btn primary" id="g-plan">Draft it</button>
       <span class="status" id="g-status"></span>
     </div>
+
+    <div class="drafted" id="g-drafted">
+      <p class="hint" id="g-hint">
+        <b>Draft it first.</b> Everything below is what the draft fills in —
+        the key, the rule, and the skills to watch for. You can write them by
+        hand instead, and you will have to if the draft gets something wrong,
+        but you are not meant to start here.
+      </p>
 
     <div class="two">
       <div class="field">
@@ -280,10 +288,11 @@
       <button type="button" class="btn ghost sm start" id="g-add">Add a skill</button>
       <small>A label must describe what would literally be seen — on a camera, a posture or a place; on a screen, the <em>look</em> of it, never words it would have to read. That text becomes the weight vector directly, with no training.</small>
     </div>
+    </div>
 
     <div class="actions">
       <button class="btn ghost" value="cancel" formnovalidate>Cancel</button>
-      <button class="btn primary" value="save">Create goal</button>
+      <button class="btn" value="save" id="g-save">Create goal</button>
     </div>
   </form>
 </dialog>

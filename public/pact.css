@@ -751,6 +751,30 @@ input:hover, select:hover { border-color: var(--dimmer); }
 
 .actions { display: flex; gap: 8px; justify-content: flex-end; }
 
+/* The half of the new-goal dialog a draft writes for you.
+
+   Held back until there is one, because nine empty fields above a "Create
+   goal" button read as nine things you are expected to fill in — when the
+   intended path is one sentence and a button, and the fields are the
+   draft's OUTPUT. Dimmed rather than hidden: writing a goal by hand is a
+   real path, it is the only path when a draft gets something wrong, and
+   collapsing it would hide that. Focus restores it in full, so anyone who
+   does start typing here is not fighting the styling. */
+.drafted { display: grid; gap: 15px; transition: opacity .18s ease; }
+form:not([data-drafted]) .drafted { opacity: .5; }
+form:not([data-drafted]) .drafted:focus-within { opacity: 1; }
+form[data-drafted] #g-hint { display: none; }
+
+.hint {
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--hair);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+.hint b { color: var(--fg); font-weight: 600; }
+
 .status { font-family: var(--mono); font-size: 11px; color: var(--dim); }
 .status.err { color: var(--bad-text); }
 .status.ok { color: var(--proved-text); }

@@ -1496,11 +1496,45 @@ $("claim-copy").addEventListener("click", async (e) => {
 const dialog = $("goal-dialog");
 const rows = $("g-skills");
 
+/**
+ * Which half of the new-goal dialog is the live one.
+ *
+ * Before a draft the next step is drafting, and after it the next step is
+ * reading what was drafted and creating. Two things follow from that and both
+ * were wrong: the lower half sat at full strength looking like a form to fill
+ * in, and "Create goal" was the primary button from the moment the dialog
+ * opened, which is the one thing you cannot usefully do yet.
+ *
+ * Called with `true` on a failed draft as well as a successful one. The
+ * planner being down does not mean no goal can be written, it means it has to
+ * be written by hand, and leaving the fields held back would be telling
+ * someone to go away.
+ */
+function setDrafted(on) {
+  const form = $("goal-form");
+  if (on) form.dataset.drafted = "1";
+  else delete form.dataset.drafted;
+  $("g-plan").classList.toggle("primary", !on);
+  $("g-save").classList.toggle("primary", on);
+}
+
 $("new-goal").addEventListener("click", () => {
   if (rows.children.length === 0) addRow();
+  // Every time, not once: the hint is about where to start, and someone
+  // opening this for the second time is starting again.
+  setDrafted(false);
   dialog.showModal();
 });
-$("g-add").addEventListener("click", () => addRow());
+$("g-add").addEventListener("click", () => {
+  addRow();
+  setDrafted(true);
+});
+
+// Anyone who starts typing down there has chosen to write it by hand, and has
+// made the point the hint exists to make, so stop making it. Idempotent
+// rather than once-only: the dialog is reopened, and a listener spent on the
+// first goal would leave the second one dimmed while being typed into.
+$("g-drafted").addEventListener("input", () => setDrafted(true));
 
 function addRow(preset = {}) {
   const el = document.createElement("div");
@@ -1557,6 +1591,9 @@ $("g-plan").addEventListener("click", async () => {
     const { error } = await res.json().catch(() => ({ error: `planner failed (${res.status})` }));
     status.className = "status err";
     status.textContent = `${error} — fill the fields in below instead.`;
+    // Nothing was drafted, but the fields are now the only way through, so
+    // they stop being held back.
+    setDrafted(true);
     return;
   }
 
@@ -1571,6 +1608,7 @@ $("g-plan").addEventListener("click", async () => {
   rows.replaceChildren();
   for (const u of plan.uses ?? []) addRow(u);
 
+  setDrafted(true);
   status.className = "status ok";
   status.textContent = `${plan.created} new, ${plan.reused} reused. Check the labels, then create.`;
 });
