@@ -529,6 +529,33 @@ export class Engine implements DurableObject {
         dim: msg.dim,
       } satisfies SocketMeta);
       this.send(ws, { type: "registry", skills: this.skills(), encoderId: msg.encoderId });
+      // A perception socket is PROOF the machine is up, and it is the only
+      // proof this Worker can get. `statusOf` reads the truth from Nebius and
+      // cannot run from here: every Nebius host is behind Cloudflare, and a
+      // Worker calling them gets 522 — measured, and the whole reason the
+      // start goes through a GitHub runner. So `compute.state` was only ever
+      // written as a guess: `starting` when a runner was asked, `stopping` on
+      // the way down, and nothing ever corrected it. It read `starting` for
+      // 36 minutes with the encoder loaded, connected and scoring, which made
+      // every status on the console wrong at once.
+      //
+      // Recorded rather than derived at read time so `changed_at` means
+      // something: this instant is when the machine was known to be up, which
+      // is what lets the console show "running for 20m" instead of a spinner.
+      // An upsert, not an UPDATE: `computeRow` answers with defaults when the
+      // row does not exist yet, so an UPDATE would quietly write nothing on
+      // the first boot — the one time the state is certainly not `running`.
+      if (this.env.NEBIUS_INSTANCE_ID && this.computeRow().state !== "running") {
+        this.sql(
+          `INSERT INTO compute (id, publishers, idle_since, state, changed_at)
+           VALUES (1, 0, 0, 'running', ?)
+           ON CONFLICT(id) DO UPDATE SET state = 'running', changed_at = ?`,
+          Date.now(),
+          Date.now(),
+        );
+        this.log.info("service.start", { detail: "encoder machine running", room: msg.room });
+        this.broadcastWatchers();
+      }
       return;
     }
 
@@ -1760,13 +1787,18 @@ export class Engine implements DurableObject {
     // notification would push the deadline forward for ever and the machine
     // would never stop.
     const idleSince = publishers > 0 ? 0 : was.idle_since || now;
+    // Nothing publishing means the machine is on its way down - perception
+    // stops itself a quarter of an hour later. Clearing a `starting` claim
+    // here is what lets the next camera ask for a start at all; leaving it
+    // would make the wake work exactly once.
+    const state = publishers === 0 && was.state === "starting" ? "stopped" : was.state;
     this.sql(
       `INSERT INTO compute (id, publishers, idle_since, state, changed_at)
        VALUES (1, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET publishers = ?, idle_since = ?, changed_at = ?`,
       publishers,
       idleSince,
-      was.state,
+      state,
       now,
       publishers,
       idleSince,
@@ -1819,8 +1851,18 @@ export class Engine implements DurableObject {
     // gating the start on it would mean never starting at all - and the
     // workflow checks the real state before acting anyway, which is the
     // check that matters.
+    // Debounced on the state, not the clock. The first version compared
+    // against `changed_at`, which onPublishers had just set to now on its
+    // way in - so the check was always false on the one path it existed to
+    // fire on, and no runner was ever asked. A state of `starting` is the
+    // honest record of "a runner has been asked", and the only thing that
+    // should stop a second ask.
+    //
+    // Ten minutes bounds it. A dispatch that failed, or a runner that never
+    // ran, must not leave this stuck believing a start is in flight for ever.
     const gh = this.env.GITHUB_DISPATCH_TOKEN;
-    if (gh && row.publishers > 0 && Date.now() - row.changed_at > 120_000) {
+    const asking = row.state === "starting" && Date.now() - row.changed_at < 600_000;
+    if (gh && row.publishers > 0 && !asking) {
       this.sql("UPDATE compute SET state = 'starting', changed_at = ? WHERE id = 1", Date.now());
       try {
         await askRunnerToStart(gh, this.env.GITHUB_REPO ?? "Arty2001/pact");
