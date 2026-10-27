@@ -1,0 +1,119 @@
+# Start and stop the perception machine from somewhere that can reach Nebius.
+#
+# The control plane knows the moment a camera arrives - a publisher socket
+# opening *is* that event - and cannot act on it: every Nebius host sits
+# behind Cloudflare, and a Cloudflare Worker calling them gets 522 while the
+# identical request from anywhere else gets 200. Measured, not assumed:
+# auth 522, api 522, api.github.com 200.
+#
+# So the Worker asks GitHub, and a runner does the part the Worker cannot.
+# The latency is a runner spinning up, twenty or forty seconds, against the
+# ninety the machine then spends loading four gigabytes of weights - so it
+# costs nothing anyone will notice.
+#
+# Stopping does not need this. Perception stops its own machine, because by
+# then it is awake and can reach Nebius directly. This exists for the half a
+# stopped machine cannot do for itself.
+name: vm
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do with the machine
+        type: choice
+        default: start
+        options: [start, stop, status]
+
+concurrency:
+  # One at a time. Two dispatches racing would send start and stop in an
+  # order nobody chose.
+  group: pact-vm
+  cancel-in-progress: false
+
+jobs:
+  act:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ${{ inputs.action }} the machine
+        env:
+          KEY: ${{ secrets.NEBIUS_COMPUTE_KEY }}
+          ID: ${{ secrets.NEBIUS_INSTANCE_ID }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, time, urllib.request, urllib.parse
+
+          key = json.loads(os.environ["KEY"])
+          instance = os.environ["ID"]
+          action = os.environ["ACTION"]
+
+          def b64(raw: bytes) -> str:
+              return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+          # Signed with openssl rather than a pip install: a runner has it,
+          # and one dependency fewer is one fewer thing to break at 4am.
+          now = int(time.time())
+          head = b64(json.dumps({"alg": "RS256", "kid": key["public-key-id"]}).encode())
+          body = b64(json.dumps({
+              "iss": key["subject-id"], "sub": key["subject-id"],
+              "iat": now, "exp": now + 300,
+          }).encode())
+          open("si.bin", "wb").write(f"{head}.{body}".encode())
+          open("k.pem", "w").write(key["private-key"])
+          assert os.system("openssl dgst -sha256 -sign k.pem -out sig.bin si.bin") == 0
+          jwt = f"{head}.{body}.{b64(open('sig.bin','rb').read())}"
+
+          # No `aud` claim: Nebius documents iss, sub and exp only, and the
+          # exchange rejects an audience it did not ask for.
+          req = urllib.request.Request(
+              "https://auth.eu.nebius.com/oauth2/token/exchange",
+              data=urllib.parse.urlencode({
+                  "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                  "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                  "subject_token": jwt,
+              }).encode(),
+              headers={"User-Agent": "pact-vm/1.0"},
+          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              token = json.load(r)["access_token"]
+
+          def api(path: str, payload=None):
+              req = urllib.request.Request(
+                  f"https://api.nebius.cloud/compute/v1/{path}",
+                  data=json.dumps(payload).encode() if payload else None,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "User-Agent": "pact-vm/1.0",
+                  },
+                  method="POST" if payload else "GET",
+              )
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          state = api(f"instances/{instance}")["status"]["state"]
+          print(f"state: {state}")
+
+          if action == "status":
+              pass
+          elif action == "start":
+              # Only from a settled stop. A start racing a stop is answered
+              # from whichever state the cloud has reached, so the result is
+              # genuinely unpredictable rather than merely slow.
+              if state == "STOPPED":
+                  api("instances/start", {"id": instance})
+                  print("start requested")
+              else:
+                  print(f"left alone: {state} is not STOPPED")
+          elif action == "stop":
+              if state == "RUNNING":
+                  api("instances/stop", {"id": instance})
+                  print("stop requested")
+              else:
+                  print(f"left alone: {state} is not RUNNING")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"`{instance}` was **{state}**, action `{action}`\n")
+          PY
