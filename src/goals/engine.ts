@@ -443,23 +443,11 @@ export class Engine implements DurableObject {
 
     const started = Date.now();
     try {
-      const draft = await plan(this.env.NEBIUS_API_KEY, sentence, {
-        tz: tz ?? "UTC",
-        now: Date.now(),
-        catalogue: this.skills(),
-        fired,
-        goals: this.goals().map((g) => ({
-          key: g.key,
-          description: g.description,
-          type: g.type,
-          uses: this.links(g.key).map((l) => `${l.role}:${l.skillKey}`),
-        })),
-        // What the console can see publishing. The Engine does not hold the
-        // device list - the Hub does - so this comes from the page that is
-        // already looking at it rather than through another round trip.
-        live: Array.isArray(surfaces) ? surfaces : [],
-        guidance,
-      });
+      const draft = await plan(
+        this.env.NEBIUS_API_KEY,
+        sentence,
+        this.planContext(tz, Array.isArray(surfaces) ? surfaces : [], fired, guidance),
+      );
       this.log.info("planner.call", {
         sentence,
         created: draft.created,
@@ -1328,7 +1316,7 @@ export class Engine implements DurableObject {
       return Response.json({ say: "I could not reach my own head just then." });
     }
 
-    const applied = this.applyActions(turn.actions, log);
+    const applied = await this.applyActions(turn.actions, log);
     log.info("question.answered", {
       detail: "said",
       say: turn.say,
@@ -1368,7 +1356,7 @@ export class Engine implements DurableObject {
   }
 
   /** What the model asked for, done by the only thing allowed to do it. */
-  private applyActions(actions: ToolCall[], log: Logger): string[] {
+  private async applyActions(actions: ToolCall[], log: Logger): Promise<string[]> {
     const done: string[] = [];
     for (const call of actions) {
       const a = call.args;
@@ -1436,6 +1424,22 @@ export class Engine implements DurableObject {
         // being in front of the camera the moment someone turns to speak.
         if (a.happened === true) this.askRelabel(skillKey, from, to);
         done.push(`label_frame ${skillKey}`);
+      } else if (call.name === "create_goal") {
+        const sentence = String(a.sentence ?? "").trim();
+        if (!sentence) continue;
+        try {
+          const made = await this.planAndCreate(sentence, this.goals()[0]?.tz);
+          if (made) done.push(`create_goal ${made}`);
+          this.pushRegistry();
+          this.broadcastWatchers();
+        } catch (err) {
+          // Reported rather than swallowed: a goal someone asked for out
+          // loud and did not get is the one failure they will definitely
+          // notice, and silence here reads as the assistant ignoring them.
+          log.error("service.error", {
+            detail: `could not create a goal from "${sentence}": ${String(err).slice(0, 140)}`,
+          });
+        }
       } else if (call.name === "apply_label") {
         // The same method the button calls, so a spoken yes and a clicked
         // one cannot diverge. A model that invents a skill key changes
@@ -1763,6 +1767,129 @@ export class Engine implements DurableObject {
         detail: `encoder machine ${action} failed: ${String(err).slice(0, 120)}`,
       });
     }
+  }
+
+  /**
+   * Everything the planner sees besides the sentence.
+   *
+   * One method because there are two ways in - the dialog and the voice -
+   * and a goal written by speaking has to be the same goal as one written
+   * by typing. Two copies of this would drift the first time either grew a
+   * field.
+   */
+  private planContext(
+    tz: string | undefined,
+    live: string[],
+    fired: Map<string, number>,
+    guidance: Awaited<ReturnType<typeof ground>> | undefined,
+  ) {
+    return {
+      tz: tz ?? "UTC",
+      now: Date.now(),
+      catalogue: this.skills(),
+      fired,
+      goals: this.goals().map((g) => ({
+        key: g.key,
+        description: g.description,
+        type: g.type,
+        uses: this.links(g.key).map((l) => `${l.role}:${l.skillKey}`),
+      })),
+      // What the console can see publishing. The Engine does not hold the
+      // device list - the Hub does - so this comes from the page that is
+      // already looking at it rather than through another round trip.
+      live,
+      guidance: guidance ?? undefined,
+    };
+  }
+
+  /** Transitions per skill, so the planner can tell "exists" from "works". */
+  private firedCounts(): Map<string, number> {
+    return new Map<string, number>(
+      this.rows<{ skill_key: string; n: number }>(
+        "SELECT skill_key, COUNT(*) AS n FROM transitions WHERE kind = 'entered' GROUP BY skill_key",
+      ).map((r) => [r.skill_key, Number(r.n)]),
+    );
+  }
+
+  /**
+   * Compile a sentence into a goal and write it.
+   *
+   * Spoken goals go through the Engine's own create routes rather than
+   * straight to SQL, so the voice path inherits every check the dialog
+   * already passes - key normalisation, the gate/surface backstop, the
+   * refusal to write a child before its parent. A second write path would
+   * be a second set of bugs.
+   *
+   * Returns what was made, for the assistant to read back. A goal nobody
+   * described is a goal nobody can tell is wrong.
+   */
+  private async planAndCreate(sentence: string, tz: string | undefined): Promise<string> {
+    const key = this.env.NEBIUS_API_KEY;
+    if (!key) return "";
+    const tavily = this.env.TAVILY_API_KEY;
+    const guidance =
+      tavily && needsGrounding(sentence) ? ((await ground(tavily, sentence)) ?? undefined) : undefined;
+
+    const draft = await plan(key, sentence, this.planContext(tz, [], this.firedCounts(), guidance));
+
+    // Gates before the skills that depend on them: dependsOn is a foreign
+    // key into this same table, so a child written first is a child whose
+    // gate chain is broken from birth.
+    const named = new Set(draft.uses.map((u) => u.key));
+    const ordered = [...draft.uses].sort(
+      (a, b) => (a.kind === "gate" ? -1 : 0) - (b.kind === "gate" ? -1 : 0),
+    );
+    for (const u of ordered) {
+      if (!u.isNew) continue;
+      await this.fetch(
+        new Request("https://pact/skills", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: u.key,
+            kind: u.kind,
+            label: u.label,
+            surface: u.surface,
+            dependsOn: u.dependsOn && named.has(u.dependsOn) ? u.dependsOn : null,
+          }),
+        }),
+      );
+    }
+
+    await this.fetch(
+      new Request("https://pact/goals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: draft.key,
+          description: draft.description,
+          type: draft.type,
+          cadence: draft.cadence,
+          doneMin: draft.doneMin,
+          sourceUrl: draft.sourceUrl ?? null,
+          windowStart: draft.windowStart,
+          windowEnd: draft.windowEnd,
+          tz: tz ?? "UTC",
+          uses: draft.uses.map((u) => ({
+            skillKey: u.key,
+            role: u.role,
+            classKey: u.classKey,
+            minCount: u.minCount,
+            accumulate: u.accumulate,
+            sequenceIndex: u.sequenceIndex,
+          })),
+        }),
+      }),
+    );
+
+    this.log.info("planner.call", {
+      sentence,
+      detail: `goal created by voice: ${draft.key}`,
+      created: draft.created,
+      reused: draft.reused,
+    });
+    const watches = draft.uses.map((u) => u.label).join("; ");
+    return `${draft.description} — watching for ${watches}`;
   }
 
   private state() {

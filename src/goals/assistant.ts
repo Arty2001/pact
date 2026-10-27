@@ -86,6 +86,8 @@ When someone says you missed something, two things happen: the stretch becomes l
 
 answer_question is ONLY for an id listed under OPEN QUESTIONS. If that list says none, there is no question to answer and you must not invent an id - use label_frame instead, or just reply.
 
+When someone asks you to track something, call create_goal with their own sentence and then say in one line what it will watch for. You can make goals; saying you cannot is always wrong. A goal is deleted with one press, so make it and let them correct it rather than interviewing them first.
+
 Only propose adjust_skill. Never present it as done: say what you would change and why, and wait to be told yes.
 
 If the user is simply chatting, answer and call nothing.`;
@@ -123,6 +125,28 @@ const TOOLS: Tool[] = [
           },
         },
         required: ["skill_key", "happened", "at"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_goal",
+      description:
+        "Make a new goal from what the user just asked for. Pass their own " +
+        "sentence, not a tidied version: the planner reads the wording, and " +
+        "'never after 10:30' and 'before 10:30' are different goals. Use " +
+        "this whenever someone asks to track, start, add or stop something " +
+        "- never answer that you cannot create goals.",
+      parameters: {
+        type: "object",
+        properties: {
+          sentence: {
+            type: "string",
+            description: "What they want tracked, in their words.",
+          },
+        },
+        required: ["sentence"],
       },
     },
   },
