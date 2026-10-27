@@ -19,7 +19,7 @@
  */
 
 import React from "react";
-import { AbsoluteFill, useCurrentFrame } from "remotion";
+import { AbsoluteFill, Img, staticFile, useCurrentFrame } from "remotion";
 import { C, F, R } from "../lib/theme";
 import { Rise, Mono, inOut, Eyebrow, Chip, Phase } from "../lib/prims";
 import { FootageSlot } from "../lib/footage";
@@ -143,6 +143,8 @@ export const S8Any: React.FC = () => {
 
   const STREAMS = t("anyStream") - 10;
   const GYM = t("gym") - 10;
+  /** Scene frames at which each real rep in the clip bottoms out (12 reps, shown at 3.5x). */
+  const REP_F = [430, 447, 466, 483, 502, 521, 539, 559, 579, 598, 617, 638];
 
   return (
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
@@ -153,13 +155,7 @@ export const S8Any: React.FC = () => {
             <Eyebrow at={t("anyGoal")}>one system, any goal</Eyebrow>
 
             <div style={{ display: "flex", gap: 44, alignItems: "flex-start" }}>
-              <FootageSlot
-                shot={3}
-                note="dirty sink, filling up"
-                at={t("sinkClear")}
-                w={470}
-                h={330}
-              />
+              <SinkShot at={t("sinkClear")} fire={t("sinkClear") + 16} until={STREAMS} />
 
               <div style={{ flex: 1 }}>
                 <div style={{ marginBottom: 18 }}>
@@ -213,13 +209,19 @@ export const S8Any: React.FC = () => {
       {f >= GYM - 4 && (
         <Phase from={GYM} scale={1.12}>
           <div style={{ width: 1560, display: "flex", gap: 48, alignItems: "center" }}>
-            <FootageSlot
-              shot={5}
-              note="phone recording a gym session"
-              at={t("gym")}
-              w={620}
-              h={380}
-            />
+            <div style={{ position: "relative" }}>
+              <FootageSlot
+                shot={5}
+                note="phone recording a gym session"
+                at={t("gym")}
+                w={620}
+                h={380}
+                src="latpull.mp4"
+              />
+              <div style={{ position: "absolute", left: 14, top: 14, opacity: inOut(f, t("gym") + 6, 14) }}>
+                <Chip label="phone · whole set at 3.5×" tone="none" mono size={16} style={{ background: "rgba(255,255,255,.92)", color: C.fg }} />
+              </div>
+            </div>
             <div style={{ flex: 1 }}>
               <Rise at={t("gym") + 10}>
                 <div
@@ -242,8 +244,8 @@ export const S8Any: React.FC = () => {
               <div style={{ marginTop: 26, display: "flex", flexDirection: "column", gap: 10 }}>
                 {[
                   { at: t("loggedIt"), k: "machine", v: "lat pulldown" },
-                  { at: t("loggedIt") + 14, k: "reps", v: "8" },
-                  { at: t("loggedIt") + 28, k: "weight", v: "60 kg · asked" },
+                  { at: t("loggedIt") + 14, k: "reps", v: String(REP_F.filter((r) => f >= r).length) },
+                  { at: t("loggedIt") + 28, k: "weight", v: "57 kg · asked" },
                 ].map((r) => {
                   const p = inOut(f, r.at, 14);
                   return (
@@ -290,5 +292,45 @@ export const S8Any: React.FC = () => {
         </Phase>
       )}
     </AbsoluteFill>
+  );
+};
+
+/**
+ * The kitchen camera: Sai's sink, as a still, pushed in slowly so it reads as
+ * a feed rather than a photo. The box lands on the dishes when the
+ * "dishes in the sink" sub-goal arrives, and moves with the push-in.
+ */
+const SinkShot: React.FC<{ at: number; fire: number; until: number }> = ({ at, fire, until }) => {
+  const f = useCurrentFrame();
+  const p = inOut(f, at, 18);
+  const fired = inOut(f, fire, 14);
+  const zoom = 1 + 0.06 * Math.min(1, Math.max(0, (f - at) / Math.max(1, until - at)));
+  return (
+    <div
+      style={{
+        width: 470, height: 330, borderRadius: R.r2, overflow: "hidden", position: "relative",
+        opacity: p, transform: `scale(${0.985 + p * 0.015})`, background: "#0D1B26",
+        boxShadow: "0 1px 2px rgba(13,27,38,.05), 0 16px 40px -14px rgba(13,27,38,.20)",
+      }}
+    >
+      <div style={{ position: "absolute", inset: 0, transform: `scale(${zoom})`, transformOrigin: "50% 50%" }}>
+        <Img src={staticFile("footage/sink.jpg")} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        <div
+          style={{
+            position: "absolute", left: 86, top: 60, width: 210, height: 240, borderRadius: 18,
+            border: `2.5px solid ${C.bad}`, opacity: fired,
+            boxShadow: `0 0 0 ${5 * fired}px rgba(224,36,36,.16)`,
+          }}
+        />
+      </div>
+      <div style={{ position: "absolute", left: 14, top: 14, display: "flex", alignItems: "center", gap: 8,
+                    padding: "5px 11px", borderRadius: 999, background: "rgba(13,27,38,.62)" }}>
+        <span style={{ width: 8, height: 8, borderRadius: 8, background: C.bad }} />
+        <Mono size={14} color={C.onDark}>CAM 2 · KITCHEN</Mono>
+      </div>
+      <div style={{ position: "absolute", right: 14, bottom: 14, opacity: fired }}>
+        <Chip label="dishes in the sink · fired" tone="bad" mono size={15} style={{ background: "rgba(255,255,255,.94)" }} />
+      </div>
+    </div>
   );
 };

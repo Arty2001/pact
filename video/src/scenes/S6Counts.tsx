@@ -42,14 +42,14 @@
  */
 
 import React from "react";
-import { AbsoluteFill, useCurrentFrame } from "remotion";
+import { AbsoluteFill, Audio, Sequence, staticFile, useCurrentFrame } from "remotion";
 import { C, R, FPS } from "../lib/theme";
 import { Mono, inOut, Eyebrow, Chip, Fit } from "../lib/prims";
 import { timing } from "../lib/beats";
 
 const t = timing("b6");
 
-const LEN_F = 420;
+const LEN_F = 377;
 const LEN_S = LEN_F / FPS;
 
 /* -------------------------------------------- a counter's own numbers, real */
@@ -68,13 +68,12 @@ const FLOOR = 0.16;
 type Bump = { t: number; peak: number; sig: number };
 
 const BUMPS: Bump[] = [
-  { t: 3.0, peak: 0.93, sig: 0.343 }, // one up and down
-  { t: 4.375, peak: 0.82, sig: 0.085 }, // a flicker, narrower than a sample gap
-  { t: 5.7, peak: 0.92, sig: 0.4 }, // and the pair that must not count twice:
-  { t: 6.4, peak: 0.9, sig: 0.4 }, //   their trough never reaches exit
-  { t: 8.1, peak: 0.94, sig: 0.343 },
-  { t: 10.5, peak: 0.76, sig: 0.42 }, // crosses once, then sags and stays
-  { t: 12.7, peak: 0.93, sig: 0.343 },
+  { t: 2.31, peak: 0.93, sig: 0.343 }, // one up and down
+  { t: 4.125, peak: 0.82, sig: 0.085 }, // a flicker, narrower than a sample gap
+  { t: 5.6, peak: 0.92, sig: 0.4 }, // and the pair that must not count twice:
+  { t: 6.3, peak: 0.9, sig: 0.4 }, //   their trough never reaches exit
+  { t: 7.99, peak: 0.94, sig: 0.343 },
+  { t: 10.27, peak: 0.76, sig: 0.42 }, // crosses once, then sags and stays
 ];
 
 const conf = (time: number): number =>
@@ -520,6 +519,13 @@ export const S6Counts: React.FC = () => {
         </div>
       </div>
       </Fit>
+      {/* A quiet tick for every count, a muted blip for every rejection:
+          the same machine output the ledger is written from. */}
+      {log.map((e, i) => (
+        <Sequence key={`sfx${i}`} from={e.f} layout="none">
+          <Audio src={staticFile(e.kind === "count" ? "sfx/tick.wav" : "sfx/nope.wav")} volume={e.kind === "count" ? 0.16 : 0.12} />
+        </Sequence>
+      ))}
     </AbsoluteFill>
   );
 };

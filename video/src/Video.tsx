@@ -30,6 +30,8 @@ import { S9Pact } from "./scenes/S9Pact";
 import { Grain } from "./lib/grain";
 import { Backdrop, Chrome } from "./lib/backdrop";
 import { ScenePush } from "./lib/prims";
+import { Presenter, Voice } from "./lib/presenter";
+import { Sfx } from "./lib/sfx";
 
 loadFonts();
 
@@ -61,15 +63,15 @@ export const LEAD = Math.round(0.6 * FPS);
  * from the same files these durations come from.
  */
 const SCENE_F = {
-  s1: 690,
-  s2: 240,
-  s3: 948,
-  s4: 528,
-  s5: 480,
-  s6: 420,
-  s7: 621,
-  s8: 606,
-  s9: 426,
+  s1: 638,
+  s2: 185,
+  s3: 841,
+  s4: 516,
+  s5: 435,
+  s6: 377,
+  s7: 587,
+  s8: 673,
+  s9: 566,
 } as const;
 
 const keys = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9"] as const;
@@ -100,9 +102,6 @@ const Beat: React.FC<{
         the whole picture breathing. */}
     <ScenePush dur={span[1]}>{children}</ScenePush>
     <Chrome chapter={chapter} index={n} total={9} />
-    <Sequence from={LEAD} layout="none">
-      <Audio src={staticFile(`vo/${vo}.mp3`)} />
-    </Sequence>
   </Sequence>
 );
 
@@ -147,6 +146,9 @@ export const Pact: React.FC = () => (
       <S9Pact />
     </Beat>
 
+    <Presenter />
+    <Voice />
+    <Sfx cut={CUT} />
     <Grain />
   </AbsoluteFill>
 );

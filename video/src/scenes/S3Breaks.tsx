@@ -227,10 +227,10 @@ const Map2D: React.FC<{ at: number }> = ({ at }) => {
               y1={fy}
               x2={sx}
               y2={sy}
-              stroke={C.line}
-              strokeWidth="1"
-              strokeDasharray="4 5"
-              opacity={p * 0.6}
+              stroke={C.dimmer}
+              strokeWidth="1.4"
+              strokeDasharray="5 6"
+              opacity={p * 0.75}
             />
           );
         })}
@@ -302,6 +302,17 @@ const Map2D: React.FC<{ at: number }> = ({ at }) => {
             boxShadow: `0 0 0 ${4 + 3 * Math.abs(Math.sin((f - at) / 22))}px ${C.watchWash}`,
           }}
         />
+        {/* Name the point: without it the violet dot is just a dot. */}
+        <div style={{ position: "absolute", right: 16, bottom: 12, whiteSpace: "nowrap", opacity: inOut(f, at + 8, 14),
+                      padding: "4px 10px", borderRadius: 999, background: C.watchWash, border: `1px solid ${C.watchEdge}` }}>
+          <Mono size={17} color={C.watchText}>this frame</Mono>
+        </div>
+      </div>
+
+      {/* The winning distance, written on the line that won. */}
+      <div style={{ position: "absolute", left: (fx + nx) / 2 + 14, top: (fy + ny) / 2 - 16, opacity: inOut(f, at + 56, 14),
+                    whiteSpace: "nowrap" }}>
+        <Mono size={16} color={C.provedText}>closest · 0.284</Mono>
       </div>
     </div>
   );
@@ -394,7 +405,7 @@ export const S3Breaks: React.FC = () => {
             >
               {/* What the camera gives you. */}
               <div style={{ transform: `translateX(${close * 40}px)` }}>
-                <FootageSlot shot={2} note="pushups, full set, side on" at={t("pixels")} w={520} h={320} />
+                <FootageSlot shot={2} note="pushups, full set, side on" at={t("pixels")} w={520} h={320} src="pushups.mp4" />
                 <div style={{ marginTop: 14, display: "flex", justifyContent: "space-between" }}>
                   <Mono size={19} color={C.dimmer}>
                     1 frame
@@ -494,6 +505,7 @@ export const S3Breaks: React.FC = () => {
                       w={330}
                       h={186}
                       radius={R.r}
+                      src="pushups.mp4"
                     />
                     <div style={{ position: "absolute", left: 12, bottom: 10 }}>
                       <Mono size={17} color={C.onDarkDim}>

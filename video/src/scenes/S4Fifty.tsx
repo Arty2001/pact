@@ -25,7 +25,7 @@
  */
 
 import React from "react";
-import { AbsoluteFill, useCurrentFrame } from "remotion";
+import { AbsoluteFill, useCurrentFrame, interpolate, Easing } from "remotion";
 import { C, F, R } from "../lib/theme";
 import { Rise, Mono, inOut, Eyebrow, Phase, CountUp } from "../lib/prims";
 import { timing } from "../lib/beats";
@@ -294,7 +294,11 @@ export const S4Fifty: React.FC = () => {
   const f = useCurrentFrame();
 
   const TREE = t("shared") - 12;
-  const merge = inOut(f, t("oneTree"), 36);
+  // Slow, symmetric ease so the duplicates are seen travelling and landing,
+  // rather than jumping in the first few frames of an ease-out.
+  const merge = interpolate(f, [t("oneTree") - 6, t("oneTree") + 60], [0, 1], {
+    extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: Easing.inOut(Easing.cubic),
+  });
 
   return (
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
