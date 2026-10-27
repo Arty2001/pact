@@ -42,10 +42,18 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Dependencies before source, so editing a .py does not re-resolve the wheels.
+#
+# torchvision is installed from the SAME index as torch, in the same command,
+# and that is not tidiness. timm depends on torchvision, so leaving it to the
+# later install pulls PyPI's build - which is compiled against the CUDA torch
+# and not this one. The pair then imports as
+# `RuntimeError: operator torchvision::nms does not exist`, on the first line
+# of the encoder rather than at build time, so the image builds green and
+# dies on the first frame.
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir "." \
     && if [ "$TORCH" = "cpu" ]; then \
-         pip install --no-cache-dir torch \
+         pip install --no-cache-dir torch torchvision \
            --index-url https://download.pytorch.org/whl/cpu; \
        fi \
     && pip install --no-cache-dir \
