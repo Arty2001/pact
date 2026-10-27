@@ -308,21 +308,72 @@ then the recorded embeddings choose between the candidates by separation over
 spread. Generating and choosing are different jobs and neither model can do
 the other one.
 
-### Nebius AI Cloud: the encoder sleeps when nothing is watching
+### Nebius AI Cloud: where the encoder runs
 
-The encoder's instance is started when a camera arrives and stopped ten
-minutes after the last one leaves, driven from the Hub - a publisher socket
-opening *is* a camera arriving. Nothing on the platform scales to zero on its
-own (Serverless Endpoints run until stopped), so the control plane does it:
-`POST /compute/v1/instances/start` on the first publisher, `stop` on the
-grace timer. Idle cost becomes the disk alone.
+The encoder is the only part of this that can be moved. Everything else in
+perception is stateful - a WebRTC subscription, per-room calibration, state
+machines with dwell timers - and belongs beside the cameras. The encoder is a
+pure function: a frame in, 1152 numbers out, nothing remembered between
+calls.
 
-Two traps, both load-bearing. A stop/start through the Compute API **does not
-preserve local disk**, and the store holds every embedding and label the
-system has - so `/data` must be a network disk or the skills forget
-everything on the first sleep. And bare `nvidia/cuda` runtime images ship no
-Python, so the GPU build uses a PyTorch CUDA base and skips installing the
-CPU wheel over the top of a working GPU build.
+So it runs in two places, and both are real:
+
+| | where | how |
+|---|---|---|
+| In the perception process | a Nebius Compute VM | `--embed local`, the default |
+| As its own service | a **Nebius Serverless Endpoint** | `--embed-url https://...` |
+
+The same image serves both. `ENTRYPOINT` is `python -m` and the module is the
+command, so `pact_perception.run` is the watcher and `pact_perception.serve`
+is the encoder behind HTTP - which is also what a serverless endpoint needs,
+since those let you set the arguments and not the entrypoint.
+
+The endpoint is live and answers with what it is, because a vector is only
+meaningful against a weight vector from the same encoder and being wrong
+there is silent - the numbers look fine and mean nothing:
+
+```
+GET /health
+{"ok":true,"encoderId":"c-radio_v3-b/siglip2@384","dim":1152,"device":"cpu","threads":16}
+```
+
+**What the split costs, measured.** Inside one region the hop is a couple of
+milliseconds; the rest is JPEG encode and serialising 1152 floats back. About
+twelve milliseconds a frame on top of the encode. Across regions it is ninety,
+which is the version not to build. The demo runs `--embed local` because
+twelve milliseconds times eight frames a second is still twelve milliseconds
+nobody needs - but the endpoint exists, works, and is the honest answer to
+"could the encoder be serverless".
+
+**The endpoint does not scale to zero, so the control plane does it.** Nebius
+bills an endpoint for wall-clock time while it runs, whatever the traffic, and
+nothing there stops it on its own. The Hub already knows when a camera
+arrives, because a publisher socket opening *is* a camera arriving: the Engine
+starts the machine on the first publisher and stops it ten minutes after the
+last one leaves. Ten minutes because a tab refresh is not an empty house and a
+cold start is a minute of somebody watching a blank console.
+
+That same loop is what makes preemptible usable. A preempted endpoint goes to
+`STOPPED` and Nebius does not bring it back - it stays down until something
+starts it. Something does: the next camera to publish.
+
+**Two traps, both of which cost us an evening.**
+
+A stop/start through the Compute API **does not preserve local disk**, and the
+store is where every embedding and label the skills have learned lives. `/data`
+must be a network disk or they forget everything the first time the control
+plane saves money.
+
+And `os.cpu_count()` reports the machine, not the share of it you were given.
+A sixteen-core endpoint encoded a frame in **208 ms**; a four-thread laptop
+does it in **195**. In a container allocated sixteen cores on a host with a
+hundred and ninety-two, torch starts a hundred and ninety-two threads and they
+contend rather than work. More hardware, less throughput, nothing in the logs.
+The cgroup quota is asked first now, because that is what actually limits the
+process and it is invisible to both `cpu_count` and the affinity mask -
+and `/health` reports the thread count, because the only thing worse than this
+bug is this bug with no way to see it from outside.
+
 
 ### Tavily: a target the system did not invent
 
