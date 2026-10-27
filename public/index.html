@@ -12,8 +12,10 @@
 </head>
 <body>
 
-<!-- One surface. The camera and the goal are the same fact, so splitting them
-     across tabs meant neither view contained the product. -->
+<!-- The shell names the product and nothing else. What used to sit here -
+     encoder id, frame counts, scores-to-events - is the system's report on
+     itself, and leading with it meant the first thing read was never about
+     the person reading it. It moved to "Under the hood". -->
 <header class="bar">
   <a class="brand" href="/">
     <svg width="18" height="18" viewBox="0 0 20 20" aria-hidden="true">
@@ -23,136 +25,173 @@
     pact
   </a>
   <span class="pip" id="pip" title="frames arriving"></span>
-
-  <div class="bar-meta">
-    <span id="m-encoder">—</span>
-    <span><b id="m-cameras">0</b> cameras</span>
-    <span><b id="m-scores">0</b> scores → <b id="m-events">0</b> events</span>
-    <span id="m-clock">--:--:--</span>
-  </div>
+  <span class="bar-watch" id="bar-watch">nothing is watching</span>
+  <span class="bar-clock" id="m-clock">--:--:--</span>
 </header>
-
-<!-- The assistant sits above everything, because it is the thing that knows
-     why any of the rest is on screen. Collapsed to a single line until it has
-     something to say, so a quiet system looks quiet. -->
-<section class="ai" id="ai" data-tone="calm">
-  <button class="mic" id="mic" type="button" aria-pressed="false" title="Hold to talk, or click to toggle">
-    <svg viewBox="0 0 20 20" aria-hidden="true">
-      <rect x="7" y="2.5" width="6" height="9.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
-      <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5" fill="none" stroke="currentColor"
-            stroke-width="1.6" stroke-linecap="round"/>
-    </svg>
-  </button>
-
-  <div class="ai-body">
-    <div class="heard" id="ai-heard" hidden></div>
-    <div class="said" id="ai-said">Ask me how you're doing.</div>
-  </div>
-
-  <span class="ai-state" id="ai-state">idle</span>
-</section>
 
 <main class="page">
 
-  <!-- ------------------------------------------------------------ left -->
-  <div class="col">
+  <!-- ------------------------------------------------------------ today -->
+  <!-- The screen's one question is "am I on track today", so the answer is
+       the first and biggest thing. It was previously a list in the right
+       margin at 13px, smaller than the wordmark. -->
+  <section class="today">
+    <div class="today-head">
+      <h1>Today</h1>
+      <p class="finding" id="today-line">Loading today.</p>
+    </div>
+    <div class="today-act">
+      <button class="btn primary" id="new-goal">New goal</button>
+      <button class="btn ghost" id="add-camera">Add a camera</button>
+    </div>
+  </section>
 
-    <div id="notices"></div>
+  <!-- Anything needing a person, directly under the answer it changes. -->
+  <section class="card" id="q-card" hidden>
+    <header><h2>Waiting on you</h2></header>
+    <div id="questions"></div>
+  </section>
 
-    <section class="card">
-      <!-- Every camera on the wall. Each runs the whole skill set on its own
-           frames, with its own motion gate and its own calibration, so this
-           is a choice of what to watch rather than of what is running. -->
-      <div class="cams" id="cams"></div>
+  <div id="notices"></div>
 
-      <div class="stage" id="stage">
-        <!-- One pane per camera you have turned on. The chips above are a
-             multi-select, not a switch: watching two rooms at once is the
-             point of a wall. -->
-        <div class="wall" id="wall"></div>
-        <div class="stage-empty" id="stage-empty">
-          <b>No camera is publishing</b>
-          <span>Open <strong>/join</strong> on a phone or laptop and start a camera. It appears here, and perception subscribes to it automatically.</span>
-          <button class="btn primary" id="add-camera">Add a camera</button>
-        </div>
-        <div class="hud" id="hud" hidden>
-          <!-- Reactions land on the camera that saw it. A count rising in a
-             corner of the page does not say which camera earned it, and
-             with two on the wall that is the first thing you want to know. -->
-        <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+  <!-- The assistant explains the state above rather than inviting a question.
+       It is the thing that knows why any of the rest is on screen. -->
+  <section class="ai" id="ai" data-tone="calm">
+    <button class="mic" id="mic" type="button" aria-pressed="false" title="Hold to talk, or click to toggle">
+      <svg viewBox="0 0 20 20" aria-hidden="true">
+        <rect x="7" y="2.5" width="6" height="9.5" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
+        <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0M10 15v2.5" fill="none" stroke="currentColor"
+              stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+    </button>
 
-        <div class="hud-top">
-            <div class="where"><b id="cam-name">—</b><span id="cam-meta">—</span></div>
-            <div class="tally">
-              <span class="n" id="tally-n">0</span>
-              <span class="sub" id="tally-sub">—</span>
-              <div class="what" id="tally-what">—</div>
+    <div class="ai-body">
+      <div class="heard" id="ai-heard" hidden></div>
+      <div class="said" id="ai-said">Ask how today is going, or tell me I missed something.</div>
+    </div>
+
+    <span class="ai-state" id="ai-state">idle</span>
+  </section>
+
+  <!-- The feed is the product, so it is the hero. A camera pointed at a room
+       and a model reading it several times a second is the thing being
+       demonstrated; the day's tally is the consequence of it. An earlier
+       pass had this below the fold in a column, which answered "where do I
+       stand" at the cost of never showing what Pact actually does. -->
+  <section class="card stage-card">
+    <header>
+      <h2>Live</h2>
+      <span class="note">every skill scoring these frames, several times a second</span>
+    </header>
+
+        <!-- Every camera on the wall. Each runs the whole skill set on its own
+             frames, with its own motion gate and its own calibration, so this
+             is a choice of what to watch rather than of what is running. -->
+        <div class="cams" id="cams"></div>
+
+        <div class="stage" id="stage">
+          <!-- One pane per camera you have turned on. The chips above are a
+               multi-select, not a switch: watching two rooms at once is the
+               point of a wall. -->
+          <div class="wall" id="wall"></div>
+
+          <!-- An empty section keeps its frame and says one thing. This used
+               to be a 450px black rectangle announcing an absence, which made
+               the largest element on the screen a failure message. -->
+          <div class="stage-empty" id="stage-empty">
+            <b>Nothing is watching yet</b>
+            <span>Open <strong>/join</strong> on a phone or laptop. It appears here and starts being scored on its own.</span>
+            <button class="btn primary" id="add-camera-2" type="button">Add a camera</button>
+          </div>
+
+          <div class="hud" id="hud" hidden>
+            <!-- Reactions land on the camera that saw it. A count rising in a
+                 corner of the page does not say which camera earned it, and
+                 with two on the wall that is the first thing you want to know. -->
+            <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
+            <div class="hud-top">
+              <div class="where"><b id="cam-name">—</b><span id="cam-meta">—</span></div>
+              <div class="tally">
+                <span class="n" id="tally-n">0</span>
+                <span class="sub" id="tally-sub">—</span>
+                <div class="what" id="tally-what">—</div>
+              </div>
             </div>
           </div>
         </div>
-      </div>
 
       <!-- Signal: every skill scoring this camera, on one pair of axes.
-           The legend is the filter - a skill's colour on the chip is its
-           colour on the curve, and clicking one narrows the chart to it and
-           draws its thresholds, because an enter/exit band belongs to a
-           single skill and six of them stacked is noise. -->
-      <div class="signal">
-        <div class="readout">
-          <div><b id="r-score">—</b>score now</div>
-          <div><b id="r-peak">—</b>peak</div>
-          <div><b class="lit" id="r-count">0</b>counted today</div>
-          <div><b id="r-rate">—</b>sampling</div>
+             The legend is the filter - a skill's colour on the chip is its
+             colour on the curve, and clicking one narrows the chart to it and
+             draws its thresholds, because an enter/exit band belongs to a
+             single skill and six of them stacked is noise. -->
+        <div class="signal">
+          <div class="readout">
+            <div><b id="r-score">—</b>score now</div>
+            <div><b id="r-peak">—</b>peak</div>
+            <div><b class="lit" id="r-count">0</b>counted today</div>
+            <div><b id="r-rate">—</b>sampling</div>
+          </div>
+      <div class="legend" id="legend"></div>
+      <svg id="plot" viewBox="0 0 600 150" width="100%" height="150" preserveAspectRatio="none"
+           role="img" aria-label="Detection scores over time against the enter and exit thresholds"></svg>
+    </div>
+  </section>
+
+  <div class="cols">
+    <div class="col">
+
+      <section class="card">
+        <header>
+          <h2>Goals</h2>
+          <span class="note">proved by camera, never ticked by hand</span>
+        </header>
+        <div class="rings" id="goals">
+          <div class="empty">No goals yet. A goal is a sentence plus the things a camera would have to see for it to be true.</div>
         </div>
-        <div class="legend" id="legend"></div>
-        <svg id="plot" viewBox="0 0 600 150" width="100%" height="150" preserveAspectRatio="none"
-             role="img" aria-label="Detection scores over time against the enter and exit thresholds"></svg>
-      </div>
-    </section>
+      </section>
 
-    <section class="card">
-      <header>
-        <h2>What happened</h2>
-        <span class="note" id="ev-note">newest first</span>
-      </header>
-      <div class="events" id="events">
-        <div class="empty">Nothing yet. Events appear the moment a skill crosses its threshold.</div>
-      </div>
-    </section>
-  </div>
+    </div>
 
-  <!-- ----------------------------------------------------------- right -->
-  <div class="col">
+    <!-- --------------------------------------------------------- right -->
+    <div class="col">
 
-    <section class="card" id="q-card" hidden>
-      <header><h2>Waiting on you</h2></header>
-      <div id="questions"></div>
-    </section>
+      <section class="card">
+        <header>
+          <h2>What happened</h2>
+          <span class="note" id="ev-note">newest first</span>
+        </header>
+        <div class="events" id="events">
+          <div class="empty">Nothing yet. Events appear the moment a skill crosses its threshold.</div>
+        </div>
+      </section>
 
-    <section class="card">
-      <header>
-        <h2>Goals</h2>
-        <button class="btn primary sm" id="new-goal">New goal</button>
-      </header>
-      <div class="goals" id="goals">
-        <div class="empty">No goals yet. A goal is a sentence plus the things a camera would have to see for it to be true.</div>
-      </div>
-    </section>
+      <!-- The machinery, folded away. A skill's label IS its detector, so this
+           is the most important thing on the page to a person debugging and
+           the least important to a person checking whether they did their
+           squats. It defaults closed for the second reader. -->
+      <details class="card fold">
+        <summary>
+          <h2>Under the hood</h2>
+          <span class="note"><b id="m-cameras">0</b> cameras · <b id="m-scores">0</b> scores → <b id="m-events">0</b> events</span>
+        </summary>
 
-    <section class="card">
-      <header>
-        <h2>Skills</h2>
-        <span class="note">shared by every goal</span>
-      </header>
-      <div class="skills" id="skills"></div>
-    </section>
+        <div class="sys">
+          <div><span>Encoder</span><b id="m-encoder">—</b></div>
+        </div>
+
+        <div class="sub-head">Skills <span class="note">shared by every goal</span></div>
+        <div class="skills" id="skills"></div>
+      </details>
+    </div>
   </div>
 </main>
 
 <dialog id="claim-dialog">
   <form method="dialog">
     <h3>Add a camera</h3>
-    <p style="margin:0; color:var(--dim); font-size:13px">
+    <p class="dialog-note">
       Scan this on the device you want to watch with, or open the link there.
       The code works once and lasts ten minutes.
     </p>
@@ -178,7 +217,7 @@
       <input id="g-sentence" type="text" autocomplete="off" placeholder="I want to do 20 pushups every morning">
       <small>Nemotron turns this into skills and reuses any that already exist. Check what it drafts before creating — a skill's label <em>is</em> its detector.</small>
     </div>
-    <div class="actions" style="justify-content:flex-start">
+    <div class="actions start">
       <button type="button" class="btn" id="g-plan">Draft it</button>
       <span class="status" id="g-status"></span>
     </div>
@@ -232,7 +271,7 @@
     <div class="field">
       <label>Skills it needs</label>
       <div class="rows" id="g-skills"></div>
-      <button type="button" class="btn ghost sm" id="g-add" style="justify-self:start">Add a skill</button>
+      <button type="button" class="btn ghost sm start" id="g-add">Add a skill</button>
       <small>A label must describe what would literally be seen — on a camera, a posture or a place; on a screen, the <em>look</em> of it, never words it would have to read. That text becomes the weight vector directly, with no training.</small>
     </div>
 

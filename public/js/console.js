@@ -221,12 +221,70 @@ async function load() {
   renderAll();
 }
 
+/**
+ * Where you stand today, in one sentence.
+ *
+ * The screen's question is "am I on track", and until now the only thing
+ * that answered it was a column of 13px rows in the right margin. A person
+ * opening this should know before they read anything.
+ *
+ * It states what is missing as well as what is done. "Nothing is watching"
+ * is the single most useful thing the page can say when it is true, and it
+ * was previously only discoverable by noticing that a black rectangle had
+ * replaced the video.
+ */
+function renderFinding() {
+  const goals = state.goals ?? [];
+  const live = (state.rooms ?? []).length;
+  const el = $("today-line");
+  const watch = $("bar-watch");
+  if (el === null) return;
+
+  watch.textContent = live > 0 ? `${live} camera${live === 1 ? "" : "s"} watching` : "nothing is watching";
+  watch.classList.toggle("is-live", live > 0);
+
+  if (goals.length === 0) {
+    el.textContent = "No goals yet. Write one and Pact works out what a camera would have to see.";
+    return;
+  }
+
+  const rows = goals.map((g) => ({ g, i: (g.instances ?? [])[0] }));
+  const done = rows.filter((r) => r.i?.state === "done" || r.i?.settledBy).length;
+  // A limit that has been broken is the thing you most need told, so it
+  // outranks the tally even when everything else went well.
+  const broken = rows.find((r) => r.g.type === "limit" && r.i?.state === "violated");
+
+  let line;
+  if (broken) {
+    line = `<b>${esc(broken.g.description)}</b> — over the limit today.`;
+  } else if (done === rows.length) {
+    line = `All <b>${rows.length}</b> done today.`;
+  } else {
+    const next = rows
+      .filter((r) => r.i && r.i.targetMin)
+      .sort((a, b) => (a.i.observed ?? 0) / a.i.targetMin - (b.i.observed ?? 0) / b.i.targetMin)[0];
+    const left = next ? Math.max(0, next.i.targetMin - (next.i.observed ?? 0)) : 0;
+    // The description is the sentence the person typed, so it is quoted
+    // rather than run into this one. "20 to go on i want to do 20 squats
+    // every day" reads as a sentence that lost track of itself.
+    line = next
+      ? `<b>${esc(fmt(left))}</b> to go — “${esc(next.g.description)}”.`
+      : `<b>${done}</b> of <b>${rows.length}</b> done today.`;
+  }
+
+  // The camera state is part of the finding, not a separate notice. A goal
+  // that cannot advance because nothing is publishing is the most common
+  // reason this page looks stuck, and saying so costs one clause.
+  el.innerHTML = live > 0 ? line : `${line} Nothing is watching, so nothing can be proved yet.`;
+}
+
 function renderAll() {
   pruneTraces();
   announceGoals();
   renderGoals();
   renderSkills();
   renderWaiting();
+  renderFinding();
   renderMeta();
   renderNotices();
   renderTally();
@@ -338,7 +396,6 @@ function renderGoals() {
             : 0;
 
       const win = g.windowStart ? `${g.windowStart}–${g.windowEnd}` : "any time";
-      const obs = today ? `${fmt(today.observed)}${today.targetMin ? ` / ${fmt(today.targetMin)}` : ""}` : "—";
 
       el.innerHTML = `
         <div class="goal-top">
@@ -346,7 +403,10 @@ function renderGoals() {
           <span class="chip ${chipFor(g, today)}">${esc(stateLabel(g, today))}</span>
           <button class="kill" type="button" title="Delete this goal">×</button>
         </div>
-        <div class="goal-meta">${esc(g.cadence)} · ${esc(win)} · <span class="mono">${esc(obs)}</span>${
+        <div class="goal-fig"><b>${esc(fmt(today ? today.observed : 0))}</b><span>${
+          today?.targetMin ? `of ${esc(fmt(today.targetMin))}` : esc(stateLabel(g, today))
+        }</span></div>
+        <div class="goal-meta">${esc(g.cadence)} · ${esc(win)}${
           // Only when the sentence named no number and a search found one.
           // Shown because a target you cannot trace is a number this system
           // invented and then held you to - and the whole promise here is
@@ -1574,3 +1634,153 @@ function stepOrder(goal, index) {
   ].sort((a, b) => a - b);
   return indices.indexOf(index) + 1;
 }
+
+// The empty stage carries the same action, because that is where the feed
+// will be and so where the hand goes. One handler, two buttons.
+$("add-camera-2").addEventListener("click", () => $("add-camera").click());
+
+// --------------------------------------------------------------- the voice --
+
+/**
+ * The assistant band.
+ *
+ * `showExchange` and `speak` were called from the engine socket and defined
+ * nowhere, so every assistant message threw a ReferenceError inside the
+ * socket handler and the band kept its placeholder for ever. The mic had no
+ * listener at all. What looked like a bad design was an unwired one.
+ */
+
+const ai = $("ai");
+
+/** Idle is a button, not a wide empty box pretending to be an input. */
+function aiIdle(idle) {
+  ai.dataset.idle = idle ? "1" : "0";
+}
+aiIdle(true);
+
+/**
+ * Show one turn: what it heard, what it said.
+ *
+ * Both halves, because the commonest way a voice feature loses trust is
+ * acting on something you did not say without ever showing you what it
+ * thought it heard.
+ */
+function showExchange(heard, say, ui = {}) {
+  const h = $("ai-heard");
+  h.textContent = heard;
+  h.hidden = !heard;
+
+  $("ai-said").textContent = say || "—";
+  ai.dataset.tone = ui.tone ?? "calm";
+  ai.classList.remove("thinking");
+  $("ai-state").textContent = "";
+  aiIdle(false);
+
+  // The console's own attention follows the assistant's. Naming a skill and
+  // then leaving you to find it is the half-done version of this.
+  if (ui.focusSkill) {
+    focusSkill = ui.focusSkill;
+    renderAll();
+    drawPlot();
+  }
+  if (ui.focusGoal) {
+    focusGoal = ui.focusGoal;
+    renderAll();
+  }
+}
+
+/**
+ * Say it out loud, when the browser can.
+ *
+ * Wrapped because speechSynthesis is missing or mute on enough platforms
+ * that an unguarded call is a crash on somebody's phone, and a silent
+ * assistant is far better than a broken page.
+ */
+function speak(text) {
+  if (!text) return;
+  try {
+    if (!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  } catch {
+    // Nothing to do and nothing worth saying: the text is already on screen.
+  }
+}
+
+/** Send what was said and show the answer. */
+async function askPact(text) {
+  if (!text) return;
+  showExchange(text, "…", { tone: "calm" });
+  ai.classList.add("thinking");
+  $("ai-state").textContent = "thinking";
+  try {
+    const res = await fetch("/api/engine/assistant", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, room: devices[0]?.room ?? "" }),
+    });
+    const body = await res.json().catch(() => ({}));
+    const say = body.say ?? "I could not think just then.";
+    showExchange(text, say, body.ui ?? {});
+    speak(say);
+  } catch {
+    showExchange(text, "I could not reach my own head just then.", { tone: "alert" });
+  } finally {
+    ai.classList.remove("thinking");
+    $("ai-state").textContent = "";
+  }
+}
+
+/**
+ * The microphone.
+ *
+ * Web Speech where it exists, a typed prompt where it does not. Falling back
+ * to typing rather than hiding the control: the assistant is the same
+ * feature either way, and a button that vanishes on Firefox reads as broken.
+ */
+const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+let listening = null;
+
+$("mic").addEventListener("click", () => {
+  if (listening) {
+    listening.stop();
+    return;
+  }
+  if (!Recognition) {
+    const typed = window.prompt("Ask Pact");
+    if (typed) void askPact(typed.trim());
+    return;
+  }
+
+  const rec = new Recognition();
+  rec.lang = navigator.language || "en-GB";
+  rec.interimResults = true;
+  rec.continuous = false;
+
+  rec.onstart = () => {
+    listening = rec;
+    ai.classList.add("listening");
+    aiIdle(false);
+    $("ai-state").textContent = "listening";
+    $("mic").setAttribute("aria-pressed", "true");
+  };
+  // Interim results are shown as they arrive, so you can see it mishearing
+  // you while there is still time to stop and say it again.
+  rec.onresult = (e) => {
+    const said = [...e.results].map((r) => r[0].transcript).join("").trim();
+    const h = $("ai-heard");
+    h.textContent = said;
+    h.hidden = !said;
+    if (e.results[e.results.length - 1].isFinal) void askPact(said);
+  };
+  rec.onerror = () => showExchange("", "I did not catch that.", { tone: "nudge" });
+  rec.onend = () => {
+    listening = null;
+    ai.classList.remove("listening");
+    $("mic").setAttribute("aria-pressed", "false");
+    if ($("ai-state").textContent === "listening") $("ai-state").textContent = "";
+  };
+  rec.start();
+});
