@@ -2063,6 +2063,21 @@ export class Engine implements DurableObject {
   }
 
   private state() {
+    // A live perception socket outranks the stored state, which is a record
+    // of what was last *asked* for rather than what happened. The hello
+    // handler corrects the row, and only a socket that arrives after it can
+    // do so - a worker already connected across a deploy will not say hello
+    // again until it reconnects, and until then the row would go on claiming
+    // `starting` about a machine demonstrably doing the work. Derived here
+    // rather than written, because a GET should not have to mutate anything
+    // to tell the truth.
+    const watcherUp =
+      this.ctx
+        .getWebSockets()
+        .map((ws) => this.metaOf(ws))
+        .filter((m) => m?.role === "perception").length > 0;
+    const compute = this.computeRow();
+
     return {
       skills: this.skills(),
       goals: this.goals().map((goal) => ({
@@ -2074,10 +2089,14 @@ export class Engine implements DurableObject {
       questions: this.openQuestions(),
       // What the encoder's machine is doing, so a cold start can be shown as
       // a cold start. Only present when the feature is configured at all.
-      encoder: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().state : null,
+      encoder: this.env.NEBIUS_INSTANCE_ID
+        ? watcherUp
+          ? "running"
+          : compute.state
+        : null,
       // When it last changed, so a wait can be shown as a wait of a known
       // length rather than a spinner that might mean anything.
-      encoderSince: this.env.NEBIUS_INSTANCE_ID ? this.computeRow().changed_at : null,
+      encoderSince: this.env.NEBIUS_INSTANCE_ID ? compute.changed_at : null,
       proposals: this.rows<Record<string, unknown>>("SELECT * FROM proposals ORDER BY at DESC").map(
         (r) => ({ ...r, runners_up: JSON.parse(String(r.runners_up ?? "[]")) }),
       ),
