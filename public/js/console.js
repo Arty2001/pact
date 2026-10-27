@@ -1743,14 +1743,58 @@ async function askPact(text) {
 const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
 let listening = null;
 
-$("mic").addEventListener("click", () => {
+/**
+ * What went wrong, in words a person can act on.
+ *
+ * Every failure used to arrive as "I did not catch that", which made a
+ * refused permission look exactly like mumbling - so the button appeared to
+ * do nothing and there was no way to find out why.
+ */
+const MIC_TROUBLE = {
+  "not-allowed": "I need permission to use the microphone. Allow it in the padlock menu, then try again.",
+  "service-not-allowed": "This browser is blocking speech recognition. Type instead?",
+  "audio-capture": "I cannot find a microphone on this device.",
+  network: "Speech recognition needs the network and could not reach it.",
+  aborted: "",
+  "no-speech": "I did not hear anything.",
+};
+
+/** Typing is always available, so the assistant is never simply unusable. */
+function askByTyping() {
+  const typed = window.prompt("Ask Pact");
+  if (typed && typed.trim()) void askPact(typed.trim());
+}
+
+$("mic").addEventListener("click", async () => {
   if (listening) {
     listening.stop();
     return;
   }
   if (!Recognition) {
-    const typed = window.prompt("Ask Pact");
-    if (typed) void askPact(typed.trim());
+    askByTyping();
+    return;
+  }
+
+  // Said before anything slow happens. The permission prompt can sit there
+  // for as long as it takes someone to read it, and until onstart fires
+  // there is otherwise no sign the button did anything at all.
+  aiIdle(false);
+  $("ai-state").textContent = "starting";
+  ai.classList.add("thinking");
+
+  // Asked for explicitly rather than left to the recogniser. Chrome's own
+  // prompt from SpeechRecognition is easy to miss and gives no catchable
+  // failure, so a denied microphone just looked like silence.
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Released at once: the recogniser opens its own. Holding this one keeps
+    // the recording indicator lit for as long as the tab is open.
+    for (const track of stream.getTracks()) track.stop();
+  } catch {
+    ai.classList.remove("thinking");
+    $("ai-state").textContent = "";
+    showExchange("", MIC_TROUBLE["not-allowed"], { tone: "nudge" });
+    askByTyping();
     return;
   }
 
@@ -1761,8 +1805,8 @@ $("mic").addEventListener("click", () => {
 
   rec.onstart = () => {
     listening = rec;
+    ai.classList.remove("thinking");
     ai.classList.add("listening");
-    aiIdle(false);
     $("ai-state").textContent = "listening";
     $("mic").setAttribute("aria-pressed", "true");
   };
@@ -1775,12 +1819,28 @@ $("mic").addEventListener("click", () => {
     h.hidden = !said;
     if (e.results[e.results.length - 1].isFinal) void askPact(said);
   };
-  rec.onerror = () => showExchange("", "I did not catch that.", { tone: "nudge" });
+  rec.onerror = (e) => {
+    const why = MIC_TROUBLE[e.error] ?? `Speech recognition failed (${e.error}).`;
+    if (why) showExchange("", why, { tone: "nudge" });
+    // Anything but a stray silence leaves typing open, so one bad attempt
+    // does not end the conversation.
+    if (e.error !== "no-speech" && e.error !== "aborted") askByTyping();
+  };
   rec.onend = () => {
     listening = null;
-    ai.classList.remove("listening");
+    ai.classList.remove("listening", "thinking");
     $("mic").setAttribute("aria-pressed", "false");
-    if ($("ai-state").textContent === "listening") $("ai-state").textContent = "";
+    const state = $("ai-state");
+    if (state.textContent === "listening" || state.textContent === "starting") state.textContent = "";
   };
-  rec.start();
+
+  // start() throws InvalidStateError if one is already running, and an
+  // uncaught throw here leaves the button stuck looking busy for ever.
+  try {
+    rec.start();
+  } catch {
+    ai.classList.remove("thinking");
+    $("ai-state").textContent = "";
+    askByTyping();
+  }
 });
