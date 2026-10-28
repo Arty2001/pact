@@ -230,7 +230,7 @@ pure function of `(state, score, now)` for the same reason: `pytest` replays a
 score trace through it with different numbers and no camera involved.
 
 ```bash
-pytest -q          # 54 tests: the machine, the scoring maths, the probe, escalation
+pytest -q          # 159 tests: the machine, the scoring maths, the probe, escalation
 ruff check .
 ```
 
@@ -353,7 +353,7 @@ Two products with confusingly similar names, and only one of them can do this.
 **Token Factory cannot host a custom model.** Its dedicated-endpoint API takes
 a `model_name` from a fixed catalogue — there is no image field and no HF-repo
 field — and custom weights is a gated beta limited to fine-tunes of text LLMs.
-A 90M vision encoder needing `trust_remote_code` is not reachable that way.
+A 98M vision encoder needing `trust_remote_code` is not reachable that way.
 
 **Nebius Serverless AI Endpoints** takes a container image and returns a
 managed HTTPS URL in about five minutes. `trust_remote_code` is a non-issue

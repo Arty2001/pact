@@ -11,6 +11,15 @@ stages use no model at all.
 Built for the **Nebius × NVIDIA hackathon**. Deployed at
 [pact.lanvar.ai](https://pact.lanvar.ai).
 
+**For judging** — [MIT license](LICENSE) · [Setup, from a clean clone](#setup) ·
+[the three NVIDIA models and where each runs](#nebius-and-nvidia) ·
+[what Token Factory did for the build](#where-token-factory-accelerated-the-build) ·
+[Nebius AI Cloud](#nebius-ai-cloud-where-the-encoder-runs) ·
+[Nebius Serverless Endpoints](#nebius-ai-cloud-where-the-encoder-runs) ·
+[Tavily](#tavily-a-target-the-system-did-not-invent). Every model id below is
+the string the code actually sends — `src/goals/planner.ts`,
+`src/goals/engine.ts` and `perception/pact_perception/teacher.py`.
+
 ---
 
 ## The idea in one screen
@@ -97,7 +106,7 @@ planning against.)
 | Motion gate in the browser | Working |
 | Frame relay → perception | Working |
 | C-RADIO embedding, zero-shot skills from text | Working, semantically verified |
-| State machines, near-miss diagnostics | Working, 54 tests |
+| State machines, near-miss diagnostics | Working, 159 tests |
 | Goal ledger, instances, settlement | Working |
 | Planner: a sentence → skills + a goal rule | Working, reuses existing skills |
 | Teacher: escalation to Nemotron VL | Working |
@@ -162,7 +171,7 @@ which was the riskiest part of the original plan.
 
 ### Two Durable Objects, deliberately
 
-The **Hub** keeps no storage at all: "what is live" is derived from the set of
+The **Hub** stores nothing about devices: "what is live" is derived from the set of
 open publisher sockets, so socket-open and device-live are the same fact
 recorded once. Nothing to expire, nothing to reconcile.
 
@@ -215,9 +224,11 @@ gate the chrome is the entire signal. *"Is this a short-form video player"* is
 answered by a bright upright panel on a dark ground with a column of round
 buttons down one side; the clip inside it changes every few seconds, and
 because the encoder averages the whole frame, that clip is what the score
-actually follows. Measured: two such frames with different clips in them sit
-21.7 apart raw and 0.73 apart under `layout` — a thirtyfold collapse — while
-the panel still stands 111 levels above the ground beside it. A score that
+actually follows. Measured on the synthetic player in
+[`tests/test_layout_only.py`](perception/tests/test_layout_only.py), in pixel
+levels: two such frames with different clips in them sit 21.7 apart raw and
+0.73 apart under `layout` — a 29.8× collapse — while the panel still stands
+110.7 levels above the ground beside it. A signal that
 swings that far is one no fixed threshold can sit under, which is the failure
 `layout` removes, and the privacy of it is free: at that grid a page of text
 is a texture, so the embedding records that you were reading and not what.
@@ -336,6 +347,40 @@ then the recorded embeddings choose between the candidates by separation over
 spread. Generating and choosing are different jobs and neither model can do
 the other one.
 
+### Where Token Factory accelerated the build
+
+The runtime argument above is about cost. This one is about the week.
+
+**One base URL and one key, from two languages.** The Worker reaches Token
+Factory in TypeScript (`src/goals/nebius.ts`) and perception reaches it in
+Python (`perception/pact_perception/teacher.py`), both at
+`https://api.tokenfactory.nebius.com/v1`, both with `NEBIUS_API_KEY`. Because
+it is OpenAI-compatible, the entire client is a base URL, a bearer token and
+one method — no SDK to adopt on either side, and the Python half was written
+against the same mental model as the TypeScript half.
+
+**Three roles, two models, swapped by editing a string.** `PLANNER_MODEL` in
+`planner.ts`, `ASSISTANT_MODEL` in `engine.ts`, and the teacher's default in
+`teacher.py`. That is the whole reason the planner and the teacher ended up on
+*different* models: trying a 120B text model for compiling a sentence and a
+multimodal one for adjudicating frames cost a one-line change each, not two
+deployments of two serving stacks. Moving the teacher from text-only to
+`Nemotron-3.5-Super-VL` — which is what made the label-writing loop possible
+at all — was the same one line.
+
+**No serving stack for anything we did not have to host.** The only GPU this
+project provisions is the one running C-RADIO, and that machine stops itself
+when nothing is publishing. A 120B planner and a multimodal teacher needed no
+capacity planning, no cold-start engineering and no idle spend.
+
+**And the boundary, stated honestly, because finding it took a day.** Token
+Factory *cannot* host a custom model: its dedicated-endpoint API takes a
+`model_name` from a fixed catalogue, and custom weights is a gated beta
+limited to fine-tunes of text LLMs. A 98M vision encoder needing
+`trust_remote_code` is not reachable that way. That is exactly why the encoder
+goes to AI Cloud or a Serverless Endpoint and the reasoning models stay on
+Token Factory — the split below is a measured conclusion, not a preference.
+
 ### Nebius AI Cloud: where the encoder runs
 
 The encoder is the only part of this that can be moved. Everything else in
@@ -446,6 +491,12 @@ Then the perception service, in a second terminal:
 ```bash
 cd perception
 uv venv --python 3.12 && uv pip install -e ".[dev]"
+# No uv? The stdlib works the same: python -m venv .venv && pip install -e ".[dev]"
+
+# The demo frames are generated, not committed: shipping footage is how a
+# repository ends up carrying pictures of someone's bathroom. Same seed, same
+# frames, same scores. Without this, traces/demo does not exist.
+python make_demo_frames.py
 
 # No model, no download: watch the whole pipeline work in seconds
 python -m pact_perception.run --room gym --embed stub \
@@ -475,35 +526,44 @@ src/
   hub.ts            Hub DO: the live registry, derived from open sockets
   sfu.ts            Realtime SFU client
   log.ts            The structured logger. The only console.log in the Worker.
+  compute.ts        Where the encoder's machine should be, and why
   goals/
     engine.ts       Engine DO: the ledger, the frame relay, the alarm
     schema.ts       The SQL, in one place
     evaluate.ts     Goal rules. Pure: transitions in, verdict out.
+    sequence.ts     Order within a goal: a step that requires the step before
+    sweep.ts        Settlement, run off the alarm
     planner.ts      Nemotron tool-calling: a sentence → skills + a goal
+    assistant.ts    One turn of talking, with the ledger as its memory
+    ground.ts       Tavily: look the target up rather than invent it
     nebius.ts       Token Factory client. The max_tokens trap lives here.
     types.ts        Every row and wire shape
 
 public/
-  index.html        The wall      goals.html    Goals, instances, questions
-  join.html         The publisher
+  index.html        The wall      goals.html    The console: goals, questions
+  join.html         The publisher rig.html      Clips published as feeds
   js/
     sfu-client.js   publish() and subscribe(). The WebRTC core.
     frame-tap.js    The motion gate and the frame sampler, in the browser
-    wall.js  join.js  goals.js
+    join.js  console.js  rig.js
 
 perception/         Python. Own pyproject. See its README.
   make_demo_frames.py  Generates the synthetic recording the quickstart replays
   pact_perception/
     run.py          The loop. The only file that knows the order.
-    sources.py      folder | camera | relay, behind one interface
-    gate.py         L0 motion gate      embed.py   C-RADIO client
+    config.py       Every flag, and what it refuses
+    sources.py      folder | camera | relay | sfu, behind one interface
+    gate.py         L0 motion gate      embed.py   C-RADIO client, views
     skills.py       Dot products, softmax, calibration
     machine.py      The pure state machine. No I/O.
     teacher.py      Nemotron VL escalation
     probe.py        Logistic refit with before/after holdout
     store.py        Local SQLite: scores, embeddings, labels
     ledger.py       The Engine WebSocket
-  tests/            54 tests. The arithmetic, mutation-checked.
+    serve.py        The encoder behind HTTP, for a Serverless Endpoint
+    device.py       The cores we were given, not the ones that exist
+    sleep.py        Stop this machine when nothing is publishing
+  tests/            159 tests. The arithmetic, mutation-checked.
 
 bridge/             Node. RTSP/RTMP/MJPEG → the wall. Own README.
 m5stackchan/        ESP32 camera firmware.
